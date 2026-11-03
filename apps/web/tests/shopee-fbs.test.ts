@@ -10,11 +10,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import {
-  AVISO_CARGA_MANUAL,
   AVISO_COBERTURA,
   AVISO_DIVERGENCIA,
   AVISO_GMV_BRUTO,
   AVISO_HANDLING,
+  AVISO_REGIME_CARGA,
   CLASS_LABEL,
   HANDLING_COBERTURA_MINIMA,
   MAX_RANGE_DAYS,
@@ -79,7 +79,7 @@ function payload(over: Partial<ShopeeFbsResponse> = {}): ShopeeFbsResponse {
         refreshed_at: "2026-09-16T22:01:23Z", source_max_date: "2026-09-15",
         source_min_date: "2026-01-01", source_age_hours: 4.5,
         snapshot_age_hours: 0.6, closed_days_behind: 0,
-        load_mode: "manual_snapshot", no_automation: true,
+        load_mode: "scheduled_daily", no_automation: false,
       },
       warnings: [], limitations: ["limitacao a"],
       ...(over.meta ?? {}),
@@ -397,8 +397,12 @@ test("a divergencia com telas baseadas em is_sale e declarada", () => {
 });
 
 test("a tela NUNCA afirma tempo real ou atualizacao automatica", () => {
-  assert.match(AVISO_CARGA_MANUAL, /manual/i);
-  assert.match(AVISO_CARGA_MANUAL, /nao e tempo real/i);
+  // REGIME diario (step shopee_fbs_daily, 10:15 BRT), nunca "manual" nem a
+  // origem de cada lote.
+  assert.match(AVISO_REGIME_CARGA, /10:15/);
+  assert.match(AVISO_REGIME_CARGA, /diária/i);
+  assert.match(AVISO_REGIME_CARGA, /não é tempo real/i);
+  assert.doesNotMatch(AVISO_REGIME_CARGA, /manual|n(a|ã)o existe DAG/i);
   // Só o texto RENDERIZADO: os comentarios do fonte citam "tempo real"
   // justamente para proibi-lo, e procurar no arquivo cru reprovaria a
   // propria proibicao.
@@ -410,7 +414,10 @@ test("a tela NUNCA afirma tempo real ou atualizacao automatica", () => {
     "a tela nao pode dizer 'tempo real'");
   assert.ok(!/atualiza(ção|cao) autom/.test(semComentarios));
   assert.ok(!semComentarios.includes("ao vivo"));
-  assert.match(CLIENT, /carga manual/);
+  assert.match(CLIENT, /atualização diária/);
+  assert.match(CLIENT, /AVISO_REGIME_CARGA/);
+  assert.ok(!semComentarios.includes("carga manual"),
+    "a tela nao pode dizer 'carga manual'");
 });
 
 test("a cobertura parcial esta declarada e nega 'Shopee total'", () => {

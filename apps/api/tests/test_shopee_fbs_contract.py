@@ -515,8 +515,45 @@ def test_22b_frescor_expoe_os_tres_relogios():
                   "source_age_hours", "snapshot_age_hours",
                   "closed_days_behind", "load_mode", "no_automation"):
         assert campo in f
-    assert f["load_mode"] == "manual_snapshot"
-    assert f["no_automation"] is True
+    assert f["load_mode"] == "scheduled_daily"
+    assert f["no_automation"] is False
+
+
+def test_22d_regime_de_carga_e_diario_e_nao_afirma_origem():
+    """O step `shopee_fbs_daily` da `marketplace_tower_daily_chain` roda todo
+    dia as 10:15 BRT. O texto afirma o REGIME; nao pode dizer que a carga e'
+    manual, que nao ha DAG/agenda, nem de onde veio cada lote.
+    """
+    from app.schemas.shopee_fbs import Freshness, ShopeeFbsResponse
+
+    assert svc.LOAD_MODE == "scheduled_daily"
+    assert svc.NO_AUTOMATION is False
+
+    f = Freshness(freshness_status="fresh")
+    assert f.load_mode == "scheduled_daily"
+    assert f.no_automation is False
+    # Compatibilidade: o valor antigo continua aceito pelo contrato.
+    assert Freshness(freshness_status="fresh",
+                     load_mode="manual_snapshot").load_mode == "manual_snapshot"
+
+    texto = svc.LIMITACAO_REGIME_CARGA
+    assert "10:15" in texto
+    assert "D-1" in texto
+    # Sem alias com o nome antigo: "CARGA_MANUAL" carregando texto de regime
+    # enganaria quem le o codigo.
+    assert not hasattr(svc, "LIMITACAO_CARGA_MANUAL")
+
+    b = _bloco(FakeDB(classe=[_linha()]))
+    ShopeeFbsResponse.model_validate(b)  # o payload continua no contrato
+    meta = b["meta"]
+    assert texto in meta["warnings"]
+    assert texto in meta["limitations"]
+    for msg in meta["warnings"] + meta["limitations"]:
+        assert "manual" not in msg.lower(), msg
+        assert "DAG nem agenda" not in msg, msg
+        # Regime, nao origem: nenhum texto diz quem executou cada lote.
+        assert "lote" not in msg.lower(), msg
+        assert "executa" not in msg.lower(), msg
 
 
 def test_22c_tabela_vazia_e_never_loaded_nao_fresh():

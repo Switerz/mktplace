@@ -58,13 +58,21 @@ VALID_CLASSES = ("fbs", "seller")
 
 SCOPE_LABEL = "Shopee — cobertura API"
 
-#: A carga e' MANUAL e nao ha DAG. Constantes, e nao literais espalhados, para
-#: que o dia em que isso mudar tenha UM lugar para mudar.
-LOAD_MODE = "manual_snapshot"
-NO_AUTOMATION = True
+#: REGIME, nao origem: o step `shopee_fbs_daily` da DAG
+#: `marketplace_tower_daily_chain` roda `pipelines.sync_shopee_fbs_daily
+#: --mode incremental --apply` todo dia as 10:15 BRT e grava
+#: `marts.fact_shopee_fbs_daily`, a mesma tabela lida aqui. Isso prova que ha
+#: rotina diaria configurada; NAO prova que um lote especifico veio dela -- a
+#: origem de cada execucao nao e' registrada e a tabela tambem aceita execucao
+#: manual autorizada. Nao deduzir a origem pela idade nem pelo horario.
+#: Constantes, e nao literais espalhados, para que a mudanca de regime tenha UM
+#: lugar para mudar.
+LOAD_MODE = "scheduled_daily"
+NO_AUTOMATION = False
 
-#: Limiares de frescor. A carga e' MANUAL: 48h e' generoso de proposito, e
-#: ainda assim a limitacao viaja no payload.
+#: Limiares de frescor. 48h cobrem a rotina diaria com folga para um dia de
+#: falha da cadeia antes de marcar stale; a limitacao de regime viaja no
+#: payload de qualquer forma.
 MAX_SNAPSHOT_AGE_HOURS = 48.0
 MAX_SOURCE_AGE_HOURS = 48.0
 
@@ -79,9 +87,10 @@ LIMITACAO_COBERTURA = (
     "rituaria. Kokeshi NAO esta na API e nao e' suprida por planilha aqui -- "
     "este total e' 'Shopee (cobertura API)', nunca 'Shopee total'."
 )
-LIMITACAO_CARGA_MANUAL = (
-    "Carga MANUAL (load_mode=manual_snapshot). Nao existe DAG nem agenda: o "
-    "dado so' avanca quando alguem executa o sync."
+LIMITACAO_REGIME_CARGA = (
+    "Atualizacao diaria: a cadeia da Torre publica a fato as 10:15 (BRT), com "
+    "dias fechados ate' D-1. Se o ultimo dia publicado estiver atras de ontem, "
+    "a publicacao do dia ainda nao ocorreu."
 )
 LIMITACAO_ENTREGA = (
     "handling mede pagamento ate' COLETA (pay_time -> pickup_done_time). A API "
@@ -311,8 +320,8 @@ def _freshness(limites, agora: datetime, last_closed: date) -> dict:
             "source_age_hours": src_age, "snapshot_age_hours": snap_age,
             "closed_days_behind": behind,
             # Declarados AQUI, e nao deixados para o default do schema: o
-            # contrato e' do servico. Se um dia a carga deixar de ser manual,
-            # o lugar de mudar e' este, e nao um default esquecido no Pydantic.
+            # contrato e' do servico. Se o regime de carga mudar, o lugar de
+            # mudar e' este, e nao um default esquecido no Pydantic.
             "load_mode": LOAD_MODE, "no_automation": NO_AUTOMATION}
 
 
@@ -484,7 +493,7 @@ def get_shopee_fbs_block(
             f"conta(s) FORA da allowlist observada(s): {', '.join(unexpected)}. "
             "O contrato da fonte mudou; investigue antes de usar o total.")
     avisos.append(LIMITACAO_COBERTURA)
-    avisos.append(LIMITACAO_CARGA_MANUAL)
+    avisos.append(LIMITACAO_REGIME_CARGA)
 
     frescor = _freshness(limites, agora, last_closed_date)
     if frescor["freshness_status"] == "stale":
@@ -513,7 +522,7 @@ def get_shopee_fbs_block(
         "warnings": avisos,
         "limitations": [LIMITACAO_GMV_BRUTO, LIMITACAO_COBERTURA,
                         LIMITACAO_ENTREGA, LIMITACAO_D0, LIMITACAO_SERIE,
-                        LIMITACAO_CARGA_MANUAL],
+                        LIMITACAO_REGIME_CARGA],
     }
 
     return {"meta": meta, "totals": totals, "rates": rates, "shares": shares,

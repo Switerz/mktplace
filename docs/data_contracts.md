@@ -949,7 +949,16 @@ grava **dois rotulos por execucao** (`shopee_fbs_daily` e `..._full`, ids 316 e
 317, mesmo `started_at` e `finished_at`). Conta-los diria "duas cargas" onde
 houve uma.
 
-`load_mode = manual_snapshot` e `no_automation = true`.
+`load_mode = scheduled_daily` e `no_automation = false` (T-0041, 2026-11-03).
+O step `shopee_fbs_daily` da DAG `marketplace_tower_daily_chain` roda
+`pipelines.sync_shopee_fbs_daily --mode incremental --apply` todo dia as
+**10:15 BRT** e grava esta fato; a politica segue `closed_day` (dias fechados
+ate' D-1). Isso declara o REGIME configurado, nao a origem de cada lote: quem
+disparou cada execucao nao e' registrado, e a fato tambem aceita execucao
+manual autorizada. `manual_snapshot` continua aceito no `Literal` por
+compatibilidade. Os limiares de frescor (`MAX_SNAPSHOT_AGE_HOURS` e
+`MAX_SOURCE_AGE_HOURS` = **48 h**) nao mudaram: cobrem a rotina diaria com
+folga para um dia de falha da cadeia.
 
 ### Handling
 
