@@ -218,6 +218,28 @@ def test_endpoint_devolve_422_sem_ecoar_a_entrada(cliente, monkeypatch):
     assert "apice" in r.text
 
 
+def test_regime_de_carga_e_diario_e_nao_afirma_origem():
+    """Desde o airflow #2239 ha rotina diaria (10:15 BRT). O texto afirma o
+    REGIME; nao pode dizer que a carga e' manual nem que nao ha agendamento.
+    """
+    from app.schemas.shopee_fbs_stock import Frescor
+
+    assert svc.LOAD_MODE == "scheduled_daily"
+    assert svc.NO_AUTOMATION is False
+
+    f = Frescor(ref_date=REF)
+    assert f.load_mode == "scheduled_daily"
+    assert f.no_automation is False
+    # Compatibilidade: o valor antigo continua aceito pelo contrato.
+    assert Frescor(ref_date=REF, load_mode="manual_snapshot").load_mode == (
+        "manual_snapshot")
+
+    for texto in (svc.LIMITACAO_REGIME_CARGA, svc.LIMITACAO_CARGA_MANUAL):
+        assert "10:15" in texto
+        assert "manual" not in texto.lower()
+        assert "não existe agendamento" not in texto
+
+
 def test_lista_vazia_significa_sem_filtro():
     assert svc._validar_lista([], svc.EXPECTED_BRANDS, "brands") is None
     assert svc._validar_lista(["  "], svc.EXPECTED_BRANDS, "brands") is None
@@ -594,7 +616,8 @@ def test_frescor_mede_a_distancia_ate_hoje(engine, sessao):
     r = _bloco(sessao)
     assert r.frescor.ref_date == REF
     assert r.frescor.dias_desde_a_fotografia == 1
-    assert r.frescor.no_automation is True
+    assert r.frescor.load_mode == "scheduled_daily"
+    assert r.frescor.no_automation is False
     assert r.frescor.source_captured_at is not None
 
 
@@ -625,7 +648,9 @@ def test_limitacoes_viajam_no_payload(engine, sessao):
     r = _bloco(sessao)
     texto = " ".join(r.limitacoes)
     assert "Kokeshi" in texto
-    assert "MANUAL" in texto
+    assert "10:15" in texto
+    assert "manual" not in texto.lower()
+    assert "não existe agendamento" not in texto
     assert "Kits ficam FORA" in texto
     assert r.marcas_nao_cobertas == ["kokeshi"]
     assert r.limites.provisorio is True

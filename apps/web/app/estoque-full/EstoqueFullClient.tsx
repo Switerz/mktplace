@@ -30,7 +30,7 @@
  * NUMERO PRIMEIRO
  * ---------------
  * A ressalva que muda a leitura de uma coluna (cobertura calculada pela
- * Torre, reservado como contexto, carga manual) fica num "i" ao lado do
+ * Torre, reservado como contexto, regime de carga) fica num "i" ao lado do
  * rotulo, nunca em paragrafo.
  */
 
@@ -42,9 +42,9 @@ import PageHeader from "@/components/layout/PageHeader";
 import InfoDica from "@/components/ui/InfoDica";
 import { EstoqueFullError, fetchEstoqueFull } from "@/lib/api-client";
 import {
-  AVISO_CARGA_MANUAL,
   AVISO_CONTEXTO,
   AVISO_COBERTURA_TORRE,
+  AVISO_REGIME_CARGA,
   CLASSIFICACOES,
   CLASS_LABEL,
   CLASS_TOM,
@@ -495,7 +495,7 @@ export default function EstoqueFullClient() {
             <Aviso tom="alerta">
               <span className="inline-flex items-center gap-1.5">
                 Desatualizado · {frescorLabel(payload.frescor)}
-                <InfoDica texto={AVISO_CARGA_MANUAL} />
+                <InfoDica texto={AVISO_REGIME_CARGA} />
               </span>
             </Aviso>
           )}
