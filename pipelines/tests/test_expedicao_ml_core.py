@@ -860,6 +860,118 @@ def test_deadline_continua_indisponivel_apos_a_correcao():
     assert x["hours_overdue"] is None
 
 
+# ---------------------------------------------------------------------------
+# Prazo pelo SLA oficial do ML (EXPEDICAO-ML-PRAZO)
+# ---------------------------------------------------------------------------
+#: SLA lido ha' 30 min de AGORA (18:00Z), como o Postgres serializa.
+LIDO_AGORA = "2026-09-17T17:30:00.123456+00:00"
+
+
+def _com_sla(prazo, lido=LIDO_AGORA, **over):
+    return linha(sla_expected_date=prazo, sla_extracted_at=lido, **over)
+
+
+def test_sla_de_hoje_ainda_nao_vencido_e_vence_em_24h():
+    # 23:59 de Brasilia = 02:59Z do dia seguinte: ainda nao venceu.
+    x = transform.build_fila_ml(
+        [_com_sla("2026-09-17T23:59:59-03:00")], REGISTRY, AGORA, "lote-1")[0]
+    assert x["dispatch_deadline"] == datetime(2026, 9, 18, 2, 59, 59, tzinfo=timezone.utc)
+    assert x["deadline_source"] == "marketplace_native"
+    assert x["deadline_status"] == DeadlineStatus.DUE_WITHIN_24H.value
+    assert x["hours_overdue"] is None
+
+
+def test_sla_estourado_vira_vencido_com_horas_de_atraso():
+    # Coleta agendada as 14:00 de Brasilia = 17:00Z; AGORA e' 18:00Z.
+    x = transform.build_fila_ml(
+        [_com_sla("2026-09-17T14:00:00-03:00")], REGISTRY, AGORA, "lote-1")[0]
+    assert x["deadline_status"] == DeadlineStatus.OVERDUE.value
+    assert x["hours_overdue"] == pytest.approx(1.0)
+
+
+def test_sla_distante_fica_no_prazo():
+    x = transform.build_fila_ml(
+        [_com_sla("2026-09-19T23:59:59-03:00")], REGISTRY, AGORA, "lote-1")[0]
+    assert x["deadline_status"] == DeadlineStatus.ON_TIME.value
+
+
+def test_fuso_do_sla_e_o_declarado_nunca_o_inferido_da_fonte():
+    """-03:00 do SLA nao pode virar o -04:00 das colunas naive do ML."""
+    x = transform.build_fila_ml(
+        [_com_sla("2026-09-17T14:00:00-03:00")], REGISTRY, AGORA, "lote-1")[0]
+    assert x["dispatch_deadline"] == datetime(2026, 9, 17, 17, 0, tzinfo=timezone.utc)
+    assert x["dispatch_deadline"] != datetime(2026, 9, 17, 18, 0, tzinfo=timezone.utc)
+
+
+def test_sla_sem_leitura_registrada_nao_vale():
+    x = transform.build_fila_ml(
+        [_com_sla("2026-09-17T14:00:00-03:00", lido=None)], REGISTRY, AGORA, "lote-1")[0]
+    assert x["dispatch_deadline"] is None
+    assert x["deadline_status"] == DeadlineStatus.UNAVAILABLE.value
+
+
+def test_sla_lido_ha_mais_de_24h_nao_sustenta_vencido():
+    from pipelines.expedicao.contract import ML_SLA_MAX_AGE
+
+    limite = (AGORA - ML_SLA_MAX_AGE).isoformat()
+    velho = (AGORA - ML_SLA_MAX_AGE - timedelta(seconds=1)).isoformat()
+    no_limite = transform.build_fila_ml(
+        [_com_sla("2026-09-17T14:00:00-03:00", lido=limite)], REGISTRY, AGORA, "l")[0]
+    passou = transform.build_fila_ml(
+        [_com_sla("2026-09-17T14:00:00-03:00", lido=velho)], REGISTRY, AGORA, "l")[0]
+    assert no_limite["deadline_status"] == DeadlineStatus.OVERDUE.value
+    assert passou["deadline_status"] == DeadlineStatus.UNAVAILABLE.value
+    assert passou["hours_overdue"] is None
+
+
+def test_sla_naive_falha_fechado():
+    """Coluna criada sem fuso: publicar seria ler o prazo num fuso suposto."""
+    with pytest.raises(ValueError) as erro:
+        transform.build_fila_ml(
+            [_com_sla("2026-09-17T14:00:00")], REGISTRY, AGORA, "lote-1")
+    assert "sem fuso explicito" in str(erro.value)
+    with pytest.raises(ValueError):
+        transform.build_fila_ml(
+            [_com_sla("2026-09-17T14:00:00-03:00", lido="2026-09-17 17:30:00")],
+            REGISTRY, AGORA, "lote-1")
+
+
+@pytest.mark.parametrize("texto, esperado", [
+    ("2026-09-17T17:00:00+00:00", datetime(2026, 9, 17, 17, 0, tzinfo=timezone.utc)),
+    ("2026-09-17T17:00:00.12+00:00",
+     datetime(2026, 9, 17, 17, 0, 0, 120000, tzinfo=timezone.utc)),
+    ("2026-09-17 14:00:00-03", datetime(2026, 9, 17, 17, 0, tzinfo=timezone.utc)),
+    ("2026-09-17T14:00:00-0300", datetime(2026, 9, 17, 17, 0, tzinfo=timezone.utc)),
+])
+def test_texto_iso_com_fuso_em_todas_as_grafias_do_postgres(texto, esperado):
+    assert transform.instante_iso_com_fuso(texto, "c") == esperado
+
+
+def test_sql_le_o_sla_sem_depender_da_coluna_existir():
+    """`to_jsonb(s) ->> ...` devolve NULL antes de o Airflow criar a coluna."""
+    sql = ml_extract.ML_BACKLOG_SQL
+    assert "to_jsonb(s) ->> 'sla_expected_date' AS sla_expected_date" in sql
+    assert "to_jsonb(s) ->> 'sla_extracted_at'  AS sla_extracted_at" in sql
+    assert "s.sla_" not in sql
+
+
+def test_diagnostico_conta_vencidos_e_sem_prazo_pelo_sla():
+    from pipelines.expedicao import cli
+
+    conn = FakeConn(_fonte(
+        [
+            _com_sla("2026-09-17T14:00:00-03:00", shipment_id=1),
+            _com_sla("2026-09-17T23:59:59-03:00", shipment_id=2),
+            linha(shipment_id=3),
+        ],
+        [_wm(2227056661, "kokeshi", datetime(2026, 9, 17, 13, 30))],
+    ))
+    r = cli.diagnose_ml(conn, AGORA)
+    b = r["por_conta"]["2227056661"]
+    assert (b["aguardando"], b["vencidos"], b["sem_prazo"]) == (3, 1, 1)
+    assert "vencid" in cli.format_diagnose_ml(r)
+
+
 def test_shopee_nao_muda_com_a_correcao():
     """A Shopee e timestamptz: nada aqui toca o caminho dela."""
     import inspect
@@ -980,18 +1092,31 @@ def test_a_convencao_cobre_todas_as_colunas_temporais_do_select():
     from pipelines.expedicao.contract import (
         ML_BUSINESS_TIMESTAMPS,
         ML_INGESTION_TIMESTAMPS,
+        ML_ZONED_TIMESTAMPS,
     )
 
     temporais = {
         c for c in ml_extract.ML_SELECT_COLUMNS
-        if c.startswith("date_") or c.endswith("_at")
+        if c.startswith("date_") or c.endswith("_at") or c.startswith("sla_")
     }
-    declaradas = ML_INGESTION_TIMESTAMPS | ML_BUSINESS_TIMESTAMPS
+    declaradas = ML_INGESTION_TIMESTAMPS | ML_BUSINESS_TIMESTAMPS | ML_ZONED_TIMESTAMPS
     # `date_shipped` e `date_cancelled` sao predicados do SQL, nunca
     # normalizados nem publicados: a fila so contem shipment com os dois nulos.
     predicados = {"date_shipped", "date_cancelled"}
     assert temporais - declaradas - predicados == set()
     assert ML_INGESTION_TIMESTAMPS.isdisjoint(ML_BUSINESS_TIMESTAMPS)
+    assert ML_ZONED_TIMESTAMPS.isdisjoint(ML_INGESTION_TIMESTAMPS | ML_BUSINESS_TIMESTAMPS)
+
+
+def test_colunas_do_sla_nunca_passam_pelos_normalizadores_naive():
+    """O SLA ja' tem fuso: aplicar a convencao naive (UTC ou -04:00) nele
+    deslocaria o prazo de 3 a 4 h — justo a largura que decide um vencido."""
+    from pipelines.expedicao.contract import ML_ZONED_TIMESTAMPS
+
+    for arquivo in ("transform.py", "ml_extract.py", "cli.py"):
+        caminho = RAIZ / "pipelines" / "expedicao" / arquivo
+        for funcao, coluna in _chamadas_de_normalizacao(caminho):
+            assert coluna not in ML_ZONED_TIMESTAMPS, f"{arquivo}: {coluna} via {funcao}"
 
 
 def test_offset_de_negocio_nao_se_aplica_a_ingestao():

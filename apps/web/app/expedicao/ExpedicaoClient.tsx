@@ -69,13 +69,12 @@ import { comMarcaNaQuery, type Visao } from "@/lib/expedicao-ux";
 import { brandLabel } from "@/lib/filters/brands";
 
 import {
-  DEFINICAO_FILA,
   EXPLICACAO_FONTE,
-  EXPLICACAO_LIMIAR_48H,
-  EXPLICACAO_LIMIAR_48H_SEM_PRAZO,
   FILTROS_PADRAO,
-  SEM_LDR_SHOPEE,
   SEM_PRAZO_CANAL_ML,
+  definicaoDaFila,
+  dicaDaSecaoPrazo,
+  explicacaoLimiar48h,
   envelhecimentoDaFila,
   faixasDePrazo,
   montarRiscoAtual,
@@ -202,13 +201,25 @@ const MEDIDA_DA_LISTA: Record<TipoLista, keyof Totais> = {
   acima_48h: "over_48h_count",
 };
 
-/** O "ⓘ" de cada faixa da barra de prazo (so' a Shopee tem a barra). */
-const AJUDA_DA_FAIXA: Record<FaixaPrazo["chave"], ChaveMetrica> = {
-  overdue: "shopee.overdue",
-  due_soon: "shopee.due_soon",
-  due24h: "shopee.due24h",
-  on_time: "shopee.no_prazo",
-  sem_prazo: "shopee.sem_prazo",
+/**
+ * O "ⓘ" de cada faixa da barra de prazo, POR CANAL: a Shopee sempre tem a
+ * barra; o Mercado Livre, quando a fotografia traz o SLA (EXPEDICAO-ML-PRAZO).
+ */
+const AJUDA_DA_FAIXA: Record<Canal, Record<FaixaPrazo["chave"], ChaveMetrica>> = {
+  shopee: {
+    overdue: "shopee.overdue",
+    due_soon: "shopee.due_soon",
+    due24h: "shopee.due24h",
+    on_time: "shopee.no_prazo",
+    sem_prazo: "shopee.sem_prazo",
+  },
+  mercadolivre: {
+    overdue: "mercadolivre.overdue",
+    due_soon: "mercadolivre.due_soon",
+    due24h: "mercadolivre.due24h",
+    on_time: "mercadolivre.no_prazo",
+    sem_prazo: "mercadolivre.sem_prazo",
+  },
 };
 
 /**
@@ -607,7 +618,10 @@ export default function ExpedicaoClient({
   // Recorte por marca, por SELECAO das linhas que a API ja' publica.
   const recorte = recortarPorMarca(dados, marcaAtiva);
   // EXPEDICAO-VENCE-AMANHA: o rotulo do proximo dia de prazo vem da fotografia.
-  const fotografiaDoPrazo = dados?.snapshot ?? null;
+  // EXPEDICAO-ML-PRAZO: e' tambem ela que diz se ha' prazo (`deadline_published`).
+  // So' a fotografia do MESMO canal: na troca Shopee -> ML, a resposta antiga
+  // da Shopee diria "tem prazo" para o ML ate' a nova chegar.
+  const fotografiaDoPrazo = dados && dados.channel === filtros.channel ? dados.snapshot : null;
   const principais = montarKpisPrincipais(recorte.totais, recorte.frescor, filtros.channel, fotografiaDoPrazo);
   const secundarios = montarKpisSecundarios(recorte.totais, recorte.frescor, filtros.channel, fotografiaDoPrazo);
   // FBS fora do risco do vendedor. Com a divisao publicada, o "Risco atual" da
@@ -634,7 +648,7 @@ export default function ExpedicaoClient({
   const avisos = avisosDeCobertura(dados?.coverage ?? null);
   // A qualidade do dado e' do CANAL: a barra nao some quando se filtra marca.
   const qualidade = montarBarraDeQualidade(relogios, avisos, montarFrescor(dados?.freshness ?? []));
-  const mapa = montarMapaDeRisco(recorte.contas, filtros.channel);
+  const mapa = montarMapaDeRisco(recorte.contas, filtros.channel, fotografiaDoPrazo);
   const marcasPresentes = [...new Set((dados?.accounts ?? []).map((a) => a.brand))];
   const faixasPrazo = faixasDePrazo(totaisRisco);
   const envelhecimento = envelhecimentoDaFila(recorte.totais, recorte.frescor);
@@ -650,10 +664,10 @@ export default function ExpedicaoClient({
   // UMA condicao para o grafico, a tabela e o botao "Ver dados": se o bloco
   // nao e' renderizado, o controle que o revela nao pode existir.
   const temSerieNaTendencia = estadoTend === "ok" || estadoTend === "parcial";
-  const timeline = montarTimeline(dados?.queue ?? [], filtros.channel);
+  const timeline = montarTimeline(dados?.queue ?? [], filtros.channel, undefined, fotografiaDoPrazo);
   const mostrarRef = mostrarColunaReferencia(dados?.queue ?? []);
   const pag = paginaAtual(dados?.pagination ?? null);
-  const temPrazo = canalTemPrazo(filtros.channel);
+  const temPrazo = canalTemPrazo(filtros.channel, fotografiaDoPrazo);
 
   // QA T-0010 (M4): fila zerada nao esconde a pagina — como o TikTok com
   // base 0, o corpo aparece (zeros medidos, jornada, evolucao) sob o aviso.
@@ -684,7 +698,7 @@ export default function ExpedicaoClient({
   // enquanto a resposta nova nao chega, eles nao descrevem a fotografia antiga.
   const fotografia =
     dados && dados.channel === filtros.channel ? fotografiaDaFila(relogios) : null;
-  const atencao = montarAtencaoDaFila(totaisRisco, contasRisco, filtros.channel);
+  const atencao = montarAtencaoDaFila(totaisRisco, contasRisco, filtros.channel, fotografiaDoPrazo);
   // "Agora" e' o instante da fotografia. Com ela velha, a secao diz isso em
   // vez de deixar o gestor agir sobre o passado sem saber. Com a divisao, a
   // fotografia do risco e' a da divisao (outra leitura, outro instante).
@@ -714,7 +728,7 @@ export default function ExpedicaoClient({
     .filter((k) => k.chave !== chaveDestaque && k.chave !== "backlog" && k.chave !== "marcas_alerta")
     .map(curto);
   // "Onde agir": so' a marca que concentra — os numeros ja' estao no destaque.
-  const ondeAgir = ondeAgirNaFila(totaisRisco, contasRisco, filtros.channel);
+  const ondeAgir = ondeAgirNaFila(totaisRisco, contasRisco, filtros.channel, fotografiaDoPrazo);
 
   /**
    * Barra de situacao de prazo, so' no painel "Prazo" (sem o destaque).
@@ -744,7 +758,7 @@ export default function ExpedicaoClient({
               <span aria-hidden="true" className={`inline-block h-2.5 w-2.5 shrink-0 rounded-sm ${COR_SEGMENTO[f.chave]}`} />
               <span className="text-xs text-ink-muted">{f.rotulo}</span>
               {/* EXPEDICAO-VENCE-AMANHA: o que cada faixa trata, no hover. */}
-              <Ajuda chave={AJUDA_DA_FAIXA[f.chave]} />
+              <Ajuda chave={AJUDA_DA_FAIXA[filtros.channel][f.chave]} />
               <span className="ml-auto text-sm font-semibold tabular-nums text-ink">{numero(f.valor)}</span>
             </li>
           ))}
@@ -874,7 +888,7 @@ export default function ExpedicaoClient({
           return rotulo ? (
             <ItemLegenda key={chave} cor={COR_SEGMENTO[chave]}>
               {rotulo}
-              <Ajuda chave={AJUDA_DA_FAIXA[chave]} />
+              <Ajuda chave={AJUDA_DA_FAIXA[filtros.channel][chave]} />
             </ItemLegenda>
           ) : null;
         })
@@ -991,17 +1005,20 @@ export default function ExpedicaoClient({
     </SecaoGerencial>
   );
 
-  // "Prazo": a Shopee publica `ship_by_date`; o Mercado Livre, nao.
+  // "Prazo": a Shopee publica `ship_by_date`; o Mercado Livre, o SLA do envio
+  // quando a fotografia o traz (EXPEDICAO-ML-PRAZO). Sem SLA, o bloco de baixo.
   // EXPEDICAO-TRAVADOS-1: sem LDR e com a barra ja' no destaque, a secao
   // "Prazo" so' teria um paragrafo dizendo o que falta — sai da tela.
-  const secaoPrazo = temPrazo && !LDR_SHOPEE_LIGADA && destaque && temBarraDePrazo ? null : temPrazo ? (
+  // A LDR operacional existe so' na Shopee.
+  const ldrNaSecao = LDR_SHOPEE_LIGADA && filtros.channel === "shopee";
+  const secaoPrazo = temPrazo && !ldrNaSecao && destaque && temBarraDePrazo ? null : temPrazo ? (
     // Sem LDR, o que falta medir vira o "ⓘ" do titulo.
-    <SecaoGerencial titulo="Prazo" dica={LDR_SHOPEE_LIGADA ? undefined : SEM_LDR_SHOPEE}>
+    <SecaoGerencial titulo="Prazo" dica={ldrNaSecao ? undefined : dicaDaSecaoPrazo(filtros.channel)}>
       {/* UI-EXPEDICAO-1: com o destaque, a barra de prazo ja' esta' no topo. */}
       {destaque && temBarraDePrazo ? null : (
         <Panel
           titulo={divisao ? "Fila do vendedor por situação de prazo" : "Pedidos em fila por situação de prazo"}
-          acao={<Ajuda chave="shopee.prazo_situacao" />}
+          acao={<Ajuda chave={`${filtros.channel}.prazo_situacao`} />}
         >
           {barraDePrazo() ?? (
             <p className="text-sm text-ink-muted">
@@ -1012,7 +1029,7 @@ export default function ExpedicaoClient({
           )}
         </Panel>
       )}
-      {LDR_SHOPEE_LIGADA ? <LdrShopeePanel ldr={ldr} marca={marcaAtiva} /> : null}
+      {ldrNaSecao ? <LdrShopeePanel ldr={ldr} marca={marcaAtiva} /> : null}
     </SecaoGerencial>
   ) : (
     <SecaoGerencial titulo="Prazo" dica={SEM_PRAZO_CANAL_ML}>
@@ -1316,7 +1333,7 @@ export default function ExpedicaoClient({
     <Panel
       titulo="Fila operacional"
       semPadding
-      acao={<InfoDica texto={temPrazo ? EXPLICACAO_LIMIAR_48H : EXPLICACAO_LIMIAR_48H_SEM_PRAZO} />}
+      acao={<InfoDica texto={explicacaoLimiar48h(filtros.channel, temPrazo)} />}
     >
       <div className="flex flex-wrap items-center gap-1.5 border-b border-line px-4 py-2">
         {SITUACOES.map((s) => (
@@ -1522,7 +1539,7 @@ export default function ExpedicaoClient({
           fotografia={fotografia}
           visao={visao}
           aoTrocarVisao={aoTrocarVisao}
-          definicao={DEFINICAO_FILA[filtros.channel]}
+          definicao={definicaoDaFila(filtros.channel, fotografiaDoPrazo)}
           controles={visao === "gestor" ? controlePeriodo : undefined}
           filtroMarca={
             aoTrocarMarca ? (

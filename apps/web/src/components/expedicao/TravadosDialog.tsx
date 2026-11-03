@@ -157,8 +157,12 @@ export default function TravadosDialog({
   // Numero real (ou `order_ref`); com a chave desligada na API todos vem
   // nulos, e uma coluna inteira de "—" nao diz nada, entao ela sai.
   const temCodigo = estado.tipo === "ok" && estado.linhas.some((l) => numeroDoPedido(l) !== null);
-  // Sem prazo publicado (Mercado Livre) a coluna seria "Sem prazo" em todas.
-  const temPrazo = canalTemPrazo(canal);
+  // Sem prazo publicado a coluna seria "Sem prazo" em todas. No Mercado Livre
+  // o prazo e' o SLA oficial, que so' existe em parte dos lotes
+  // (EXPEDICAO-ML-PRAZO): a coluna aparece quando alguma linha o traz.
+  const temPrazo =
+    canalTemPrazo(canal) ||
+    (estado.tipo === "ok" && estado.linhas.some((l) => l.dispatch_deadline != null));
   // Etapa (T-0015): so' com a migration 033 aplicada e o publicador novo.
   const temEtapa = estado.tipo === "ok" && temEtapaPublicada(estado.linhas);
   const porEtapa = estado.tipo === "ok" && temEtapa ? travadosPorEtapa(estado.linhas) : [];

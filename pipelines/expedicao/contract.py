@@ -523,6 +523,12 @@ ML_BUSINESS_TIMESTAMPS = frozenset(
     {"date_created", "date_ready_to_ship", "order_created_at"}
 )
 
+#: CARIMBO COM FUSO DECLARADO (EXPEDICAO-ML-PRAZO): as colunas do SLA sao
+#: `timestamptz` na fonte e viajam como texto ISO 8601 COM offset. Nenhum
+#: offset e' aplicado nem inferido; o unico conversor e'
+#: `transform.instante_iso_com_fuso`, que recusa texto sem fuso.
+ML_ZONED_TIMESTAMPS = frozenset({"sla_expected_date", "sla_extracted_at"})
+
 #: Offset dos carimbos de NEGOCIO. O nome diz a que se aplica de proposito: o
 #: antigo `ML_SOURCE_UTC_OFFSET` sugeria "toda a fonte" e foi exatamente assim
 #: que `extracted_at` acabou convertido junto.
@@ -547,8 +553,37 @@ ML_ALLOWED_SOURCE_COLUMNS = frozenset(
         "date_cancelled",
         "tracking_method",
         "extracted_at",
+        # Prazo de despacho do SLA do Mercado Livre (EXPEDICAO-ML-PRAZO).
+        # Viajam como TEXTO ISO 8601 com fuso: ver `ML_BACKLOG_SQL`.
+        "sla_expected_date",
+        "sla_extracted_at",
     }
 )
+
+#: PRAZO DE DESPACHO DO MERCADO LIVRE (EXPEDICAO-ML-PRAZO, 03/11/2026).
+#:
+#: A unica fonte oficial e' `GET /shipments/{id}/sla`: `expected_date` e' a
+#: "data e hora limite para despachar o produto" (no Mercado Coleta, o horario
+#: da coleta agendada). O antigo `shipping_option.estimated_handling_limit` foi
+#: descontinuado pelo ML em 13/05/2025 — por isso as colunas candidatas estavam
+#: 0% preenchidas no EXP-3A.
+#:
+#: O extrator do Airflow (goca-se/airflow, task `refresh_open_shipments` do
+#: `ml_orders_etl`) grava o SLA em `raw.ml_shipments`:
+#:   - `sla_expected_date timestamptz` — o prazo, COM o fuso que o ML manda;
+#:   - `sla_extracted_at  timestamptz` — quando o SLA foi buscado.
+#: Diferente das colunas antigas da fonte, que sao naive (ver a convencao por
+#: coluna abaixo), estas sao `timestamptz`: nada de offset inferido aqui.
+#:
+#: Prazo NUNCA e' derivado de outra coluna. Sem SLA (coluna ainda inexistente,
+#: ML sem dado, `insuficient_info`, leitura velha), o envio sai `unavailable`,
+#: exatamente como antes.
+#:
+#: Idade maxima da LEITURA do SLA para ele valer. O ML pode mudar o horario
+#: ate' a vespera do despacho e o extrator rebusca o SLA a cada hora; um SLA
+#: lido ha' mais de 24 h indica que o extrator parou de reler o envio, e um
+#: "vencido" sobre ele seria palpite. Sai `unavailable`, nao some da fila.
+ML_SLA_MAX_AGE = timedelta(hours=24)
 
 
 # ---------------------------------------------------------------------------

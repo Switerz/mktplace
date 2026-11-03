@@ -188,9 +188,84 @@ def test_ml_declara_que_nao_ha_prazo(ml_ligado):
     r = svc.get_expedicao(sessao_ml(), channel="mercadolivre")
     assert r["totals"]["deadline_unavailable_count"] == r["totals"]["backlog_count"]
     assert r["totals"]["overdue_count"] == 0
+    # Fotografia sem SLA: a tela recebe "nao ha prazo" explicito.
+    assert r["snapshot"]["deadline_published"] is False
     junto = " ".join(r["limitations"]["notes"])
-    assert "nao publica prazo de despacho" in junto
+    assert "SLA oficial de despacho" in junto
+    assert "a ausencia nao indica atraso" in junto
     assert "SHIPMENT" in junto
+
+
+# ---------------------------------------------------------------------------
+# EXPEDICAO-ML-PRAZO: o SLA oficial liga o prazo do ML pela FOTOGRAFIA
+# ---------------------------------------------------------------------------
+def _resumos_ml_com_sla(vencidos=3, sem_sla=10):
+    """Kokeshi com SLA em parte do backlog; as outras contas ainda sem SLA."""
+    out = []
+    for sa, b, n in CONTAS_ML:
+        if b == "kokeshi":
+            out.append(resumo_ml(sa, b, n, overdue_count=vencidos,
+                                 due_within_24h_count=5,
+                                 on_time_count=n - vencidos - 5 - sem_sla,
+                                 deadline_unavailable_count=sem_sla))
+        else:
+            out.append(resumo_ml(sa, b, n))
+    return out
+
+
+def test_prazo_publicado_decide_pela_fotografia():
+    ml, shopee = svc.CANAIS["mercadolivre"], svc.CANAIS["shopee"]
+    assert svc.prazo_publicado(shopee, []) is True
+    assert svc.prazo_publicado(ml, []) is False
+    assert svc.prazo_publicado(ml, [resumo_ml("1", "x", 7)]) is False
+    assert svc.prazo_publicado(ml, [resumo_ml("1", "x", 0)]) is False
+    assert svc.prazo_publicado(
+        ml, [resumo_ml("1", "x", 7), resumo_ml("2", "y", 7, deadline_unavailable_count=6)]
+    ) is True
+
+
+def test_ml_com_sla_publica_vencidos_e_perto_de_vencer(ml_ligado):
+    hoje = date(2026, 9, 16)  # dia de Brasilia do `AGORA` dos testes
+    s = sessao_ml(
+        resumos=_resumos_ml_com_sla(vencidos=3),
+        proximo=[{"dia": hoje, "shop_account": "2227056661", "vencem": 4},
+                 {"dia": hoje + timedelta(days=1), "shop_account": "2227056661",
+                  "vencem": 6}],
+    )
+    r = svc.get_expedicao(s, channel="mercadolivre")
+    assert r["snapshot"]["deadline_published"] is True
+    assert r["totals"]["overdue_count"] == 3
+    assert (r["totals"]["due_today_count"], r["totals"]["due_next_day_count"],
+            r["totals"]["due_soon_count"]) == (4, 6, 10)
+    assert r["snapshot"]["next_due_date"] == hoje + timedelta(days=1)
+    kokeshi = next(c for c in r["accounts"] if c["brand"] == "kokeshi")
+    assert kokeshi["due_soon_count"] == 10
+    # Conta ainda sem SLA: zero do perto de vencer, nao nulo — o lote tem prazo.
+    rituaria = next(c for c in r["accounts"] if c["brand"] == "rituaria")
+    assert rituaria["due_soon_count"] == 0
+    assert any("AS vencem" in q for q, _ in s.consultas)
+
+
+def test_jornada_do_ml_troca_o_motivo_da_coorte_quando_ha_prazo():
+    sem = {"sobreposicoes": [{"key": "vencido", "count": None, "reason": "x"},
+                             {"key": "vence_24h", "count": None, "reason": "x"},
+                             {"key": "sem_prazo", "count": 10}]}
+    com = {"sobreposicoes": [{"key": "vencido", "count": 3},
+                             {"key": "vence_24h", "count": 0},
+                             {"key": "sem_prazo", "count": 7}]}
+    assert svc._limitacao_coorte_ml(None) == svc.LIMITACAO_ML_SEM_PRAZO
+    assert svc._limitacao_coorte_ml(sem) == svc.LIMITACAO_ML_SEM_PRAZO
+    assert svc._limitacao_coorte_ml(com) == svc.LIMITACAO_ML_SEM_COORTE
+
+
+def test_ml_com_sla_filtra_a_lista_perto_de_vencer_de_verdade(ml_ligado):
+    s = sessao_ml(resumos=_resumos_ml_com_sla(),
+                  proximo=[{"dia": date(2026, 9, 16), "shop_account": "2227056661",
+                            "vencem": 2}])
+    svc.get_expedicao(s, channel="mercadolivre", situacoes=["due_soon"])
+    sql = next(q for q, _ in s.consultas if "LIMIT :limit OFFSET :offset" in q)
+    assert ":limite_perto" in sql
+    assert "dispatch_deadline IS NOT NULL" in sql
 
 
 def test_ml_nao_tem_proximo_vencimento_nem_consulta(ml_ligado):
@@ -222,6 +297,8 @@ def test_ml_com_due_soon_devolve_lista_vazia(ml_ligado):
 
 
 def test_so_a_shopee_declara_que_publica_prazo():
+    """Em TODA fotografia, so' a Shopee. O ML decide por lote
+    (`prazo_publicado`), nunca por esta constante."""
     assert svc.CANAIS["shopee"].publica_prazo is True
     assert svc.CANAIS["mercadolivre"].publica_prazo is False
 

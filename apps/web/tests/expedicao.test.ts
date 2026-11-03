@@ -261,7 +261,7 @@ test("48h e descrito como limiar INTERNO, nunca como SLA do marketplace", () => 
   const kpi = montarKpis(TOTAIS, []).find((k) => k.chave === "over48h");
   assert.match(String(kpi?.nota), /não é SLA/i);
   const tela = fonte("app/expedicao/ExpedicaoClient.tsx");
-  assert.ok(tela.includes("EXPLICACAO_LIMIAR_48H"), "a tela precisa exibir a ressalva");
+  assert.ok(tela.includes("explicacaoLimiar48h("), "a tela precisa exibir a ressalva");
   assert.ok(!/SLA da Shopee|SLA oficial|garantia de prazo/i.test(tela));
 });
 

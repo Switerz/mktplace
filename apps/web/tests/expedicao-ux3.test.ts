@@ -16,9 +16,14 @@ import { join } from "node:path";
 
 import {
   DEFINICAO_FILA,
+  EXPLICACAO_LIMIAR_48H,
+  EXPLICACAO_LIMIAR_48H_SEM_PRAZO,
   KPIS_RISCO_ATUAL,
   SEM_LDR_SHOPEE,
   SEM_PRAZO_CANAL_ML,
+  definicaoDaFila,
+  dicaDaSecaoPrazo,
+  explicacaoLimiar48h,
   envelhecimentoDaFila,
   faixasDePrazo,
   montarAtencaoDaFila,
@@ -179,7 +184,11 @@ test("a nota de 48 h do Mercado Livre nao fala de vencidos nem da Shopee", () =>
   // Vencidos / Vence em 24h, que vem do ship_by_date da Shopee".
   const ml = montarRiscoAtual(totais(), [], "mercadolivre").find((x) => x.chave === "over48h")!;
   assert.doesNotMatch(String(ml.nota), /Shopee|ship_by_date|Vencidos|Vence em 24h/);
-  assert.match(CLIENTE, /temPrazo \? EXPLICACAO_LIMIAR_48H : EXPLICACAO_LIMIAR_48H_SEM_PRAZO/);
+  assert.match(CLIENTE, /explicacaoLimiar48h\(filtros\.channel, temPrazo\)/);
+  assert.equal(explicacaoLimiar48h("mercadolivre", false), EXPLICACAO_LIMIAR_48H_SEM_PRAZO);
+  assert.equal(explicacaoLimiar48h("shopee", true), EXPLICACAO_LIMIAR_48H);
+  // EXPEDICAO-ML-PRAZO: com SLA, a nota do ML cita o prazo DELE, nunca a Shopee.
+  assert.doesNotMatch(explicacaoLimiar48h("mercadolivre", true), /Shopee|ship_by_date/);
 });
 
 test("a frase de atencao nomeia a marca, nao o seller_id", () => {
@@ -208,7 +217,8 @@ test("Shopee: particao do backlog por situacao de prazo, que fecha o total", () 
 test("Shopee: a secao diz que NAO ha LDR e por que", () => {
   assert.match(SEM_LDR_SHOPEE, /LDR/);
   assert.match(SEM_LDR_SHOPEE, /só os\s+pedidos em aberto/);
-  assert.match(CLIENTE, /dica=\{LDR_SHOPEE_LIGADA \? undefined : SEM_LDR_SHOPEE\}/);
+  assert.match(CLIENTE, /dica=\{ldrNaSecao \? undefined : dicaDaSecaoPrazo\(filtros\.channel\)\}/);
+  assert.equal(dicaDaSecaoPrazo("shopee"), SEM_LDR_SHOPEE);
 });
 
 test("Mercado Livre: prazo indisponivel pelo canal e envelhecimento da fila", () => {
@@ -237,7 +247,11 @@ test("os tres canais tem uma definicao curta da medicao", () => {
   assert.match(DEFINICAO_FILA.shopee, /ship_by_date/);
   assert.match(DEFINICAO_FILA.mercadolivre, /não publica prazo/);
   assert.match(DEFINICAO_TIKTOK, /coleta e despacho/);
-  assert.match(CLIENTE, /definicao=\{DEFINICAO_FILA\[filtros\.channel\]\}/);
+  assert.match(CLIENTE, /definicao=\{definicaoDaFila\(filtros\.channel, fotografiaDoPrazo\)\}/);
+  // Sem SLA na fotografia, a frase de sempre; com SLA, a do prazo do ML.
+  assert.equal(definicaoDaFila("mercadolivre", null), DEFINICAO_FILA.mercadolivre);
+  assert.equal(definicaoDaFila("shopee", null), DEFINICAO_FILA.shopee);
+  assert.match(definicaoDaFila("mercadolivre", { deadline_published: true }), /SLA oficial do Mercado Livre/);
   assert.match(TIKTOK, /definicao=\{DEFINICAO_TIKTOK\}/);
 });
 
@@ -376,10 +390,17 @@ test("LDR Shopee: indicador interno, nao o Account Health oficial", () => {
 });
 
 test("Mercado Livre: o `?` diz que nao ha SLA/LDR e nao inventa numero", () => {
-  for (const c of ["mercadolivre.overdue", "mercadolivre.due24h", AJUDA_CANAL_SEM_PRAZO.prazo] as const) {
+  // Sem SLA na fotografia: a secao Prazo diz que nao ha o que medir.
+  const sem = DEFINICOES[AJUDA_CANAL_SEM_PRAZO.prazo];
+  assert.match(sem.limitacoes, /não publica prazo de despacho/);
+  assert.match(sem.limitacoes, /SLA nem LDR/);
+  // EXPEDICAO-ML-PRAZO: os cartoes de prazo do ML contam sobre o SLA oficial
+  // e dizem de onde ele vem; nenhum cita a Shopee nem inventa numero.
+  for (const c of ["mercadolivre.overdue", "mercadolivre.due24h", "mercadolivre.due_soon"] as const) {
     const d = DEFINICOES[c];
-    assert.match(d.limitacoes, /não publica prazo de despacho/);
-    assert.match(d.limitacoes, /SLA nem LDR/);
+    assert.match(d.limitacoes, /SLA de despacho do envio/, c);
+    assert.match(d.limitacoes, /indisponível/, c);
+    assert.doesNotMatch(`${d.definicao} ${d.formula}`, /Shopee|ship_by_date/, c);
     assert.doesNotMatch(`${d.definicao} ${d.formula}`, /\d+\s*%/, "nenhum numero inventado");
   }
   assert.match(DEFINICOES["mercadolivre.over48h"].limitacoes, /não é SLA/);
@@ -483,9 +504,12 @@ test("origem: classificacao pelos fatos do codigo", () => {
     assert.equal(DEFINICOES[`mercadolivre.${k}` as keyof typeof DEFINICOES].origem, "torre", `mercadolivre.${k}`);
   }
   assert.equal(DEFINICOES["shopee.overdue"].origem, "torre");
-  for (const c of ["mercadolivre.overdue", "mercadolivre.due24h", "mercadolivre.prazo"] as const) {
-    assert.equal(DEFINICOES[c].origem, "indisponivel", c);
+  // EXPEDICAO-ML-PRAZO: o prazo e' o SLA do ML; a contagem e' da Torre. So'
+  // a secao "sem prazo" continua indisponivel.
+  for (const c of ["mercadolivre.overdue", "mercadolivre.due24h", "mercadolivre.due_soon"] as const) {
+    assert.equal(DEFINICOES[c].origem, "torre", c);
   }
+  assert.equal(DEFINICOES["mercadolivre.prazo"].origem, "indisponivel");
   // Hoje nenhuma metrica da Expedicao e' copiada da plataforma.
   assert.deepEqual(Object.entries(DEFINICOES).filter(([, d]) => d.origem === "oficial"), []);
 });
@@ -594,7 +618,7 @@ test("ML Prazo: titulo do painel e' 'Prazo de despacho', com o ⓘ em `acao`; a 
     ),
   );
   assert.match(html, />Prazo de despacho</);
-  assert.match(html, /aria-label="Não medido: o canal não publica prazo de despacho\./);
+  assert.match(html, /aria-label="Não medido: o canal não publica prazo de despacho nesta fotografia\./);
   assert.match(html, /Indisponível neste canal: o Mercado Livre não publica prazo de despacho na fonte atual\./);
   assert.doesNotMatch(html, /Prazo indisponível pelo canal/);
 });
