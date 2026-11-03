@@ -34,6 +34,7 @@ permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
 | MCP | nao iniciado |
 | ML / TikTok / calendario | fora deste gate |
 | Airflow | **ATIVO desde 21/10/2026** — DAG `marketplace_tower_expedicao_refresh`, a cada 2 h, tres canais (a API ainda nao reflete: ver pendencia do modo de publicacao) |
+| Alerta de vencidos da Shopee no Slack | **implementado** (EXPEDICAO-ALERTA-VENCIDOS-1), falta o agendamento no Airflow — ver a secao propria |
 
 A `018` e' a proxima revisao linear depois da `017` (PMA). Cadeia: `001 -> ... ->
 016 -> 017 -> 018`, raiz unica, head unico.
@@ -1625,3 +1626,47 @@ consultar o banco.
 | Shopee | por pedido (`READY_TO_SHIP` + `PROCESSED`); etapa interna e FBS não separados | por vencimento, só com a LDR operacional ativa (indicador interno, não o Account Health oficial) |
 | Mercado Livre | por shipment `ready_to_ship`; Full fora; `substatus` não publicado; `vencido`/`vence_24h` = `null` | não existe: o canal não publica prazo de despacho |
 | TikTok | não existe: não há fila em grão de pedido | por dia de pagamento × marca, evento coleta ou despacho; prazo reconstruído da política de dias úteis |
+
+---
+
+## Alerta de vencidos da Shopee no Slack (EXPEDICAO-ALERTA-VENCIDOS-1, 03/11/2026)
+
+`python -m pipelines.expedicao.alerta_vencidos --enviar` le a fila servida no
+Neon (read-only) e manda, por DM do bot "Torre" (app do Slack em
+`infra/slack/torre-bot`), um aviso quando a razao
+`overdue_count / backlog_count` da **Shopee** passa de **3%** — a mesma razao
+do "% vencidos" da tabela por marca, sobre o resumo por conta do lote servido.
+A mensagem traz o %, "N de M", o instante da fotografia, as marcas acima de 3%
+e o link da aba.
+
+Substitui o alerta de travados (EXPEDICAO-ALERTA-TRAVADOS-1, 29/10/2026, nunca
+agendado): os travados ficaram acima de 3% em todas as leituras de 21 a
+29/10/2026 e o alerta viraria ruido. **So' a Shopee**: o Mercado Livre nao
+publica prazo de despacho (`vencido` = `null`), entao precisa de regra propria.
+
+- **Quando avisa:** ao passar de 3% ("entrou"); enquanto continua acima, um
+  lembrete quando o relogio de Brasilia atravessa 9h, 13h ou 17h desde a
+  fotografia anterior; UM aviso quando volta para 3% ou menos. Sem estado
+  gravado: a fotografia anterior vem do proprio resumo.
+- **Volume medido** (regra aplicada ao resumo de 25/10 a 03/11/2026): 15
+  mensagens em 9 dias, em 4 episodios (25, 28, 29 e 30/10). Os episodios
+  comecam a meia-noite, quando os pedidos com prazo 23:59 viram vencidos.
+- **Fotografia velha nao avisa:** mais velha que `--max-idade-min` (padrao 45),
+  o canal nao e' avaliado. Sem isso, uma publicacao que falhou repetiria o
+  aviso da hora anterior.
+- **Shopee inclui FBS** na base, como a tabela por marca.
+- **Sem `--enviar`**, so' imprime o que enviaria. Exit `1` em falha de leitura,
+  token ou destinatarios ausentes, ou Slack recusando; o token nunca aparece
+  na saida. Sem retry automatico: repetir manda a mensagem de novo.
+
+Configuracao do envio:
+
+- `DATABASE_URL`: Neon; basta `SELECT` em `marts.expedicao_fila_atual` e
+  `marts.expedicao_refresh_run` (a sessao e' aberta read-only);
+- `SLACK_BOT_TOKEN`: token `xoxb-` do bot, em app settings → OAuth & Permissions;
+- `EXPEDICAO_ALERTA_DESTINATARIOS`: e-mails do Slack, separados por virgula.
+  Cada um recebe a mensagem no privado (`users.lookupByEmail` +
+  `chat.postMessage`).
+
+Agendamento: uma task na DAG `marketplace_tower_expedicao_refresh`, logo
+depois de `publicar_shopee`, para o aviso sair minutos depois da fotografia.
