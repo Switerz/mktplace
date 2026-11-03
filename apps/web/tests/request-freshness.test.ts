@@ -579,7 +579,7 @@ test("PF1 escopo: as funcoes sem cache continuam sem cache e fetchMonthly segue 
   assert.ok(/withCache\(`monthly:\$\{marketplace\}`/.test(corpoDe("fetchMonthly")), "fetchMonthly intocada, mesmo sem consumidor");
 });
 
-test("PF1 escopo: as 29 assinaturas publicas de fetchX nao mudaram", () => {
+test("PF1 escopo: as 30 assinaturas publicas de fetchX nao mudaram", () => {
   const assinaturas = [...CLIENT_SRC.matchAll(/^export (?:async )?function (fetch\w+)/gm)].map((m) => m[1]);
   // 23 -> 24 pelo Gate PMA-3, que acrescentou `fetchMonitoramentoPreco`;
   // 24 -> 25 pelo Gate AVH-4B-S Task 2/2, que acrescentou `fetchAvoeSnapshot`;
@@ -592,9 +592,12 @@ test("PF1 escopo: as 29 assinaturas publicas de fetchX nao mudaram", () => {
   // 28 -> 29 pelo ML-FULL-STOCK-API-1, que acrescentou `fetchMLFullEstoque`.
   //   Cliente SEPARADO do `fetchMLFulfillment` (modalidade de envio) e do
   //   `fetchEstoqueFull` (Shopee): estoque fisico do ML, por inventario.
+  // 29 -> 30 pelo VENDAS-POR-HORA-1, que acrescentou `fetchHojePorHora`
+  //   (o "Hoje" padronizado da Gerencial). Sem cache, como `fetchTempoReal`:
+  //   o numero muda de hora em hora.
   // O pino literal e' proposital: forca revisao consciente a cada funcao nova,
   // em vez de aceitar qualquer superficie publica em silencio.
-  assert.equal(assinaturas.length, 29, "nenhuma funcao publica foi adicionada ou removida");
+  assert.equal(assinaturas.length, 30, "nenhuma funcao publica foi adicionada ou removida");
   assert.ok(assinaturas.includes("fetchMonitoramentoPreco"));
   assert.ok(assinaturas.includes("fetchAvoeSnapshot"));
   assert.ok(assinaturas.includes("fetchMLFulfillment"));
@@ -614,6 +617,7 @@ test("PF1 escopo: as 29 assinaturas publicas de fetchX nao mudaram", () => {
     "fetchEstoqueFull",
     "fetchExecutiveSummary",
     "fetchFinanceiro",
+    "fetchHojePorHora",
     "fetchInteligencia",
     "fetchMLFulfillment",
     "fetchMLFullEstoque",

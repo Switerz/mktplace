@@ -72,6 +72,7 @@ import BrandChannelMatrix, { cellKey, type SignalsState } from "@/components/ger
 import MovementsPanels from "@/components/gerencial/MovementsPanels";
 import AttentionQueue from "@/components/gerencial/AttentionQueue";
 import MetaHero from "@/components/gerencial/MetaHero";
+import HojeAteAHora from "@/components/gerencial/HojeAteAHora";
 import DecisoesTopo from "@/components/gerencial/DecisoesTopo";
 import MarcasMeta, { type MetaDaMarca } from "@/components/gerencial/MarcasMeta";
 import { useMetasDoMes } from "@/hooks/useMetasDoMes";
@@ -494,6 +495,10 @@ function GerencialInner() {
         metasHref={mesDasMetas ? `/metas?mes=${mesDasMetas}` : "/metas"}
         onOpenGmv={() => setDialog({ kind: "kpi", key: "gmv" })}
       />
+
+      {/* VENDAS-POR-HORA-1: com "Hoje", os canais cortados na mesma hora cheia
+          e comparados com ontem e a semana passada ate' a mesma hora. */}
+      {diaEmAndamento && <HojeAteAHora channels={filters.channels} brands={filters.brands} />}
 
       <KpiBand
         kpis={kpis}

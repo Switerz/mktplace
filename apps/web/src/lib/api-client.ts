@@ -2,6 +2,7 @@
   totalGmv, totalGmvPrev, totalOrders,
   BRANDS, GMV_MONTHLY,
 } from "./mock-data";
+import type { HojePorHora } from "./gerencial/hoje-por-hora";
 import { calcMoM } from "./formatters";
 import {
   DEFAULT_MARKETPLACE_SELECTION,
@@ -1683,6 +1684,17 @@ export async function fetchTempoReal(): Promise<{ data: TempoRealData; live: boo
   const raw = await apiFetch<TempoRealData>("/api/v1/performance/tempo-real");
   if (raw) return { live: true, data: raw };
   return null;
+}
+
+// ---------- Hoje padronizado por hora (VENDAS-POR-HORA-1) ----------
+
+/** Sem cache de proposito: o numero muda de hora em hora e o bloco so' busca
+ * quando o periodo e' "Hoje" ou o filtro muda. */
+export async function fetchHojePorHora(channels: string[], brands?: string[]): Promise<HojePorHora | null> {
+  const qs = new URLSearchParams();
+  qs.set("channels", channels.length > 0 ? channels.join(",") : "all");
+  if (brands && brands.length > 0) qs.set("brands", [...brands].sort().join(","));
+  return apiFetch<HojePorHora>(`/api/v1/performance/hoje-por-hora?${qs.toString()}`);
 }
 
 // ---------- Brand Detail ----------
