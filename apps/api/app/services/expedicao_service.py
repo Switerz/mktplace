@@ -610,8 +610,8 @@ def _fotografia_export(db, canal: Canal, contas_da_fonte: set[str]) -> list[dict
     if not contas:
         return []
     resumos = _linhas(db, f"""
-        SELECT DISTINCT ON (shop_account) {_RESUMO_EXPORT_COLUNAS}
-        FROM {RUN_EXPORT} WHERE channel = :canal AND shop_account = ANY(:contas)
+        SELECT DISTINCT ON (shop_account) {_RESUMO_EXPORT_COLUNAS}, {COLUNAS_ATRASO_7D}
+        FROM {RUN_EXPORT} r WHERE channel = :canal AND shop_account = ANY(:contas)
         ORDER BY shop_account, observed_at DESC
     """, {"canal": canal.slug, "contas": contas})
     cabecalhos = {str(c["shop_account"]): c for c in _linhas(db, f"""

@@ -414,7 +414,18 @@ function TabelaUnica({
                       {f?.vencidos == null ? (
                         "—"
                       ) : f.vencidos === 0 ? (
-                        inteiro(0)
+                        // EXPEDICAO-ATRASO-7D: zero vencidos AGORA nao zera a
+                        // taxa de 7 dias (atrasados ÷ pedidos com prazo na
+                        // janela). Toda linha com o calculo mostra o %.
+                        <span>
+                          {inteiro(0)}
+                          {f.pctVencidos ? (
+                            <>
+                              <span className="sr-only"> · </span>
+                              <span className="ml-1.5 text-xs font-normal text-ink-faint">{f.pctVencidos}</span>
+                            </>
+                          ) : null}
+                        </span>
                       ) : (
                         // EXPEDICAO-TABELA-AMANHA: etiqueta vermelha; clicavel,
                         // abre a lista. O % da conta, com o " · " so' para o
