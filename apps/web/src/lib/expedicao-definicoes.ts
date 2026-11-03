@@ -140,11 +140,13 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
       "Vencidos",
       [
         "Pedidos que passaram do prazo de envio da Shopee e ainda não foram coletados.",
-        "Contagem de pedidos com ship_by_date anterior ao instante da fotografia.",
+        "Contagem de pedidos com ship_by_date anterior ao instante da fotografia. "
+          + "O % é a regra da Shopee: atrasados ÷ pedidos com prazo nos últimos 7 dias.",
       ],
       [
         "Envios que passaram do prazo de despacho do Mercado Livre e ainda não saíram.",
-        "Contagem de envios com prazo do SLA anterior ao instante da fotografia.",
+        "Contagem de envios vencidos agora (veredito do ML ou prazo de dia anterior). "
+          + "O % é atrasados ÷ envios com prazo nos últimos 7 dias.",
       ],
     ),
     // EXPEDICAO-PERTO-DE-VENCER: a prioridade depois dos vencidos.

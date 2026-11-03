@@ -162,6 +162,12 @@ class ResumoConta(BaseModel):
     #: "Perto de vencer" = `due_today_count + due_next_day_count`: a MESMA
     #: definicao da lista `situacao=due_soon`. Nulo no canal sem prazo.
     due_soon_count: Optional[int] = None
+    #: EXPEDICAO-ATRASO-7D — regra oficial da Shopee: dos pedidos (envios, no
+    #: ML) com vencimento nos ultimos 7 dias FECHADOS, quantos atrasaram.
+    #: `late_7d_count / due_7d_count` e' o % de vencidos da tela. Nulos =
+    #: nao calculado (pipeline anterior, migration ausente, conta sem dado).
+    due_7d_count: Optional[int] = None
+    late_7d_count: Optional[int] = None
     run_status: str
     source_watermark_at: Optional[datetime] = None
     source_advanced: bool
@@ -194,6 +200,9 @@ class ResumoCanal(BaseModel):
     #: cartao "Perto de vencer" e' a soma da coluna da tabela); nulos sem prazo.
     due_today_count: Optional[int] = None
     due_soon_count: Optional[int] = None
+    #: Somas das contas com o atraso de 7 dias calculado; nulos se nenhuma.
+    due_7d_count: Optional[int] = None
+    late_7d_count: Optional[int] = None
 
 
 class OrderRow(BaseModel):
@@ -267,6 +276,11 @@ class Snapshot(BaseModel):
     #: Com `false`, vencidos/perto de vencer sao AUSENCIA de dado, nunca zero.
     #: Nulo so' em API anterior a este campo.
     deadline_published: Optional[bool] = None
+    #: EXPEDICAO-ATRASO-7D — dias de vencimento (Brasilia) da janela de 7
+    #: dias. No ML o inicio pode ser posterior a `hoje - 7`: o SLA so' existe
+    #: desde 03/11/2026 ("desde 03/11").
+    late_7d_window_start: Optional[date] = None
+    late_7d_window_end: Optional[date] = None
 
 
 class Limitacoes(BaseModel):

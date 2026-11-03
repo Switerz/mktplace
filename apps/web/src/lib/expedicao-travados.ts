@@ -147,6 +147,22 @@ export function motivoDoTravado(l: Pick<LinhaFila, "is_slow_vs_baseline" | "is_s
   return "Travado";
 }
 
+/**
+ * EXPEDICAO-ATRASO-7D — o % de VENCIDOS pela regra oficial da Shopee:
+ * atrasados ÷ pedidos com vencimento nos ultimos 7 dias. "2,3%" so' com
+ * base positiva; sem o calculo publicado, nada (nunca cai para a fila).
+ */
+export function percentualAtraso7d(
+  atrasados: number | null | undefined,
+  base: number | null | undefined,
+): string | null {
+  if (atrasados == null || base == null) return null;
+  return percentualDaFila(atrasados, base);
+}
+
+/** O texto que acompanha o % de vencidos: deixa claro que nao e' a fila. */
+export const SUFIXO_ATRASO_7D = "de atraso em 7 dias";
+
 /** "6,7% da fila" — so' com base positiva; sem base, nada. */
 export function percentualDaFila(parte: number, base: number): string | null {
   if (!(base > 0)) return null;

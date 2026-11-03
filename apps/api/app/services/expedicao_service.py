@@ -492,6 +492,45 @@ def _abrir_snapshot(db) -> None:
 # ---------------------------------------------------------------------------
 # Fotografia vigente
 # ---------------------------------------------------------------------------
+#: EXPEDICAO-ATRASO-7D — colunas do resumo com o atraso de 7 dias (regra
+#: oficial da Shopee). Lidas por `to_jsonb(r) ->> ...`: o MESMO SELECT roda
+#: antes e depois da migration que as cria (coluna ausente = NULL = "nao
+#: calculado"), sem sonda e sem ordem de deploy.
+_ATRASO_7D_INTEIROS = ("due_7d_count", "late_7d_count")
+_ATRASO_7D_DATAS = ("late_7d_window_start", "late_7d_window_end")
+COLUNAS_ATRASO_7D = ", ".join(
+    f"to_jsonb(r) ->> '{c}' AS {c}" for c in _ATRASO_7D_INTEIROS + _ATRASO_7D_DATAS)
+
+
+def _normalizar_atraso_7d(r: dict) -> dict:
+    """Texto do `->>` -> int/date; ausente (resumo do export, fake) -> None."""
+    for c in _ATRASO_7D_INTEIROS:
+        v = r.get(c)
+        r[c] = int(v) if v not in (None, "") else None
+    for c in _ATRASO_7D_DATAS:
+        v = r.get(c)
+        r[c] = date.fromisoformat(str(v)[:10]) if v not in (None, "") else None
+    return r
+
+
+def _somar_atraso_7d(resumos: list[dict]) -> dict:
+    """Totais e janela do canal. So' as contas COM o calculo entram: uma conta
+    sem dado nao vira zero no numerador nem no denominador."""
+    com = [r for r in resumos if r.get("due_7d_count") is not None
+           and r.get("late_7d_count") is not None]
+    if not com:
+        return {"due_7d_count": None, "late_7d_count": None,
+                "late_7d_window_start": None, "late_7d_window_end": None}
+    inicios = [r["late_7d_window_start"] for r in com if r.get("late_7d_window_start")]
+    fins = [r["late_7d_window_end"] for r in com if r.get("late_7d_window_end")]
+    return {
+        "due_7d_count": sum(r["due_7d_count"] for r in com),
+        "late_7d_count": sum(r["late_7d_count"] for r in com),
+        "late_7d_window_start": min(inicios) if inicios else None,
+        "late_7d_window_end": max(fins) if fins else None,
+    }
+
+
 def _carregar_snapshot(db, canal: Canal) -> tuple[Optional[dict], Optional[str]]:
     """Identidade do batch vigente, ou o motivo de nao servir.
 
@@ -518,8 +557,8 @@ def _carregar_snapshot(db, canal: Canal) -> tuple[Optional[dict], Optional[str]]
                due_within_24h_count, on_time_count, deadline_unavailable_count,
                over_48h_count, slow_count, zombie_count, stalled_count,
                run_status, source_watermark_at, source_advanced, snapshot_hour,
-               observed_at
-        FROM {RUN} WHERE channel = :canal AND refresh_batch_id = :batch
+               observed_at, {COLUNAS_ATRASO_7D}
+        FROM {RUN} r WHERE channel = :canal AND refresh_batch_id = :batch
         ORDER BY brand, shop_account
     """, {"canal": canal.slug, "batch": cab["batch"]})
 
@@ -534,6 +573,7 @@ def _carregar_snapshot(db, canal: Canal) -> tuple[Optional[dict], Optional[str]]
     if resumos[0]["observed_at"] != cab["effective_at"]:
         return None, UNAVAILABLE_INCONSISTENT_BATCH
 
+    resumos = [_normalizar_atraso_7d(dict(r)) for r in resumos]
     snap = {"batch": cab["batch"], "effective_at": cab["effective_at"],
             "linhas": cab["linhas"], "resumos": resumos}
     _juntar_export(db, canal, snap)
@@ -963,6 +1003,11 @@ def get_expedicao(
                "on_time_count", "deadline_unavailable_count", "over_48h_count",
                "slow_count", "zombie_count", "stalled_count")
     totais = {m: sum(int(r[m]) for r in resumos) for m in medidas}
+    # EXPEDICAO-ATRASO-7D: atraso de 7 dias (regra oficial da Shopee), so' das
+    # contas com o calculo publicado.
+    atraso_7d = _somar_atraso_7d(resumos)
+    totais.update(due_7d_count=atraso_7d["due_7d_count"],
+                  late_7d_count=atraso_7d["late_7d_count"])
 
     # Perto de vencer (hoje + proximo dia de prazo): contado AQUI sobre o mesmo
     # lote (nao e' materializado). Canal sem prazo: nulo por ausencia, nunca zero.
@@ -1019,11 +1064,15 @@ def get_expedicao(
             # EXPEDICAO-ML-PRAZO: a tela decide prazo x "indisponivel" por
             # este campo, nunca pelo nome do canal.
             "deadline_published": tem_prazo,
+            "late_7d_window_start": atraso_7d["late_7d_window_start"],
+            "late_7d_window_end": atraso_7d["late_7d_window_end"],
         },
         "totals": totais,
         "accounts": [
             {**{k: r[k] for k in medidas},
              **_perto_da_conta(str(r["shop_account"])),
+             "due_7d_count": r.get("due_7d_count"),
+             "late_7d_count": r.get("late_7d_count"),
              "shop_account": r["shop_account"], "brand": r["brand"],
              "run_status": r["run_status"],
              "source_watermark_at": r["source_watermark_at"],

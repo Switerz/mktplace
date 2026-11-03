@@ -51,7 +51,13 @@ import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/Cabecal
 import CartaoDeRisco from "@/components/expedicao/CartaoDeRisco";
 import RiscoEmDestaque from "@/components/expedicao/RiscoEmDestaque";
 import TravadosDialog from "@/components/expedicao/TravadosDialog";
-import { percentualDaFila, type AlvoTravados, type TipoLista } from "@/lib/expedicao-travados";
+import {
+  SUFIXO_ATRASO_7D,
+  percentualAtraso7d,
+  percentualDaFila,
+  type AlvoTravados,
+  type TipoLista,
+} from "@/lib/expedicao-travados";
 import {
   AtencaoAgora,
   ConviteAoDetalhe,
@@ -668,6 +674,12 @@ export default function ExpedicaoClient({
   const mostrarRef = mostrarColunaReferencia(dados?.queue ?? []);
   const pag = paginaAtual(dados?.pagination ?? null);
   const temPrazo = canalTemPrazo(filtros.channel, fotografiaDoPrazo);
+  // EXPEDICAO-ATRASO-7D — % de vencidos pela regra oficial da Shopee, do canal
+  // ou da marca (recorte). Nao usa a divisao vendedor x FBS: o pipeline ja'
+  // calcula a base do vendedor (sem FBS) na Shopee.
+  const taxaAtraso7d = temPrazo
+    ? percentualAtraso7d(recorte.totais?.late_7d_count, recorte.totais?.due_7d_count)
+    : null;
 
   // QA T-0010 (M4): fila zerada nao esconde a pagina — como o TikTok com
   // base 0, o corpo aparece (zeros medidos, jornada, evolucao) sob o aviso.
@@ -778,7 +790,9 @@ export default function ExpedicaoClient({
       atualizadaEm: horaPropriaDaConta(a.observed_at, dados?.snapshot?.effective_at),
       backlog: a.backlog_count,
       vencidos: temPrazo ? a.overdue_count : null,
-      pctVencidos: temPrazo ? percentualDaFila(a.overdue_count, a.backlog_count) : null,
+      // EXPEDICAO-ATRASO-7D: regra oficial da Shopee (atrasados ÷ pedidos dos
+      // ultimos 7 dias), nunca a fila. Sem o calculo publicado, sem %.
+      pctVencidos: temPrazo ? percentualAtraso7d(a.late_7d_count, a.due_7d_count) : null,
       aoVerVencidos:
         temPrazo && a.overdue_count > 0
           ? () =>
@@ -863,14 +877,16 @@ export default function ExpedicaoClient({
     // O % usa a fila do proprio numero: "perto de vencer" vem da fila
     // publicada mesmo com a divisao vendedor x FBS.
     const base = divisao && k.chave === "due_soon" ? recorte.totais?.backlog_count : totaisRisco?.backlog_count;
-    const pct = percentualDaFila(valor, base ?? 0);
+    // EXPEDICAO-ATRASO-7D: o % de VENCIDOS e' o da regra oficial da Shopee.
+    const pct = k.chave === "overdue" ? taxaAtraso7d : percentualDaFila(valor, base ?? 0);
+    const sufixo = k.chave === "overdue" ? SUFIXO_ATRASO_7D : "da fila";
     return (
       <CartaoDeRisco
         key={k.chave}
         rotulo={k.rotulo}
         ajuda={ajudaDaFila(k.chave)}
         valor={k.valorTexto ?? (k.valor === null ? "—" : numero(valor))}
-        detalhe={k.chave === "due_soon" ? k.notaCurta : pct ? `${pct} da fila` : undefined}
+        detalhe={k.chave === "due_soon" ? k.notaCurta : pct ? `${pct} ${sufixo}` : undefined}
         tom={k.chave === "due_soon" && valor > 0 ? "atencao" : "neutro"}
         aoAbrir={abrirLista(k, LISTA_DO_KPI[k.chave])}
         rotuloAbrir={`Ver os ${numero(valor)} pedidos: ${k.rotulo}`}
@@ -983,6 +999,7 @@ export default function ExpedicaoClient({
           backlog={risco.find((k) => k.chave === "backlog")}
           marcasAlerta={risco.find((k) => k.chave === "marcas_alerta")}
           ajuda={ajudaDaFila(chaveDestaque)}
+          taxaAtraso7d={taxaAtraso7d}
           // EXPEDICAO-PERTO-DE-VENCER: o cartao inteiro abre a lista; a barra
           // de prazo saiu do destaque (a particao esta' nos cartoes e na tabela).
           aoAbrir={abrirLista(destaque, LISTA_DO_KPI[destaque.chave])}

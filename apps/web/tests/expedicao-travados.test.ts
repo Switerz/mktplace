@@ -54,7 +54,10 @@ test("tela: cartao de travados com % e abre a lista; popup montado uma vez", () 
   // clicavel ("Ver pedidos →" no hover), com a fatia da fila na linha de baixo.
   assert.match(CLIENTE, /stalled: "travados"/);
   assert.match(CLIENTE, /secundarios=\{secundariosDoRisco\.map\(cartaoDeRisco\)\}/);
-  assert.match(CLIENTE, /pct \? `\$\{pct\} da fila` : undefined/);
+  // EXPEDICAO-ATRASO-7D: travados seguem com a fatia da fila; vencidos usam
+  // a regra oficial da Shopee (sufixo proprio).
+  assert.match(CLIENTE, /pct \? `\$\{pct\} \$\{sufixo\}` : undefined/);
+  assert.match(CLIENTE, /const sufixo = k\.chave === "overdue" \? SUFIXO_ATRASO_7D : "da fila";/);
   assert.match(CLIENTE, /aoAbrir=\{abrirLista\(k, LISTA_DO_KPI\[k\.chave\]\)\}/);
   assert.equal((CLIENTE.match(/<TravadosDialog\b/g) ?? []).length, 1);
   assert.match(CLIENTE, /pctTravados: percentualDaFila\(a\.stalled_count, a\.backlog_count\)/);

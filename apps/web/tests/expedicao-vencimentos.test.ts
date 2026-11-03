@@ -287,16 +287,50 @@ test("Jornada: cada etapa diz o que significa, no canal certo", () => {
 // ===========================================================================
 // % de vencidos sobre a fila
 // ===========================================================================
-test("destaque: vencidos com o % da fila ('5 de 722 em fila · 0,7%')", () => {
-  const html = renderToStaticMarkup(
+test("destaque: vencidos com o % de atraso em 7 dias, nunca o % da fila", () => {
+  // EXPEDICAO-ATRASO-7D (03/11/2026): regra oficial da Shopee.
+  const com = renderToStaticMarkup(
+    h(RiscoEmDestaque, {
+      principal: { chave: "overdue", rotulo: "Vencidos (prazo Shopee)", valor: 5, alerta: true },
+      backlog: { chave: "backlog", rotulo: "Backlog total", valor: 722, alerta: false },
+      secundarios: null,
+      taxaAtraso7d: "2,3%",
+    }),
+  );
+  assert.match(com, /de 722 em fila/);
+  assert.match(com, /2,3% de atraso em 7 dias/);
+  assert.doesNotMatch(com, /da fila/);
+  // Sem o calculo publicado: nenhum %, e nada de cair para a fila.
+  const sem = renderToStaticMarkup(
     h(RiscoEmDestaque, {
       principal: { chave: "overdue", rotulo: "Vencidos (prazo Shopee)", valor: 5, alerta: true },
       backlog: { chave: "backlog", rotulo: "Backlog total", valor: 722, alerta: false },
       secundarios: null,
     }),
   );
-  assert.match(html, /de 722 em fila/);
-  assert.match(html, /0,7% da fila/);
+  assert.match(sem, /de 722 em fila/);
+  assert.doesNotMatch(sem, /%/);
+  // +48 h (ML sem prazo) segue com a fatia da fila.
+  const acima = renderToStaticMarkup(
+    h(RiscoEmDestaque, {
+      principal: { chave: "over48h", rotulo: "Acima de 48h", valor: 9, alerta: true },
+      backlog: { chave: "backlog", rotulo: "Backlog total", valor: 300, alerta: false },
+      secundarios: null,
+      taxaAtraso7d: "2,3%",
+    }),
+  );
+  assert.match(acima, /3,0% da fila/);
+});
+
+test("atraso 7 dias: % so' com o calculo publicado e base positiva", async () => {
+  const { percentualAtraso7d } = await import("../src/lib/expedicao-travados.ts");
+  assert.equal(percentualAtraso7d(23, 1000), "2,3%");
+  assert.equal(percentualAtraso7d(0, 1000), "0,0%");
+  assert.equal(percentualAtraso7d(null, 1000), null);
+  assert.equal(percentualAtraso7d(3, null), null);
+  assert.equal(percentualAtraso7d(0, 0), null, "base zero: sem %");
+  assert.match(CLIENTE, /pctVencidos: temPrazo \? percentualAtraso7d\(a\.late_7d_count, a\.due_7d_count\) : null/);
+  assert.match(CLIENTE, /taxaAtraso7d=\{taxaAtraso7d\}/);
 });
 
 test("tabela por marca: vencidos com % da conta e ⓘ nos cabecalhos", () => {
