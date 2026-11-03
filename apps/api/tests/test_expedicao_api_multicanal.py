@@ -213,7 +213,26 @@ def _resumos_ml_com_sla(vencidos=3, sem_sla=10):
     return out
 
 
-def test_prazo_publicado_decide_pela_fotografia():
+@pytest.fixture
+def prazo_ml_ligado(monkeypatch):
+    monkeypatch.setattr(svc.settings, "expedicao_ml_prazo_enabled", True, raising=False)
+
+
+def test_trava_desligada_esconde_o_prazo_do_ml_mesmo_com_sla(ml_ligado, monkeypatch):
+    """03/11/2026: o envio coletado seguia `ready_to_ship` e virava vencido
+    falso. Sem a flag, a fotografia com SLA continua SEM prazo na tela."""
+    monkeypatch.setattr(svc.settings, "expedicao_ml_prazo_enabled", False, raising=False)
+    resumos = [resumo_ml("1", "x", 7, deadline_unavailable_count=0, overdue_count=5)]
+    assert svc.prazo_publicado(svc.CANAIS["mercadolivre"], resumos) is False
+    assert svc.prazo_publicado(svc.CANAIS["shopee"], []) is True, "Shopee nao depende da trava"
+    s = sessao_ml(resumos=_resumos_ml_com_sla(vencidos=3))
+    r = svc.get_expedicao(s, channel="mercadolivre")
+    assert r["snapshot"]["deadline_published"] is False
+    assert r["totals"]["due_soon_count"] is None
+    assert not any("AS vencem" in q for q, _ in s.consultas)
+
+
+def test_prazo_publicado_decide_pela_fotografia(prazo_ml_ligado):
     ml, shopee = svc.CANAIS["mercadolivre"], svc.CANAIS["shopee"]
     assert svc.prazo_publicado(shopee, []) is True
     assert svc.prazo_publicado(ml, []) is False
@@ -224,7 +243,7 @@ def test_prazo_publicado_decide_pela_fotografia():
     ) is True
 
 
-def test_ml_com_sla_publica_vencidos_e_perto_de_vencer(ml_ligado):
+def test_ml_com_sla_publica_vencidos_e_perto_de_vencer(ml_ligado, prazo_ml_ligado):
     hoje = date(2026, 9, 16)  # dia de Brasilia do `AGORA` dos testes
     s = sessao_ml(
         resumos=_resumos_ml_com_sla(vencidos=3),
@@ -258,7 +277,7 @@ def test_jornada_do_ml_troca_o_motivo_da_coorte_quando_ha_prazo():
     assert svc._limitacao_coorte_ml(com) == svc.LIMITACAO_ML_SEM_COORTE
 
 
-def test_ml_com_sla_filtra_a_lista_perto_de_vencer_de_verdade(ml_ligado):
+def test_ml_com_sla_filtra_a_lista_perto_de_vencer_de_verdade(ml_ligado, prazo_ml_ligado):
     s = sessao_ml(resumos=_resumos_ml_com_sla(),
                   proximo=[{"dia": date(2026, 9, 16), "shop_account": "2227056661",
                             "vencem": 2}])
