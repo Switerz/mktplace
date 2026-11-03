@@ -234,6 +234,23 @@ class Settings(BaseSettings):
     b2b_revenda_rate_limit_per_minute: int = Field(default=60, ge=1, le=600)
     b2b_revenda_rate_limit_global_per_minute: int = Field(default=600, ge=10, le=6000)
 
+    # ------------------------------------------------------------------
+    # Alerta de vencidos da Shopee (EXPEDICAO-ALERTA-VENCIDOS-1)
+    # ------------------------------------------------------------------
+    # `POST /api/v1/alertas/expedicao-vencidos` (app/routers/alertas.py), chamada
+    # a cada 15 min pelo app `torre-alerta-gatilho` no GoDeploy.
+    # `alerta_webhook_secret`: segredo que o gatilho manda em `X-Alerta-Token`;
+    #   vazio = rota desligada (503).
+    # `slack_bot_token`: `xoxb-` do bot "Torre" (infra/slack/torre-bot).
+    # `expedicao_alerta_destinatarios`: e-mails do Slack, separados por virgula.
+    alerta_webhook_secret: SecretStr = SecretStr("")
+    slack_bot_token: SecretStr = SecretStr("")
+    expedicao_alerta_destinatarios: str = ""
+
+    @property
+    def expedicao_alerta_destinatarios_list(self) -> list[str]:
+        return [e.strip() for e in self.expedicao_alerta_destinatarios.split(",") if e.strip()]
+
     @property
     def b2b_revenda_canais_kpi_list(self) -> list[str]:
         return [c.strip() for c in self.b2b_revenda_canais_kpi.split(",") if c.strip()]
