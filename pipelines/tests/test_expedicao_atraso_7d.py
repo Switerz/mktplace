@@ -634,7 +634,8 @@ def test_publicador_com_a_035_grava_null_quando_nao_calculado():
 
 
 def test_publicador_detecta_no_resumo_do_destino_e_o_export_nao_tem_as_colunas():
-    """A 035 so' toca o resumo da 018; o resumo do export (034) fica sem elas."""
+    """A sonda e' no resumo DO DESTINO: sem as colunas no export (banco antes
+    da 035 nova), o INSERT do export e' o de antes."""
     conn = _ConnPub({RUN_TABLE: ATRASO_7D_COLUMNS})
     destino = publisher.Destino(
         fila="marts.expedicao_fila_export", resumo=RUN_EXPORT_TABLE,
@@ -887,8 +888,9 @@ def test_035_upgrade_idempotente_cria_quatro_colunas_nullable(banco_034):
         "late_7d_window_start": ("date", "YES", None),
         "late_7d_window_end": ("date", "YES", None),
     }
-    # O resumo do export (034) nao recebe as colunas.
-    assert not set(ATRASO_7D_COLUMNS) & set(_colunas(banco_034, "expedicao_refresh_run_export"))
+    # O resumo do export (034) recebe as MESMAS colunas (Kokeshi com %).
+    export = _colunas(banco_034, "expedicao_refresh_run_export")
+    assert {c: export[c] for c in ATRASO_7D_COLUMNS} == {c: cols[c] for c in ATRASO_7D_COLUMNS}
     _rodar_035(banco_034, "downgrade")
     _rodar_035(banco_034, "downgrade")  # idem
     assert not set(ATRASO_7D_COLUMNS) & set(_colunas(banco_034))
@@ -956,3 +958,55 @@ def test_publicador_real_sem_e_com_a_035_e_upsert_da_hora(banco_034):
     _publicar_real(banco_034, AGORA + timedelta(minutes=5), {"1": V})
     [linha] = _resumo_publicado(banco_034)
     assert all(linha[c] is None for c in ATRASO_7D_COLUMNS)
+
+
+# ---------------------------------------------------------------------------
+# Kokeshi pelo export do Seller Centre (mesma regra da Shopee)
+# ---------------------------------------------------------------------------
+def test_kokeshi_pelo_export_usa_a_regra_da_shopee():
+    """03/11/2026: a Kokeshi saia sem % porque so' existe pelo export. O
+    historico de pedidos do export tem prazo, coleta, Full e cancelamento: a
+    MESMA apuracao da Shopee do Data Mart vale aqui."""
+    from pipelines.expedicao import shopee_export_cli as C
+    from pipelines.expedicao.contract import SellerAccount
+
+    conta = SellerAccount("kokeshi-sid", 4, "kokeshi")
+    agora = datetime(2026, 11, 3, 19, 0, tzinfo=UTC)
+    baixado = datetime(2026, 11, 3, 15, 0, tzinfo=UTC)
+    pago = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+
+    def prazo(dia):  # 23:59 de Brasilia do dia
+        return datetime(2026, 11 if dia < 10 else 10, dia, 23, 59,
+                        tzinfo=timezone(timedelta(hours=-3))).astimezone(UTC)
+
+    def pedido(status, vence, coleta=None, fbs="fulfilled_by_local_seller"):
+        return {"shop_id": "kokeshi-sid", "shop_account": "kokeshi",
+                "order_status": status, "fulfillment_flag": fbs, "pay_time": pago,
+                "ship_by_date": vence, "pickup_done_time": coleta, "cancel_reason": None}
+
+    estado = [
+        pedido("COMPLETED", prazo(30), coleta=datetime(2026, 10, 30, 15, 0, tzinfo=UTC)),
+        pedido("SHIPPED", prazo(31), coleta=datetime(2026, 10, 31, 20, 0, tzinfo=UTC)),
+        pedido("SHIPPED", prazo(30), coleta=datetime(2026, 10, 31, 12, 0, tzinfo=UTC)),  # atrasado
+        pedido("READY_TO_SHIP", prazo(1)),                                               # vencido sem coleta
+        pedido("COMPLETED", prazo(30), coleta=datetime(2026, 10, 30, 15, 0, tzinfo=UTC),
+               fbs="fulfilled_by_shopee"),                                               # Full: fora
+        pedido(None, prazo(30)),                                                         # status desconhecido: fora
+        pedido("READY_TO_SHIP", prazo(3)),                                               # vence hoje: fora da janela
+    ]
+    r = C.atraso_7d_do_export(estado, conta, baixado, agora)
+    assert r == {"kokeshi-sid": {
+        "due_7d_count": 4, "late_7d_count": 2,
+        "late_7d_window_start": date(2026, 10, 27),
+        "late_7d_window_end": date(2026, 11, 2),
+    }}
+
+
+def test_kokeshi_falha_no_calculo_nao_derruba_a_fila():
+    from pipelines.expedicao import shopee_export_cli as C
+    from pipelines.expedicao.contract import SellerAccount
+
+    quebrado = [{"order_status": "COMPLETED"}]  # sem nenhuma data
+    conta = SellerAccount("k", 4, "kokeshi")
+    agora = datetime(2026, 11, 3, 19, 0, tzinfo=UTC)
+    assert C.atraso_7d_do_export(quebrado, conta, agora, agora) in ({}, {})

@@ -31,14 +31,18 @@ commit, 6 precondicao (migration/conta).
 """
 from __future__ import annotations
 
+import logging
+
 import argparse
 import sys
 from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from pipelines.expedicao import atraso_7d
 from pipelines.expedicao import audit as audit_mod
 from pipelines.expedicao import shopee_export as E
+from pipelines.expedicao import shopee_ldr
 from pipelines.expedicao import transform
 from pipelines.expedicao.cli import (
     EXIT_AUDITORIA_INCOMPLETA,
@@ -111,9 +115,12 @@ PREFLIGHT_SQL = (
     " AND to_regclass(%s) IS NOT NULL AND to_regclass(%s) IS NOT NULL AS tem_034"
 )
 
+LOG = logging.getLogger(__name__)
+
 #: Pedidos da conta para o baseline: so' o que a janela de 30 dias usa.
 PEDIDOS_DO_BASELINE_SQL = f"""
-SELECT order_sn, order_status, create_time, pay_time, pickup_done_time
+SELECT order_sn, order_status, create_time, pay_time, pickup_done_time,
+       shop_id, ship_by_date, fulfillment_flag, cancel_reason
 FROM {PEDIDO_EXPORT_TABLE}
 WHERE shop_account = %(conta)s
   AND create_time >= %(inicio)s AND create_time < %(fim)s
@@ -221,6 +228,36 @@ def mesclar_estado(anteriores: list[dict], atuais: list[dict]) -> list[dict]:
     return list(por_pedido.values())
 
 
+def atraso_7d_do_export(estado: list[dict], conta: SellerAccount,
+                        ingerido_em: datetime, effective_at: datetime) -> dict[str, dict]:
+    """EXPEDICAO-ATRASO-7D na Kokeshi: a MESMA regra da Shopee do Data Mart
+    (`atraso_7d.apurar_shopee`, classificacao da LDR) sobre o historico de
+    pedidos do export. O "ultimo dia maduro" usa a hora do download como a
+    ultima leitura da conta. Falha vira {} (colunas nulas), nunca derruba a
+    fila: e' metrica auxiliar."""
+    try:
+        pedidos = [
+            shopee_ldr.Pedido(
+                shop_id=str(p.get("shop_id") or conta.external_seller_id),
+                shop_account=str(p.get("shop_account") or ""),
+                order_status=p["order_status"],
+                fulfillment_flag=p.get("fulfillment_flag"),
+                pay_time=p.get("pay_time"),
+                ship_by_date=p.get("ship_by_date"),
+                pickup_done_time=p.get("pickup_done_time"),
+                cancel_reason=p.get("cancel_reason"),
+            )
+            for p in estado
+            # Status fora do vocabulario do export fica fora, como na fila.
+            if p.get("order_status")
+        ]
+        return atraso_7d.apurar_shopee(
+            pedidos, {conta.external_seller_id: ingerido_em}, effective_at)
+    except Exception as exc:  # noqa: BLE001 — auxiliar, nunca bloqueia a fila
+        LOG.warning("atraso de 7 dias do export nao calculado: %s", type(exc).__name__)
+        return {}
+
+
 def montar_fotografia(leitura: E.LeituraExport, conta: SellerAccount, shop_account: str,
                       estado: list[dict], effective_at: datetime, batch_id: str,
                       anterior: datetime | None) -> tuple[list[dict], list[dict], tuple]:
@@ -236,7 +273,8 @@ def montar_fotografia(leitura: E.LeituraExport, conta: SellerAccount, shop_accou
         fila, effective_at, channel=CANAL.value, refresh_batch_id=batch_id,
         accounts={conta.external_seller_id: (shop_account, conta.brand_key)},
         watermarks={conta.external_seller_id: leitura.ingerido_em},
-        source_advanced=avancou)
+        source_advanced=avancou,
+        atraso_7d=atraso_7d_do_export(estado, conta, leitura.ingerido_em, effective_at))
     return fila, resumos, (amostra, p50)
 
 

@@ -450,3 +450,17 @@ test("textos objetivos: as classificacoes do Risco atual cabem numa leitura", ()
     assert.ok(d.limitacoes.length <= 90, `${c}.limitacoes: ${d.limitacoes.length}`);
   }
 });
+
+test("tabela por marca: zero vencidos agora ainda mostra a taxa de 7 dias", () => {
+  // EXPEDICAO-ATRASO-7D (03/11/2026): "todos os casos devem ter %".
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: null,
+      fila: [{
+        conta: "barbours", titulo: "BARBOURS", apelido: null, backlog: 302, vencidos: 0, acima48h: 32,
+        travados: 49, pctTravados: "16,2%", pctVencidos: "0,9%", barra: null,
+      }],
+    }),
+  );
+  assert.match(html, /0,9%/);
+});

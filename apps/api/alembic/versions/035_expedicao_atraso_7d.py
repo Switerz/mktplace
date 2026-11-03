@@ -18,9 +18,16 @@ esta migration ou publicador antigo). Nunca zero por ausencia. Sem DEFAULT: as
 linhas existentes ficam NULL, que e' exatamente o que elas sao. Em
 PostgreSQL 11+ `ADD COLUMN` sem default nao reescreve a tabela.
 
-`marts.expedicao_refresh_run_export` (034, export da Kokeshi) NAO recebe as
-colunas: o export nao calcula o atraso de 7 dias, e o publicador grava as
-colunas so' onde as quatro existem.
+`marts.expedicao_refresh_run_export` (034, export da Kokeshi) recebe as MESMAS
+colunas (03/11/2026): a carga do export calcula o atraso de 7 dias com a regra
+da Shopee sobre o historico do export ("todos os casos devem ter %").
+
+POR QUE NA 035 E NAO NUMA 036: o PMA de ofertas, na cadeia diaria do Airflow,
+recusa um head do Neon que a imagem nao conheca, e o pin da imagem e' 4617c15
+(conhece ate' a 035). Uma 036 exigiria outro PR de pin. A 035 ja' estava
+aplicada no Neon quando o export ganhou as colunas; o mesmo `ADD COLUMN IF NOT
+EXISTS` foi aplicado a' mao no resumo do export, e banco novo recebe tudo pela
+035. O head continua 035.
 
 `IF NOT EXISTS` / `IF EXISTS`: reaplicar o upgrade (ou o downgrade) nao falha.
 
@@ -47,6 +54,8 @@ branch_labels = None
 depends_on = None
 
 RESUMO_Q = "marts.expedicao_refresh_run"
+#: Resumo do export da Kokeshi (034), mesmas colunas.
+RESUMO_EXPORT_Q = "marts.expedicao_refresh_run_export"
 
 #: Colunas, na ordem do contrato (`contract.ATRASO_7D_COLUMNS`).
 COLUNAS = (
@@ -58,13 +67,15 @@ COLUNAS = (
 
 
 def upgrade() -> None:
-    for nome, tipo in COLUNAS:
-        op.execute(
-            f"ALTER TABLE {RESUMO_Q} ADD COLUMN IF NOT EXISTS {nome} {tipo} NULL"
-        )
+    for tabela in (RESUMO_Q, RESUMO_EXPORT_Q):
+        for nome, tipo in COLUNAS:
+            op.execute(
+                f"ALTER TABLE {tabela} ADD COLUMN IF NOT EXISTS {nome} {tipo} NULL"
+            )
 
 
 def downgrade() -> None:
     # Remove SOMENTE o que o upgrade criou, na ordem inversa.
-    for nome, _tipo in reversed(COLUNAS):
-        op.execute(f"ALTER TABLE {RESUMO_Q} DROP COLUMN IF EXISTS {nome}")
+    for tabela in (RESUMO_EXPORT_Q, RESUMO_Q):
+        for nome, _tipo in reversed(COLUNAS):
+            op.execute(f"ALTER TABLE {tabela} DROP COLUMN IF EXISTS {nome}")
