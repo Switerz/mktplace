@@ -50,6 +50,7 @@ from app.schemas.expedicao import (
     DeadlineStatus,
 )
 from app.services import expedicao_shopee_ldr_service as shopee_ldr_svc
+from app.services import expedicao_atraso_7d_export as atraso_7d_export
 from app.services import expedicao_tiktok_service as tiktok_svc
 
 CHECK_FRESHNESS = "expedicao_source_freshness"
@@ -647,6 +648,20 @@ def _juntar_export(db, canal: Canal, snap: dict) -> None:
     PROPRIA (`observed_at`) e os lotes delas em `lotes_export`.
     """
     extra = _fotografia_export(db, canal, {str(r["shop_account"]) for r in snap["resumos"]})
+    extra = [_normalizar_atraso_7d(dict(r)) for r in extra]
+    # EXPEDICAO-ATRASO-7D: o bot da Kokeshi grava direto no Neon e nao calcula
+    # o atraso de 7 dias; a API calcula do historico do export, com a regra da
+    # Shopee (`expedicao_atraso_7d_export`). Falha vira "sem %", nunca 500.
+    for r in extra:
+        if r.get("due_7d_count") is None:
+            try:
+                calculado = atraso_7d_export.calcular(
+                    db, str(r["shop_account"]), r.get("source_watermark_at"),
+                    snap["effective_at"])
+            except Exception:  # noqa: BLE001 — metrica auxiliar
+                calculado = None
+            if calculado:
+                r.update(calculado)
     snap["lotes_export"] = tuple(str(r["refresh_batch_id"]) for r in extra)
     snap["cobertas"] = frozenset(str(r["brand"]) for r in extra)
     # Frescor da conta do export: idade do watermark contra o instante mais

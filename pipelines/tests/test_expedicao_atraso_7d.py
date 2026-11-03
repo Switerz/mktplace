@@ -991,12 +991,12 @@ def test_kokeshi_pelo_export_usa_a_regra_da_shopee():
         pedido("READY_TO_SHIP", prazo(1)),                                               # vencido sem coleta
         pedido("COMPLETED", prazo(30), coleta=datetime(2026, 10, 30, 15, 0, tzinfo=UTC),
                fbs="fulfilled_by_shopee"),                                               # Full: fora
-        pedido(None, prazo(30)),                                                         # status desconhecido: fora
+        pedido(None, prazo(30), coleta=datetime(2026, 10, 30, 15, 0, tzinfo=UTC)),      # "devolucao ate...": entra pela coleta
         pedido("READY_TO_SHIP", prazo(3)),                                               # vence hoje: fora da janela
     ]
     r = C.atraso_7d_do_export(estado, conta, baixado, agora)
     assert r == {"kokeshi-sid": {
-        "due_7d_count": 4, "late_7d_count": 2,
+        "due_7d_count": 5, "late_7d_count": 2,
         "late_7d_window_start": date(2026, 10, 27),
         "late_7d_window_end": date(2026, 11, 2),
     }}
