@@ -694,16 +694,20 @@ def _juntar_export(db, canal: Canal, snap: dict) -> None:
     # EXPEDICAO-ATRASO-7D: o bot da Kokeshi grava direto no Neon e nao calcula
     # o atraso de 7 dias; a API calcula do historico do export, com a regra da
     # Shopee (`expedicao_atraso_7d_export`). Falha vira "sem %", nunca 500.
+    # Completa SO' o que veio vazio: o bot pode rodar uma versao do codigo que
+    # grava parte das colunas (03/11/2026: gravava o atraso e nao +48 h nem
+    # travados). O que o resumo trouxe preenchido prevalece.
     for r in extra:
-        if r.get("due_7d_count") is None:
+        if any(r.get(c) is None for c in _ATRASO_7D_INTEIROS):
             try:
                 calculado = atraso_7d_export.calcular(
                     db, str(r["shop_account"]), r.get("source_watermark_at"),
                     snap["effective_at"])
             except Exception:  # noqa: BLE001 — metrica auxiliar
                 calculado = None
-            if calculado:
-                r.update(calculado)
+            for chave, valor in (calculado or {}).items():
+                if r.get(chave) is None:
+                    r[chave] = valor
     snap["lotes_export"] = tuple(str(r["refresh_batch_id"]) for r in extra)
     snap["cobertas"] = frozenset(str(r["brand"]) for r in extra)
     # Frescor da conta do export: idade do watermark contra o instante mais
