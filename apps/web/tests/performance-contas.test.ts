@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { register } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -559,4 +560,19 @@ test("carregarPerformanceContas: erros de antes mantem o motivo (rede, nao-2xx, 
     "Resposta inválida da API (o corpo não é JSON).",
   );
   assert.match(await motivo((async () => Response.json({ canais: "x" })) as typeof fetch), /^Resposta inválida da API \(/);
+});
+
+// T-0039 D1 — a rota tinha a tela anterior parada, sem sinal, enquanto a API
+// respondia. O `loading.tsx` renderiza o StateBlock "carregando", sem numero.
+test("loading.tsx: carregando acessivel (role=status + aria-busy), sem digito nem zero", async () => {
+  register("./helpers/tsx-loader.mjs", import.meta.url);
+  const { createElement: h } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { default: Carregando } = await import("../app/performance-contas/loading.tsx");
+  const html = renderToStaticMarkup(h(Carregando));
+  assert.match(html, /role="status"/);
+  assert.match(html, /aria-busy="true"/);
+  const texto = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  assert.match(texto, /Carregando a performance das contas…/);
+  assert.doesNotMatch(texto, /\d/, "nenhum numero (nem zero) enquanto carrega");
 });
