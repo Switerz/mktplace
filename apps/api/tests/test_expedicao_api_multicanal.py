@@ -465,8 +465,14 @@ def test_toda_consulta_de_fila_ou_resumo_filtra_por_canal():
     clausula inline quanto a montada em `onde`.
     """
     fonte = (RAIZ_API / "app/services/expedicao_service.py").read_text(encoding="utf-8")
-    trechos = re.findall(r"FROM \{(FILA|RUN)\}(.*?)(?=\"\"\"|\n\n)", fonte, re.S)
+    # EXPEDICAO-KOKESHI-EXPORT: `origem`/`resumo` sao a tabela agendada OU a
+    # uniao dela com a do export; as tabelas do export tambem entram.
+    trechos = re.findall(
+        r"FROM \{(FILA|RUN|FILA_EXPORT|RUN_EXPORT|origem|resumo)\}(.*?)(?=\"\"\"|\n\n)",
+        fonte, re.S)
     assert trechos, "o scanner nao achou consulta nenhuma - regra virou decoracao"
+    assert {t for t, _ in trechos} >= {"FILA", "RUN", "FILA_EXPORT", "RUN_EXPORT",
+                                       "origem", "resumo"}
     sem_canal = [t for _tab, t in trechos
                  if "channel = :canal" not in t and "{filtro}" not in t
                  and '" AND ".join(onde)' not in t]

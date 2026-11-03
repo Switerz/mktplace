@@ -166,6 +166,10 @@ class ResumoConta(BaseModel):
     source_watermark_at: Optional[datetime] = None
     source_advanced: bool
     snapshot_hour: datetime
+    #: Instante da fotografia DESTA conta. Igual ao `snapshot.effective_at`,
+    #: exceto nas contas do export do Seller Centre (EXPEDICAO-KOKESHI-EXPORT),
+    #: que tem a hora da propria carga.
+    observed_at: Optional[datetime] = None
 
 
 class ResumoCanal(BaseModel):

@@ -53,6 +53,7 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 from pipelines.expedicao.contract import (
     ADVISORY_LOCK_KEYS,
@@ -97,8 +98,6 @@ FILA_COLUMNS = (
 #: que existirem no destino, e so' se `etapa` existir. Ficam FORA de
 #: `FILA_COLUMNS` porque aquela lista e' o schema da 018, sempre presente.
 ETAPA_COLUMNS = ("etapa", "etapa_fonte")
-
-_FILA_SCHEMA, _FILA_NOME = FILA_TABLE.split(".")
 
 #: Deteccao por execucao. Roda DENTRO da transacao da publicacao, logo antes
 #: do INSERT: se a coluna sumir entre a leitura e a escrita, o INSERT falha e o
@@ -147,7 +146,37 @@ SUMMARY_PRIMARY_KEY = ("channel", "shop_account", "snapshot_hour")
 
 #: Substituicao SEMPRE restrita ao canal. O teste garante que este e o unico
 #: DELETE do modulo e que ele carrega `WHERE channel`.
-DELETE_CANAL_SQL = f"DELETE FROM {FILA_TABLE} WHERE channel = %s"
+_DELETE_SQL = "DELETE FROM {tabela} WHERE channel = %s"
+DELETE_CANAL_SQL = _DELETE_SQL.format(tabela=FILA_TABLE)
+
+#: Carga de CONTA (export do Seller Centre, EXPEDICAO-KOKESHI-EXPORT): so' as
+#: contas do lote saem da fila. O canal continua no WHERE.
+_SO_DAS_CONTAS_SQL = " AND shop_account = ANY(%s)"
+
+
+@dataclass(frozen=True)
+class Destino:
+    """Onde a publicacao grava. O padrao e' o do publicador agendado.
+
+    `contas` vazio substitui a fila do CANAL inteiro (o comportamento de
+    sempre). A carga do export grava em tabelas proprias e substitui SO' as
+    contas que trouxe: as tabelas do export podem ter mais de uma conta, cada
+    uma com o seu lote.
+    """
+
+    fila: str = FILA_TABLE
+    resumo: str = RUN_TABLE
+    contas: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.fila != FILA_TABLE and not self.contas:
+            raise ValueError(
+                f"publicacao em {self.fila} exige as contas substituidas: sem "
+                "elas o DELETE levaria a fila das outras contas do export"
+            )
+
+
+DESTINO_PADRAO = Destino()
 
 #: Reexecucao na mesma hora: a observacao mais NOVA vence; a mais antiga nao
 #: sobrescreve. `DO NOTHING` seria insuficiente — a fonte pode avancar depois da
@@ -156,7 +185,7 @@ DELETE_CANAL_SQL = f"DELETE FROM {FILA_TABLE} WHERE channel = %s"
 #:
 #: A clausula `WHERE` torna o resultado independente da ordem de reexecucao.
 _RUN = RUN_TABLE.split(".")[-1]
-SUMMARY_CONFLICT_SQL = f"""
+_SUMMARY_CONFLICT_TEMPLATE = """
 ON CONFLICT (channel, shop_account, snapshot_hour) DO UPDATE SET
     refresh_batch_id = EXCLUDED.refresh_batch_id,
     brand = EXCLUDED.brand,
@@ -174,16 +203,18 @@ ON CONFLICT (channel, shop_account, snapshot_hour) DO UPDATE SET
     stalled_count = EXCLUDED.stalled_count,
     run_status = EXCLUDED.run_status,
     ingested_at = EXCLUDED.ingested_at
-WHERE EXCLUDED.observed_at > {_RUN}.observed_at
+WHERE EXCLUDED.observed_at > {tabela}.observed_at
 """
+SUMMARY_CONFLICT_SQL = _SUMMARY_CONFLICT_TEMPLATE.format(tabela=_RUN)
 
 
-def colunas_de_etapa_no_destino(cur) -> tuple[str, ...]:
+def colunas_de_etapa_no_destino(cur, tabela: str = FILA_TABLE) -> tuple[str, ...]:
     """Recorte de `ETAPA_COLUMNS` presente no destino. Vazio = 033 ausente.
 
     Aceita cursor de tupla e `RealDictCursor`, como `channel_lock`.
     """
-    cur.execute(COLUNAS_ETAPA_SQL, (_FILA_SCHEMA, _FILA_NOME, list(ETAPA_COLUMNS)))
+    esquema, nome = tabela.split(".")
+    cur.execute(COLUNAS_ETAPA_SQL, (esquema, nome, list(ETAPA_COLUMNS)))
     existentes = {
         linha["column_name"] if isinstance(linha, dict) else linha[0]
         for linha in cur.fetchall()
@@ -284,8 +315,13 @@ def publish_channel(
     expected_accounts,
     execute_values=None,
     relatorio: dict | None = None,
+    destino: Destino = DESTINO_PADRAO,
 ) -> tuple[int, int]:
     """Substitui a fila DO CANAL e grava o resumo por conta, numa transacao.
+
+    `destino` so' muda para a carga do export (EXPEDICAO-KOKESHI-EXPORT): as
+    tabelas proprias e o DELETE restrito as contas do lote. Todas as barreiras
+    abaixo valem igual para as duas publicacoes.
 
     Devolve `(linhas_fila, contas_registradas)`. `fila_rows` vazio com fonte
     saudavel e uma FOTOGRAFIA VAZIA legitima: o DELETE roda, nenhum INSERT de
@@ -391,26 +427,42 @@ def publish_channel(
         }
     )[:_MAX_FONTES_OUTRO_NO_RELATORIO]
 
+    if destino.contas:
+        # Carga de conta: nada do lote pode cair fora das contas substituidas,
+        # ou o DELETE restrito deixaria linha duplicada de outra conta.
+        fora = ({r["shop_account"] for r in fila_rows}
+                | {r["shop_account"] for r in summary_rows}) - set(destino.contas)
+        if fora:
+            raise ValueError(
+                f"lote de {channel.value} com conta fora do destino: {sorted(fora)}"
+            )
+        delete_sql = _DELETE_SQL.format(tabela=destino.fila) + _SO_DAS_CONTAS_SQL
+        delete_params: tuple = (channel.value, list(destino.contas))
+    else:
+        delete_sql = DELETE_CANAL_SQL
+        delete_params = (channel.value,)
+
     colunas_etapa: tuple[str, ...] = ()
     neon_conn.autocommit = False
     try:
         with neon_conn.cursor() as cur:
-            cur.execute(DELETE_CANAL_SQL, (channel.value,))
+            cur.execute(delete_sql, delete_params)
 
             if fila_rows:
-                colunas_etapa = colunas_de_etapa_no_destino(cur)
+                colunas_etapa = colunas_de_etapa_no_destino(cur, destino.fila)
                 colunas = FILA_COLUMNS + colunas_etapa
                 execute_values(
                     cur,
-                    f"INSERT INTO {FILA_TABLE} ({', '.join(colunas)}) VALUES %s",
+                    f"INSERT INTO {destino.fila} ({', '.join(colunas)}) VALUES %s",
                     [tuple(r[c] for c in colunas) for r in fila_rows],
                 )
             # SEMPRE gravado, inclusive com backlog zero: e a prova de que a
             # fotografia foi tirada naquela hora, por conta.
+            resumo = destino.resumo.split(".")[-1]
             execute_values(
                 cur,
-                f"INSERT INTO {RUN_TABLE} ({', '.join(SUMMARY_COLUMNS)}) VALUES %s "
-                + SUMMARY_CONFLICT_SQL,
+                f"INSERT INTO {destino.resumo} ({', '.join(SUMMARY_COLUMNS)}) VALUES %s "
+                + _SUMMARY_CONFLICT_TEMPLATE.format(tabela=resumo),
                 [tuple(r[c] for c in SUMMARY_COLUMNS) for r in summary_rows],
             )
     except Exception:

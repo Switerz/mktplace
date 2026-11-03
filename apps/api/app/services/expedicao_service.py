@@ -69,6 +69,53 @@ class SegredoInvalido(RuntimeError):
 FILA = "marts.expedicao_fila_atual"
 RUN = "marts.expedicao_refresh_run"
 
+#: EXPEDICAO-KOKESHI-EXPORT (migration 034). Conta sem app na Open Platform tem
+#: a fila carregada do export do Seller Centre pelo operador, em tabelas
+#: PROPRIAS: o publicador agendado apaga a fila da Shopee inteira a cada 2 h.
+#: Cada conta do export tem o seu lote; `_fotografia_export` confere cada um
+#: com a mesma regra de `_carregar_snapshot` e a resposta junta os dois.
+FILA_EXPORT = "marts.expedicao_fila_export"
+RUN_EXPORT = "marts.expedicao_refresh_run_export"
+CONTA_EXPORT = "marts.expedicao_conta_export"
+
+#: UM SELECT, lido por `_linhas` como a sonda da etapa: sem a 034 no destino a
+#: resposta e' exatamente a de antes.
+_EXPORT_SONDA_SQL = f"""
+    SELECT to_regclass('{FILA_EXPORT}') IS NOT NULL
+       AND to_regclass('{RUN_EXPORT}') IS NOT NULL
+       AND to_regclass('{CONTA_EXPORT}') IS NOT NULL AS export_ok
+"""
+
+#: Colunas da fila unida. Lista EXPLICITA: `SELECT *` quebraria no dia em que
+#: uma migration mexesse so' numa das duas tabelas.
+_COLUNAS_UNIAO_FILA = (
+    "effective_at", "refresh_batch_id", "channel", "marketplace_order_id",
+    *("shop_account", "brand", "created_at", "paid_at", "dispatch_deadline",
+      "deadline_source", "deadline_status", "operational_age_status",
+      "is_slow_vs_baseline", "is_source_zombie", "is_stalled", "hours_open",
+      "hours_overdue", "logistic_type", "carrier", "source_ingested_at",
+      "source_freshness_status", "timestamp_quality"),
+    "etapa",
+)
+_COLUNAS_UNIAO_RUN = (
+    "snapshot_hour", "shop_account", "brand", "refresh_batch_id", "observed_at",
+    "backlog_count", "overdue_count", "due_within_24h_count", "on_time_count",
+    "deadline_unavailable_count", "over_48h_count", "slow_count", "zombie_count",
+    "stalled_count", "source_watermark_at", "source_advanced", "run_status", "channel",
+)
+
+
+def _uniao(colunas: tuple[str, ...], tabelas: tuple[str, ...], apelido: str) -> str:
+    """Subconsulta `UNION ALL` das tabelas. NAO filtra canal nem lote: quem a usa
+    escreve os dois no WHERE de fora (o teste do service confere o texto)."""
+    lista = ", ".join(colunas)
+    corpo = " UNION ALL ".join(f"SELECT {lista} FROM {t}" for t in tabelas)
+    return f"({corpo}) AS {apelido}"
+
+
+_FILA_UNIDA = _uniao(_COLUNAS_UNIAO_FILA, (FILA, FILA_EXPORT), "fila")
+_RUN_UNIDO = _uniao(_COLUNAS_UNIAO_RUN, (RUN, RUN_EXPORT), "resumo")
+
 #: Colunas servidas da fila. ALLOWLIST, nunca `SELECT *`.
 #: `marketplace_order_id` esta deliberadamente FORA — ver `_order_ref`.
 FILA_COLUNAS = (
@@ -159,6 +206,13 @@ PONTOS_MAX = 2000
 #: buraco que nao existe.
 MARCAS_SEM_COBERTURA = ("kokeshi",)
 
+#: Sai das notas quando a Kokeshi chega pelo export (EXPEDICAO-KOKESHI-EXPORT).
+NOTA_KOKESHI_SEM_FONTE = (
+    "Kokeshi nao e' coberta por esta fonte (ausente em raw.shopee_orders).")
+NOTA_EXPORT = (
+    "{marcas}: fila do export de pedidos do Seller Centre, carregado pelo"
+    " operador da conta; a hora e' a da propria carga (accounts[].observed_at).")
+
 NOTA_SEM_AGENDAMENTO = (
     "Nenhum agendamento existe: a fotografia so' avanca quando alguem executa"
     " o refresh manualmente."
@@ -213,7 +267,7 @@ CANAIS: dict[str, Canal] = {
         marcas_sem_cobertura=MARCAS_SEM_COBERTURA,
         notas=(
             NOTA_SEM_AGENDAMENTO,
-            "Kokeshi nao e' coberta por esta fonte (ausente em raw.shopee_orders).",
+            NOTA_KOKESHI_SEM_FONTE,
             NOTA_SEM_IDENTIFICADOR,
             NOTA_FRESCOR,
         ),
@@ -381,17 +435,26 @@ def _indisponivel(canal: Canal, motivo: str, *, tendencia: bool = False) -> dict
     return envelope
 
 
+def _sem_cobertura(canal: Canal, cobertas: frozenset[str] = frozenset()) -> list[str]:
+    """Marcas sem fonte no canal, tirando as que o export cobriu nesta resposta."""
+    return [m for m in canal.marcas_sem_cobertura if m not in cobertas]
+
+
 def _limitacoes(canal: Canal, idade_h: Optional[float],
-                extras: Optional[list[str]] = None) -> dict:
+                extras: Optional[list[str]] = None,
+                cobertas: frozenset[str] = frozenset()) -> dict:
     # Com o numero do pedido publico, a nota "nao e' servido" mentiria.
     notas = [n for n in canal.notas
-             if not (n == NOTA_SEM_IDENTIFICADOR and _numero_publico())]
+             if not (n == NOTA_SEM_IDENTIFICADOR and _numero_publico())
+             and not (n == NOTA_KOKESHI_SEM_FONTE and "kokeshi" in cobertas)]
+    if cobertas:
+        notas.append(NOTA_EXPORT.format(marcas=", ".join(sorted(cobertas))))
     notas.extend(extras or [])
     return {
         "no_automation": True,
         "load_mode": "manual_snapshot",
         "snapshot_age_hours": idade_h,
-        "brands_not_covered": list(canal.marcas_sem_cobertura),
+        "brands_not_covered": _sem_cobertura(canal, cobertas),
         "order_identifier_withheld": not _numero_publico() and _order_ref("x") is None,
         "notes": notas,
     }
@@ -466,8 +529,102 @@ def _carregar_snapshot(db, canal: Canal) -> tuple[Optional[dict], Optional[str]]
     if resumos[0]["observed_at"] != cab["effective_at"]:
         return None, UNAVAILABLE_INCONSISTENT_BATCH
 
-    return {"batch": cab["batch"], "effective_at": cab["effective_at"],
-            "linhas": cab["linhas"], "resumos": resumos}, None
+    snap = {"batch": cab["batch"], "effective_at": cab["effective_at"],
+            "linhas": cab["linhas"], "resumos": resumos}
+    _juntar_export(db, canal, snap)
+    return snap, None
+
+
+_RESUMO_EXPORT_COLUNAS = (
+    "shop_account, brand, backlog_count, overdue_count, due_within_24h_count,"
+    " on_time_count, deadline_unavailable_count, over_48h_count, slow_count,"
+    " zombie_count, stalled_count, run_status, source_watermark_at,"
+    " source_advanced, snapshot_hour, observed_at, refresh_batch_id")
+
+
+def _fotografia_export(db, canal: Canal, contas_da_fonte: set[str]) -> list[dict]:
+    """O ultimo lote COERENTE de cada conta do export (EXPEDICAO-KOKESHI-EXPORT).
+
+    Mesma regra de `_carregar_snapshot`, por conta: a fila da conta tem um lote
+    so', um instante so', e ambos batem com o resumo mais recente dela, com o
+    mesmo numero de pedidos. Conta incoerente fica FORA (segue sem cobertura),
+    nunca derruba a Shopee inteira. Conta que ja' vem da fonte agendada tambem
+    fica fora: duas fontes para a mesma loja contariam cada pedido duas vezes.
+    """
+    if canal.slug != "shopee":
+        return []
+    sonda = _linhas(db, _EXPORT_SONDA_SQL, {})
+    if not (sonda and sonda[0].get("export_ok") is True):
+        return []
+    contas = [str(r["shop_account"]) for r in _linhas(db, f"""
+        SELECT c.shop_account
+        FROM {CONTA_EXPORT} c
+        JOIN marts.dim_loja l ON l.brand_key = c.brand
+        WHERE c.channel = :canal AND c.ativo AND l.ativo
+    """, {"canal": canal.slug}) if str(r["shop_account"]) not in contas_da_fonte]
+    if not contas:
+        return []
+    resumos = _linhas(db, f"""
+        SELECT DISTINCT ON (shop_account) {_RESUMO_EXPORT_COLUNAS}
+        FROM {RUN_EXPORT} WHERE channel = :canal AND shop_account = ANY(:contas)
+        ORDER BY shop_account, observed_at DESC
+    """, {"canal": canal.slug, "contas": contas})
+    cabecalhos = {str(c["shop_account"]): c for c in _linhas(db, f"""
+        SELECT shop_account, count(*) AS linhas,
+               count(DISTINCT refresh_batch_id) AS lotes,
+               count(DISTINCT effective_at) AS instantes,
+               min(refresh_batch_id) AS batch, min(effective_at) AS effective_at
+        FROM {FILA_EXPORT} WHERE channel = :canal AND shop_account = ANY(:contas)
+        GROUP BY shop_account
+    """, {"canal": canal.slug, "contas": contas})}
+
+    coerentes = []
+    for r in resumos:
+        cab = cabecalhos.get(str(r["shop_account"]))
+        if cab is None:
+            # Fotografia vazia: so' vale se o resumo do lote disser zero.
+            if int(r["backlog_count"]) == 0:
+                coerentes.append(r)
+            continue
+        if (cab["lotes"] == 1 and cab["instantes"] == 1
+                and cab["batch"] == r["refresh_batch_id"]
+                and cab["effective_at"] == r["observed_at"]
+                and int(cab["linhas"]) == int(r["backlog_count"])):
+            coerentes.append(r)
+    return coerentes
+
+
+def _juntar_export(db, canal: Canal, snap: dict) -> None:
+    """Acrescenta a fotografia das contas do export a do lote agendado.
+
+    O lote agendado continua sendo a identidade da resposta (`batch`,
+    `effective_at`); as contas do export entram em `resumos` com a hora
+    PROPRIA (`observed_at`) e os lotes delas em `lotes_export`.
+    """
+    extra = _fotografia_export(db, canal, {str(r["shop_account"]) for r in snap["resumos"]})
+    snap["lotes_export"] = tuple(str(r["refresh_batch_id"]) for r in extra)
+    snap["cobertas"] = frozenset(str(r["brand"]) for r in extra)
+    # Frescor da conta do export: idade do watermark contra o instante mais
+    # recente entre a fotografia agendada e a carga dela. Contra o proprio
+    # `observed_at` ela seria fresca para sempre se o operador parasse.
+    snap["referencia_frescor"] = {
+        str(r["brand"]): max(snap["effective_at"], r["observed_at"]) for r in extra}
+    if extra:
+        snap["resumos"] = sorted([*snap["resumos"], *extra],
+                                 key=lambda r: (str(r["brand"]), str(r["shop_account"])))
+        snap["linhas"] = int(snap["linhas"]) + sum(int(r["backlog_count"]) for r in extra)
+
+
+def _origem_da_fila(batch: str, lotes_export: tuple[str, ...] = ()) -> tuple[str, str, dict]:
+    """(FROM, predicado do lote, parametros) da fila de UMA resposta.
+
+    Sem conta do export, o texto e' exatamente o de antes: `FILA` e o lote
+    agendado. Com ela, a uniao das duas tabelas e os lotes de todas as contas.
+    """
+    if not lotes_export:
+        return FILA, "refresh_batch_id = :batch", {"batch": batch}
+    return (_FILA_UNIDA, "refresh_batch_id = ANY(:lotes)",
+            {"lotes": [batch, *lotes_export]})
 
 
 def _auditoria(db, canal: Canal, effective_at: datetime) -> dict:
@@ -524,24 +681,31 @@ def _frescor(db, canal: Canal) -> list[dict]:
 
 
 def _monta_frescor(bruto: list[dict], resumos: list[dict],
-                   effective_at: datetime) -> list[dict]:
+                   effective_at: datetime,
+                   referencia: Optional[dict[str, datetime]] = None) -> list[dict]:
     """Uma linha por marca do batch, cruzando auditoria e resumo.
 
     O watermark vem do RESUMO do batch servido; a auditoria fornece o veredito.
     Se a linha de auditoria for antiga (sem `measures`), o veredito e' derivado
     do proprio watermark em vez de herdar a classificacao velha — servir
     `critical` de 18:41 como estado atual seria exatamente o defeito corrigido.
+
+    `referencia` (EXPEDICAO-KOKESHI-EXPORT) troca o instante de comparacao das
+    marcas do export: elas nao tem linha de auditoria e o veredito sai SEMPRE
+    do watermark, contra o instante mais recente da resposta.
     """
     por_marca = {r["brand"]: r for r in bruto}
+    referencia = referencia or {}
     saida = []
     for marca in sorted({r["brand"] for r in resumos}):
         contas = [r for r in resumos if r["brand"] == marca]
         carimbos = [c["source_watermark_at"] for c in contas]
-        invalido = any(w is None or w > effective_at for w in carimbos)
+        instante = referencia.get(marca, effective_at)
+        invalido = any(w is None or w > instante for w in carimbos)
         watermark = None if invalido else min(carimbos)
-        idade = _horas(watermark, effective_at)
+        idade = _horas(watermark, instante)
 
-        a = por_marca.get(marca) or {}
+        a = {} if marca in referencia else (por_marca.get(marca) or {})
         det = a.get("detalhe") or {}
         if isinstance(det, str):
             det = json.loads(det)
@@ -611,12 +775,17 @@ def _identidade_da_conta(canal: Canal, linha_registry: dict) -> str:
 
 
 def _cobertura(db, canal: Canal, resumos: list[dict],
-               effective_at: datetime) -> dict:
+               effective_at: datetime,
+               cobertas: frozenset[str] = frozenset()) -> dict:
     """Conjuntos ESPERADO x OBSERVADO, os dois no dominio da CONTA.
 
     A cobertura por MARCA continua existindo, e em campo proprio:
     `brands_not_covered`. Misturar as duas coisas para preservar compatibilidade
     aparente foi justamente o defeito corrigido aqui.
+
+    Conta do export SERVIDA nesta resposta (`cobertas`) e' esperada: ela nao
+    esta' em `dim_seller_account` de proposito (la' a fonte agendada passaria a
+    espera-la no Data Mart). Sem fotografia, segue em `brands_not_covered`.
     """
     esperadas = _linhas(db, """
         SELECT sa.external_seller_id, l.brand_key AS brand, sa.account_name
@@ -626,6 +795,10 @@ def _cobertura(db, canal: Canal, resumos: list[dict],
         ORDER BY l.brand_key
     """, {"mkt": canal.marketplace_id})
     esperadas_por_conta = {_identidade_da_conta(canal, r): r for r in esperadas}
+    for r in resumos:
+        if str(r["brand"]) in cobertas:
+            esperadas_por_conta.setdefault(
+                str(r["shop_account"]), {"brand": r["brand"]})
     observadas = {str(r["shop_account"]): r for r in resumos}
 
     contas = []
@@ -652,7 +825,7 @@ def _cobertura(db, canal: Canal, resumos: list[dict],
         "unexpected_accounts": sorted(set(observadas) - set(esperadas_por_conta)),
         "accounts": contas,
         # Cobertura de MARCAS vive aqui, e so' aqui.
-        "brands_not_covered": list(canal.marcas_sem_cobertura),
+        "brands_not_covered": _sem_cobertura(canal, cobertas),
     }
 
 
@@ -693,7 +866,8 @@ class PertoDeVencer:
 
 
 def _perto_de_vencer(db, canal: Canal, batch: str,
-                     effective_at: datetime) -> PertoDeVencer:
+                     effective_at: datetime,
+                     lotes_export: tuple[str, ...] = ()) -> PertoDeVencer:
     """EXPEDICAO-VENCE-AMANHA + PERTO-DE-VENCER: hoje e o PROXIMO dia de prazo.
 
     O `ship_by_date` da Shopee cai sempre as 23:59 de Brasilia e nunca em fim
@@ -713,13 +887,14 @@ def _perto_de_vencer(db, canal: Canal, batch: str,
     dias uteis); o dia de hoje e o menor dia futuro sao escolhidos aqui.
     """
     hoje = _dia_brt(effective_at)
+    origem, lote, p_lote = _origem_da_fila(batch, lotes_export)
     linhas = _linhas(db, f"""
         SELECT {DIA_DO_PRAZO_SQL} AS dia, shop_account, count(*) AS vencem
-        FROM {FILA}
-        WHERE channel = :canal AND refresh_batch_id = :batch
+        FROM {origem}
+        WHERE channel = :canal AND {lote}
           AND {NAO_VENCIDO_COM_PRAZO_SQL}
         GROUP BY 1, shop_account
-    """, {"canal": canal.slug, "batch": batch, "hoje": hoje})
+    """, {"canal": canal.slug, **p_lote, "hoje": hoje})
     futuros = [r["dia"] for r in linhas if r["dia"] > hoje]
     proximo = min(futuros) if futuros else None
     return PertoDeVencer(
@@ -788,8 +963,10 @@ def get_expedicao(
     # lote (nao e' materializado). Canal sem prazo: nulo por ausencia, nunca zero.
     tem_prazo = prazo_publicado(canal, resumos)
     perto: Optional[PertoDeVencer] = None
+    lotes_export = snap.get("lotes_export", ())
+    cobertas = snap.get("cobertas", frozenset())
     if tem_prazo:
-        perto = _perto_de_vencer(db, canal, snap["batch"], effective_at)
+        perto = _perto_de_vencer(db, canal, snap["batch"], effective_at, lotes_export)
     if perto is None:
         totais.update(due_today_count=None, due_next_day_count=None, due_soon_count=None)
     else:
@@ -806,7 +983,7 @@ def get_expedicao(
         return {"due_today_count": h, "due_next_day_count": p, "due_soon_count": soma}
 
     saude = "healthy"
-    cobertura = _cobertura(db, canal, resumos, effective_at)
+    cobertura = _cobertura(db, canal, resumos, effective_at, cobertas)
     if cobertura["missing_accounts"]:
         saude = "account_missing"
     elif cobertura["unexpected_accounts"]:
@@ -846,21 +1023,23 @@ def get_expedicao(
              "run_status": r["run_status"],
              "source_watermark_at": r["source_watermark_at"],
              "source_advanced": r["source_advanced"],
-             "snapshot_hour": r["snapshot_hour"]}
+             "snapshot_hour": r["snapshot_hour"],
+             "observed_at": r["observed_at"]}
             for r in resumos
         ],
-        "freshness": _monta_frescor(_frescor(db, canal), resumos, effective_at),
+        "freshness": _monta_frescor(_frescor(db, canal), resumos, effective_at,
+                                    snap.get("referencia_frescor")),
         "coverage": cobertura,
         "queue": [],
         "pagination": None,
-        "limitations": _limitacoes(canal, idade_snapshot),
+        "limitations": _limitacoes(canal, idade_snapshot, cobertas=cobertas),
     }
 
     if include_queue:
         fila, total = _pagina_da_fila(
             db, canal, snap["batch"], brands=brands, accounts=accounts,
             situacoes=situacoes, order_by=order_by, limit=limit, offset=offset,
-            perto=perto)
+            perto=perto, lotes_export=lotes_export)
         resposta["queue"] = fila
         resposta["pagination"] = {
             "limit": limit, "offset": offset, "returned": len(fila),
@@ -871,7 +1050,8 @@ def get_expedicao(
 
 def _pagina_da_fila(db, canal: Canal, batch: str, *, brands, accounts, situacoes,
                     order_by: str, limit: int, offset: int,
-                    perto: Optional[PertoDeVencer] = None) -> tuple[list[dict], int]:
+                    perto: Optional[PertoDeVencer] = None,
+                    lotes_export: tuple[str, ...] = ()) -> tuple[list[dict], int]:
     """Filtros e ordenacao por ALLOWLIST; valores sempre parametrizados.
 
     `channel` e `refresh_batch_id` entram JUNTOS no filtro: o batch ja' seria
@@ -883,8 +1063,9 @@ def _pagina_da_fila(db, canal: Canal, batch: str, *, brands, accounts, situacoes
     Sem ele (canal sem prazo) ou sem data, o filtro e' `FALSE`: lista vazia,
     nunca a fila inteira.
     """
-    onde = ["channel = :canal", "refresh_batch_id = :batch"]
-    params: dict[str, Any] = {"canal": canal.slug, "batch": batch}
+    origem, lote, p_lote = _origem_da_fila(batch, lotes_export)
+    onde = ["channel = :canal", lote]
+    params: dict[str, Any] = {"canal": canal.slug, **p_lote}
 
     if brands:
         onde.append("brand = ANY(:brands)")
@@ -904,7 +1085,7 @@ def _pagina_da_fila(db, canal: Canal, batch: str, *, brands, accounts, situacoes
         onde.append(SITUACAO_SQL[s])
 
     filtro = " AND ".join(onde)
-    total = _linhas(db, f"SELECT count(*) AS n FROM {FILA} WHERE {filtro}",
+    total = _linhas(db, f"SELECT count(*) AS n FROM {origem} WHERE {filtro}",
                     params)[0]["n"]
 
     ordem = ", ".join(ORDENACOES.get(order_by, ORDEM_PADRAO))
@@ -917,7 +1098,7 @@ def _pagina_da_fila(db, canal: Canal, batch: str, *, brands, accounts, situacoes
     extra = ", etapa" if tem_etapa else ""
     brutas = _linhas(db, f"""
         SELECT marketplace_order_id, {colunas}{extra}
-        FROM {FILA} WHERE {filtro}
+        FROM {origem} WHERE {filtro}
         ORDER BY {ordem}
         LIMIT :limit OFFSET :offset
     """, {**params, "limit": limit, "offset": offset})
@@ -965,13 +1146,21 @@ def get_tendencia(db, *, channel: Optional[str] = None,
         onde.append("shop_account = ANY(:accounts)")
         params["accounts"] = list(accounts)
 
+    # As contas do export (EXPEDICAO-KOKESHI-EXPORT) entram na serie com as
+    # horas em que o operador carregou; o grao continua (conta, hora).
+    resumo = RUN
+    if canal.slug == "shopee":
+        sonda = _linhas(db, _EXPORT_SONDA_SQL, {})
+        if sonda and sonda[0].get("export_ok") is True:
+            resumo = _RUN_UNIDO
+
     pontos = _linhas(db, f"""
         SELECT snapshot_hour, shop_account, brand, refresh_batch_id, observed_at,
                backlog_count, overdue_count, due_within_24h_count, on_time_count,
                deadline_unavailable_count, over_48h_count, slow_count,
                zombie_count, stalled_count, source_watermark_at, source_advanced,
                run_status
-        FROM {RUN} WHERE {" AND ".join(onde)}
+        FROM {resumo} WHERE {" AND ".join(onde)}
         ORDER BY snapshot_hour ASC, brand ASC, shop_account ASC
         LIMIT :teto
     """, {**params, "teto": PONTOS_MAX + 1})
@@ -1203,9 +1392,11 @@ def _fila_vazia_publicada(db, canal: Canal) -> tuple[Optional[dict], Optional[st
     if any(int(r[m]) for r in resumos for m in _MEDIDAS_RESUMO):
         return None, (f"{UNAVAILABLE_INCONSISTENT_BATCH} (fila vazia, mas o resumo "
                       f"do ultimo lote tem {pendentes} pedido(s) no backlog)")
-    return {"batch": resumos[0]["refresh_batch_id"],
+    snap = {"batch": resumos[0]["refresh_batch_id"],
             "effective_at": resumos[0]["observed_at"],
-            "linhas": 0, "resumos": resumos}, None
+            "linhas": 0, "resumos": resumos}
+    _juntar_export(db, canal, snap)
+    return snap, None
 
 
 #: T-0015 (contrato etapa v1, secoes 3 e 5). Ordem ESTAVEL no fluxo do pedido;
@@ -1236,7 +1427,8 @@ _COLUNA_ETAPA_SQL = """
 
 
 def _etapas_publicadas(db, canal: Canal, batch: str,
-                       filtro: _FiltroMarca) -> Optional[dict[str, int]]:
+                       filtro: _FiltroMarca,
+                       lotes_export: tuple[str, ...] = ()) -> Optional[dict[str, int]]:
     """Contagem por `etapa` do lote, no servidor, com o filtro de marca.
 
     `None` quando a 033 nao esta' no destino. A deteccao roda na MESMA
@@ -1245,14 +1437,15 @@ def _etapas_publicadas(db, canal: Canal, batch: str,
     """
     if db.execute(text(_COLUNA_ETAPA_SQL)).scalar() is not True:
         return None
+    origem, lote, p_lote = _origem_da_fila(batch, lotes_export)
     return {
         str(r["etapa"]): int(r["n"])
         for r in _linhas(db, f"""
             SELECT etapa, count(*) AS n
-            FROM {FILA}
-            WHERE channel = :canal AND refresh_batch_id = :batch{filtro.sql()}
+            FROM {origem}
+            WHERE channel = :canal AND {lote}{filtro.sql()}
             GROUP BY etapa
-        """, {"canal": canal.slug, "batch": batch, **filtro.params()})
+        """, {"canal": canal.slug, **p_lote, **filtro.params()})
     }
 
 
@@ -1296,14 +1489,16 @@ def _fila_aberta(db, channel: str,
     colunas = ",\n               ".join(
         f"count(*) FILTER (WHERE {SITUACAO_SQL[sit]}) AS {chave}"
         for chave, sit in _FILA_SOBREPOSICOES)
+    lotes_export = snap.get("lotes_export", ())
+    origem, lote, p_lote = _origem_da_fila(snap["batch"], lotes_export)
     linha = _linhas(db, f"""
         SELECT count(*) AS base,
                count(*) FILTER (WHERE deadline_status IN ({dominio}))
                    AS aguardando_expedicao,
                {colunas}
-        FROM {FILA}
-        WHERE channel = :canal AND refresh_batch_id = :batch{filtro.sql()}
-    """, {"canal": canal.slug, "batch": snap["batch"], **filtro.params()})[0]
+        FROM {origem}
+        WHERE channel = :canal AND {lote}{filtro.sql()}
+    """, {"canal": canal.slug, **p_lote, **filtro.params()})[0]
 
     base = int(linha["base"])
     etapas = [{"key": "aguardando_expedicao", "label": "Aguardando expedição",
@@ -1314,7 +1509,7 @@ def _fila_aberta(db, channel: str,
     # T-0015: etapa real so' com a 033 no destino E alguma linha com etapa
     # publicada. Sem a coluna, ou com tudo `nao_publicada`, a secao e' a de
     # antes, byte a byte (etapa unica + limitacao).
-    por_etapa = _etapas_publicadas(db, canal, snap["batch"], filtro)
+    por_etapa = _etapas_publicadas(db, canal, snap["batch"], filtro, lotes_export)
     if por_etapa and any(k != ETAPA_NAO_PUBLICADA for k in por_etapa):
         etapas = _etapas_reais(por_etapa)
         etapa_parcial = ETAPA_NAO_PUBLICADA in por_etapa
@@ -1342,7 +1537,8 @@ def _fila_aberta(db, channel: str,
     resumos = [r for r in snap["resumos"]
                if not filtro.marcas or str(r["brand"]).lower() in filtro.marcas]
     frescores = [f["freshness"] for f in
-                 _monta_frescor(_frescor(db, canal), resumos, snap["effective_at"])]
+                 _monta_frescor(_frescor(db, canal), resumos, snap["effective_at"],
+                                snap.get("referencia_frescor"))]
     # Valor fora do dominio (auditoria antiga, typo) vale `unknown`: nem KeyError
     # (500), nem um Literal invalido na resposta.
     frescores = [f if f in _ORDEM_FRESCOR else "unknown" for f in frescores]
