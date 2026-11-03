@@ -240,7 +240,11 @@ def atraso_7d_do_export(estado: list[dict], conta: SellerAccount,
             shopee_ldr.Pedido(
                 shop_id=str(p.get("shop_id") or conta.external_seller_id),
                 shop_account=str(p.get("shop_account") or ""),
-                order_status=p["order_status"],
+                # Status nulo = fora do vocabulario do export (ex.: "O comprador
+                # pode pedir uma devolucao ate ...", "Pedido Recebido"): em
+                # 03/11/2026, 2.698 pedidos na janela, TODOS coletados. Entram
+                # pela coleta; so' cancelado/pos-envio dependem do status.
+                order_status=p.get("order_status") or "",
                 fulfillment_flag=p.get("fulfillment_flag"),
                 pay_time=p.get("pay_time"),
                 ship_by_date=p.get("ship_by_date"),
@@ -248,8 +252,6 @@ def atraso_7d_do_export(estado: list[dict], conta: SellerAccount,
                 cancel_reason=p.get("cancel_reason"),
             )
             for p in estado
-            # Status fora do vocabulario do export fica fora, como na fila.
-            if p.get("order_status")
         ]
         return atraso_7d.apurar_shopee(
             pedidos, {conta.external_seller_id: ingerido_em}, effective_at)
