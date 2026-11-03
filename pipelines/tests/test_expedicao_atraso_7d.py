@@ -262,7 +262,7 @@ class _ConnML:
 
 
 def _inicio(primeiro, sem_fuso=0, amostra=None):
-    return {"primeiro_prazo": primeiro, "sem_fuso": sem_fuso,
+    return {"primeira_leitura": primeiro, "sem_fuso": sem_fuso,
             "amostra_sem_fuso": amostra}
 
 
@@ -282,6 +282,18 @@ def test_ml_janela_comeca_no_primeiro_sla_desde_03_11():
     assert params["hoje"] == date(2026, 11, 6)
     assert params["sla_atrasado"] == "delayed"
     assert set(params["coletados"]) == {"picked_up", "dropped_off", "in_hub"}
+
+
+def test_ml_hoje_sem_dia_fechado_desde_a_primeira_leitura_fica_nulo():
+    """Medido em 03/11/2026: a 1a leitura trouxe envios parados com prazo de
+    13/10 a 31/10 (25 de 33 `delayed`). Contados, o ML sairia com 75%. A janela
+    comeca no dia da 1a LEITURA: no proprio dia ela esta' vazia -> nulo."""
+    hoje = datetime(2026, 11, 3, 15, 0, tzinfo=UTC)
+    conn = _ConnML(_inicio(datetime(2026, 11, 3, 14, 14, tzinfo=UTC)),
+                   [{"seller_id": "1", "due": 28, "late": 21}])
+    assert atraso_7d.calcular_ml(conn, hoje) == {}
+    assert len(conn.chamadas) == 1, "sem janela, nem consulta o agregado"
+    assert "sla_extracted_at" in atraso_7d.ML_SLA_INICIO_SQL
 
 
 def test_ml_primeiro_sla_antigo_nao_estica_a_janela():

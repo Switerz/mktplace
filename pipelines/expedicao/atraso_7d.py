@@ -27,7 +27,11 @@ nunca o relogio do processo. A janela publicada e' a EFETIVAMENTE usada:
   com a fonte parada encolhe a janela do mesmo jeito, em vez de ver pendente
   de ingestao como atraso.
 * Mercado Livre: o SLA so' existe na fonte desde 03/11/2026; a janela comeca
-  no maior entre `hoje - 7` e o primeiro dia BRT com `sla_expected_date`.
+  no maior entre `hoje - 7` e o dia BRT da PRIMEIRA LEITURA do SLA
+  (`sla_extracted_at`). Nao o prazo mais antigo: na primeira leitura vieram
+  envios parados com prazo de 13/10 a 31/10 (33, dos quais 25 `delayed`) — so'
+  os que sobraram abertos. Contados, levariam a taxa do ML a 75% (medido em
+  03/11/2026). Prazo anterior a primeira leitura nao foi observado ao vivo.
 
 AUSENCIA E' NULL, NUNCA ZERO
 ----------------------------
@@ -197,17 +201,18 @@ MARGEM_CRIACAO = timedelta(days=45)
 
 _SLA_TEXTO = "to_jsonb(s) ->> 'sla_expected_date'"
 
-#: Primeiro prazo de SLA na fonte (para "desde 03/11") e a contagem de SLA sem
-#: fuso. `sla_*` sao lidos por `to_jsonb(s) ->> ...`, como em `ML_BACKLOG_SQL`:
+#: Primeira LEITURA de SLA na fonte (para "desde 03/11"; ver o docstring) e a
+#: contagem de SLA sem fuso. `sla_*` sao lidos por `to_jsonb(s) ->> ...`, como em `ML_BACKLOG_SQL`:
 #: o mesmo SQL roda com ou sem as colunas na fonte.
 ML_SLA_INICIO_SQL = f"""
 WITH sla AS (
-  SELECT {_SLA_TEXTO} AS sla_texto
+  SELECT {_SLA_TEXTO} AS sla_texto,
+         to_jsonb(s) ->> 'sla_extracted_at' AS lido_texto
     FROM raw.ml_shipments s
    WHERE s.date_created >= %(criado_desde)s
 )
-SELECT MIN(CASE WHEN sla_texto ~ '{_ISO_COM_FUSO_SQL}'
-                THEN sla_texto::timestamptz END)            AS primeiro_prazo,
+SELECT MIN(CASE WHEN lido_texto ~ '{_ISO_COM_FUSO_SQL}'
+                THEN lido_texto::timestamptz END)           AS primeira_leitura,
        COUNT(*) FILTER (WHERE sla_texto !~ '{_ISO_COM_FUSO_SQL}') AS sem_fuso,
        MIN(sla_texto) FILTER (WHERE sla_texto !~ '{_ISO_COM_FUSO_SQL}') AS amostra_sem_fuso
   FROM sla
@@ -272,11 +277,11 @@ def _criado_desde(effective_at: datetime) -> datetime:
     return datetime.combine(desde - MARGEM_CRIACAO, time(0, 0))
 
 
-def inicio_ml(desde: date, primeiro_prazo: datetime | None) -> date | None:
-    """Maior entre `desde` e o dia BRT do primeiro SLA. `None` sem SLA."""
-    if primeiro_prazo is None:
+def inicio_ml(desde: date, primeira_leitura: datetime | None) -> date | None:
+    """Maior entre `desde` e o dia BRT da primeira leitura de SLA. `None` sem SLA."""
+    if primeira_leitura is None:
         return None
-    return max(desde, shopee_ldr.data_brt(primeiro_prazo))
+    return max(desde, shopee_ldr.data_brt(primeira_leitura))
 
 
 def calcular_ml(conn, effective_at: datetime) -> dict[str, dict]:
@@ -293,9 +298,9 @@ def calcular_ml(conn, effective_at: datetime) -> dict[str, dict]:
     if _campo(linha, "sem_fuso", 1):
         # Mesmo parser da fila: levanta com a mensagem de contrato.
         instante_iso_com_fuso(_campo(linha, "amostra_sem_fuso", 2), "sla_expected_date")
-    primeiro = _campo(linha, "primeiro_prazo", 0)
+    primeiro = _campo(linha, "primeira_leitura", 0)
     if primeiro is not None and primeiro.tzinfo is None:
-        raise ValueError("primeiro prazo de SLA sem fuso: a coluna e' timestamptz")
+        raise ValueError("primeira leitura de SLA sem fuso: a coluna e' timestamptz")
     inicio = inicio_ml(desde, primeiro)
     if inicio is None or inicio > ate:
         return {}
