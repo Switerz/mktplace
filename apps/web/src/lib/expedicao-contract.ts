@@ -18,11 +18,12 @@
  * Confundir os dois primeiros fez as quatro marcas nascerem vermelhas no
  * primeiro piloto (EXP-1E). A tela repete a separacao em rotulos distintos.
  *
- * SEM IDENTIFICADOR DE PEDIDO
- * ---------------------------
- * A API nao serve `order_sn` porque nao tem autenticacao. `order_ref` e' opaco,
- * opcional e NUNCA vira link para o marketplace. A tela nao tenta reconstruir
- * o identificador real nem exibe coluna vazia quando ele nao vem.
+ * IDENTIFICADOR DE PEDIDO
+ * -----------------------
+ * `order_number` e' o numero real do pedido: a API o serve por decisao de
+ * produto de 30/10/2026, ate' a Torre ter login (desligavel no Render). Sem
+ * ele, `order_ref` e' opaco e opcional. Nenhum dos dois vira link para o
+ * marketplace, e a tela nao exibe coluna vazia quando nenhum vem.
  */
 import { brandLabel } from "./filters/brands.ts";
 import {
@@ -35,7 +36,12 @@ import {
 } from "./expedicao-ux.ts";
 import { TEXTO_INDISPONIVEL, formatarDecimal, formatarInteiro } from "./expedicao-formato.ts";
 
-/** Os oito valores de `situacao` aceitos pela API. Allowlist fechada. */
+/**
+ * Os valores de `situacao` aceitos pela API. Allowlist fechada.
+ * `due_next_day` (EXPEDICAO-VENCE-AMANHA): o proximo dia de prazo depois do
+ * dia da fotografia, so' na Shopee. `due_soon` (EXPEDICAO-PERTO-DE-VENCER):
+ * hoje ate' as 23:59 + o proximo dia de prazo, sem os vencidos.
+ */
 export const SITUACOES = [
   "overdue",
   "due_within_24h",
@@ -45,6 +51,8 @@ export const SITUACOES = [
   "stalled",
   "slow",
   "zombie",
+  "due_next_day",
+  "due_soon",
 ] as const;
 export type Situacao = (typeof SITUACOES)[number];
 
@@ -69,7 +77,12 @@ export const EXPLICACAO_LIMIAR_48H =
   "Limiar operacional interno da Torre, não é SLA do marketplace: o prazo " +
   "contratual aparece em Vencidos / Vence em 24h, que vem do ship_by_date da " +
   "Shopee.";
-/** O mesmo limiar num canal SEM prazo publicado (Mercado Livre). */
+/** O mesmo limiar no Mercado Livre COM o SLA oficial na fotografia. */
+export const EXPLICACAO_LIMIAR_48H_ML =
+  "Limiar operacional interno da Torre, não é SLA do marketplace: o prazo " +
+  "contratual aparece em Vencidos / Perto de vencer, que vem do SLA de " +
+  "despacho do Mercado Livre.";
+/** O mesmo limiar num canal SEM prazo publicado (Mercado Livre sem SLA). */
 export const EXPLICACAO_LIMIAR_48H_SEM_PRAZO =
   "Limiar operacional interno da Torre, não é SLA do marketplace. O canal não " +
   "publica prazo de despacho: não há vencidos a comparar.";
@@ -129,22 +142,68 @@ export function sanitizarCanal(
 }
 
 /**
- * O Mercado Livre NAO publica prazo de despacho — medido no EXP-3A, os campos
- * candidatos estao 0% preenchidos na fonte. Entao `overdue`, `due_within_24h` e
- * `on_time` sao ZERO por ausencia de dado, nao por desempenho. Exibir "0
- * vencidos" para o ML seria uma afirmacao que ninguem mediu.
+ * Fotografia do Mercado Livre SEM o SLA oficial de despacho (antes do
+ * EXPEDICAO-ML-PRAZO, todas; depois, as que o extrator nao preencheu). Nela
+ * `overdue`, `due_within_24h` e `on_time` sao ZERO por ausencia de dado, nao
+ * por desempenho. Exibir "0 vencidos" seria uma afirmacao que ninguem mediu.
+ *
+ * Historico: no EXP-3A os campos candidatos estavam 0% preenchidos na fonte,
+ * porque o ML descontinuou `estimated_handling_limit` em 13/05/2025; o prazo
+ * so' sai do SLA do envio (`GET /shipments/{id}/sla`).
  */
 export const SEM_PRAZO_ML =
-  "O Mercado Livre não publica prazo de despacho: não há vencidos nem “no " +
-  "prazo” a medir. Zero aqui seria engano, então a tela mostra “indisponível”.";
+  "Esta fotografia do Mercado Livre não traz prazo de despacho (o SLA do envio): " +
+  "não há vencidos nem “no prazo” a medir. Zero aqui seria engano, então a tela " +
+  "mostra “indisponível”.";
 
 export const ROTULO_SEM_PRAZO = "Prazo indisponível";
 /** QA T-0010 (M2): o mesmo texto de ausencia do formato unico, nao "N/D". */
 export const VALOR_SEM_PRAZO = TEXTO_INDISPONIVEL;
 
-/** O canal tem prazo contratual publicado pela fonte? */
-export function canalTemPrazo(canal: Canal): boolean {
-  return canal === "shopee";
+/** O que a tela precisa da fotografia para saber se ha' prazo. */
+export type FotografiaComPrazo = Pick<Snapshot, "deadline_published">;
+
+/**
+ * A FOTOGRAFIA tem prazo contratual publicado pela fonte?
+ *
+ * Shopee: sempre (`ship_by_date`). Mercado Livre (EXPEDICAO-ML-PRAZO): so'
+ * quando a API diz `snapshot.deadline_published = true`, ou seja, quando o
+ * lote traz envios com o SLA oficial de despacho. Sem fotografia, ou com API
+ * anterior ao campo, o ML segue SEM prazo — a ausencia nunca vira "0 vencidos".
+ */
+export function canalTemPrazo(canal: Canal, fotografia?: FotografiaComPrazo | null): boolean {
+  if (canal === "shopee") return true;
+  return fotografia?.deadline_published === true;
+}
+
+/** Nome curto do prazo de cada canal, no rotulo dos cartoes. */
+export const PRAZO_DO_CANAL: Record<Canal, string> = {
+  shopee: "prazo Shopee",
+  mercadolivre: "prazo Mercado Livre",
+};
+
+/** O prazo na frase de atencao: "ja' passaram ___". */
+const PRAZO_NA_FRASE: Record<Canal, string> = {
+  shopee: "do prazo da Shopee",
+  mercadolivre: "do prazo de despacho do Mercado Livre",
+};
+
+/** O "ⓘ" do limiar de 48 h, que precisa dizer DE ONDE vem o prazo do canal. */
+export function explicacaoLimiar48h(canal: Canal, temPrazo: boolean): string {
+  if (!temPrazo) return EXPLICACAO_LIMIAR_48H_SEM_PRAZO;
+  return canal === "shopee" ? EXPLICACAO_LIMIAR_48H : EXPLICACAO_LIMIAR_48H_ML;
+}
+
+/**
+ * Lista de cartoes do canal. O Mercado Livre COM SLA le' como a Shopee
+ * (vencidos e perto de vencer entram); sem SLA, a lista propria dele.
+ */
+function listaDeKpis(
+  tabela: Record<Canal, readonly string[]>,
+  canal: Canal,
+  temPrazo: boolean,
+): readonly string[] {
+  return temPrazo ? tabela.shopee : tabela[canal];
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +224,16 @@ export interface Snapshot {
   rows_extracted: number | null;
   rows_loaded: number | null;
   audit_run_id: number | null;
+  /**
+   * EXPEDICAO-VENCE-AMANHA — proximo dia de prazo depois do dia da fotografia
+   * (Brasilia), "AAAA-MM-DD". Nulo sem prazo na fila; ausente na API antiga.
+   */
+  next_due_date?: string | null;
+  /**
+   * EXPEDICAO-ML-PRAZO — a fotografia traz prazo de despacho? Shopee: sempre.
+   * Mercado Livre: so' com o SLA oficial no lote. Ausente na API antiga.
+   */
+  deadline_published?: boolean | null;
 }
 
 export interface Totais {
@@ -177,6 +246,19 @@ export interface Totais {
   slow_count: number;
   zombie_count: number;
   stalled_count: number;
+  /**
+   * EXPEDICAO-VENCE-AMANHA — pedidos que vencem no `next_due_date`. Contado
+   * pela API no MESMO batch (nao e' medida materializada). Nulo no canal sem
+   * prazo; ausente na API antiga — a tela mostra ausencia, nunca zero.
+   */
+  due_next_day_count?: number | null;
+  /**
+   * EXPEDICAO-PERTO-DE-VENCER — vencem hoje ate' as 23:59 (sem os vencidos) e
+   * a soma "perto de vencer" = hoje + proximo dia de prazo. A API conta com a
+   * MESMA regra da lista `situacao=due_soon`: cartao, tabela e lista batem.
+   */
+  due_today_count?: number | null;
+  due_soon_count?: number | null;
 }
 
 export interface ResumoConta extends Totais {
@@ -186,6 +268,12 @@ export interface ResumoConta extends Totais {
   source_watermark_at: string | null;
   source_advanced: boolean;
   snapshot_hour: string;
+  /**
+   * EXPEDICAO-KOKESHI-EXPORT — instante da fotografia DESTA conta. Igual ao
+   * `snapshot.effective_at`, exceto na conta carregada do export do Seller
+   * Centre (Kokeshi), que tem a hora da propria carga. Ausente na API antiga.
+   */
+  observed_at?: string | null;
 }
 
 export interface FrescorMarca {
@@ -222,6 +310,8 @@ export interface Cobertura {
 }
 
 export interface LinhaFila {
+  /** Numero real do pedido (EXPEDICAO-NUMERO-PEDIDO); nulo com a chave desligada. */
+  order_number?: string | null;
   order_ref: string | null;
   shop_account: string;
   brand: string;
@@ -414,7 +504,9 @@ export const SITUACOES_DE_PRAZO: readonly Situacao[] = [
  *   existe num canal devolve vazio — e' resultado, nao incoerencia.
  * - situacoes de PRAZO e ordenacao por prazo caem quando o canal de destino
  *   nao publica prazo: manter uma pergunta que a fonte nao responde exibiria
- *   vazio como se fosse resposta.
+ *   vazio como se fosse resposta. Na troca ainda nao ha' fotografia do
+ *   destino, entao o ML conta como sem prazo aqui (EXPEDICAO-ML-PRAZO): o
+ *   operador refaz o filtro de prazo depois que a tela do ML carrega.
  * - `offset` volta a zero, como em qualquer troca de recorte.
  */
 export function aplicarCanal(atual: Filtros, canal: Canal): Filtros {
@@ -516,6 +608,67 @@ export interface Kpi {
   notaCurta?: string;
 }
 
+const DIA_DA_SEMANA = ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"];
+
+/** "AAAA-MM-DD" do instante, no dia de Brasilia. */
+function diaBrt(iso: string): string | null {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(d);
+}
+
+/**
+ * EXPEDICAO-VENCE-AMANHA — rotulo do cartao do proximo dia de prazo.
+ *
+ * Todo prazo da Shopee vence as 23:59 e nunca em fim de semana ou feriado:
+ * "Vence em 24 h" ja' e', na pratica, "vence hoje", e o proximo dia de prazo
+ * e' amanha de segunda a quinta. Na sexta (ou antes de feriado) ele e' outro
+ * dia, e o rotulo diz qual ("Vence ter 03/11") em vez de chamar de amanha.
+ * Sem proximo prazo na fila, a contagem e' zero e o rotulo fica "amanhã".
+ */
+export function rotuloDoProximoVencimento(
+  proximo: string | null | undefined,
+  efetivoEm: string | null | undefined,
+  /** "Vence" no cartao; "Vencem" na coluna da tabela por marca. */
+  verbo: "Vence" | "Vencem" = "Vence",
+): string {
+  return `${verbo} ${diaDoProximoVencimento(proximo, efetivoEm)}`;
+}
+
+/** "amanhã" ou, na sexta e antes de feriado, "ter 03/11". */
+export function diaDoProximoVencimento(
+  proximo: string | null | undefined,
+  efetivoEm: string | null | undefined,
+): string {
+  const hoje = efetivoEm ? diaBrt(efetivoEm) : null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(proximo ?? "");
+  if (!m || !hoje) return "amanhã";
+  const [a, mes, dia] = hoje.split("-").map(Number);
+  const amanha = new Date(Date.UTC(a, mes - 1, dia + 1)).toISOString().slice(0, 10);
+  if (proximo === amanha) return "amanhã";
+  const semana = DIA_DA_SEMANA[new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).getUTCDay()];
+  return `${semana} ${m[3]}/${m[2]}`;
+}
+
+/**
+ * EXPEDICAO-PERTO-DE-VENCER — a linha de baixo do cartao: de onde vem o
+ * total ("378 hoje · 69 ter 03/11"). Sem as duas parcelas (API antiga), nada.
+ */
+export function detalheDePertoDeVencer(
+  t: Pick<Totais, "due_today_count" | "due_next_day_count"> | null,
+  fotografia: FotografiaDoPrazo | null,
+): string | undefined {
+  if (typeof t?.due_today_count !== "number" || typeof t?.due_next_day_count !== "number") return undefined;
+  const dia = diaDoProximoVencimento(fotografia?.next_due_date, fotografia?.effective_at);
+  return `${formatarInteiro(t.due_today_count)} hoje · ${formatarInteiro(t.due_next_day_count)} ${dia}`;
+}
+
+/** O que `montarKpis` precisa da fotografia para o proximo dia de prazo. */
+export type FotografiaDoPrazo = Pick<
+  Snapshot,
+  "effective_at" | "next_due_date" | "deadline_published"
+>;
+
 /**
  * Cartoes derivados SOMENTE do payload. Medida ausente vira `null`, nunca 0:
  * zero afirmaria uma medicao que nao foi feita.
@@ -529,12 +682,13 @@ export function montarKpis(
   t: Totais | null,
   frescor: FrescorMarca[],
   canal: Canal = CANAL_PADRAO,
+  fotografia: FotografiaDoPrazo | null = null,
 ): Kpi[] {
   const v = (n: number | undefined | null) => (typeof n === "number" ? n : null);
   const emAlerta = frescor.filter(
     (f) => f.freshness === "critical" || f.freshness === "unknown",
   ).length;
-  const temPrazo = canalTemPrazo(canal);
+  const temPrazo = canalTemPrazo(canal, fotografia);
   // Sem prazo na fonte, `overdue` e `due_within_24h` valem zero por AUSENCIA de
   // dado. Publicar "0 vencidos" leria como operacao impecavel; o cartao mostra
   // N/D e diz por que. Nunca alerta: nao ha medicao para alarmar.
@@ -553,11 +707,37 @@ export function montarKpis(
     { chave: "backlog", rotulo: "Backlog total", valor: v(t?.backlog_count), alerta: false },
     prazo(
       "overdue",
-      temPrazo ? "Vencidos (prazo Shopee)" : "Vencidos",
+      temPrazo ? `Vencidos (${PRAZO_DO_CANAL[canal]})` : "Vencidos",
       v(t?.overdue_count),
       (t?.overdue_count ?? 0) > 0,
     ),
+    // EXPEDICAO-PERTO-DE-VENCER (pedido de 30/10/2026): a prioridade depois
+    // dos vencidos — hoje ate' as 23:59 + o proximo dia de prazo, num numero
+    // so', o MESMO da tabela e da lista. So' no canal com prazo.
+    ...(temPrazo
+      ? [
+          {
+            chave: "due_soon",
+            rotulo: "Perto de vencer",
+            valor: v(t?.due_soon_count),
+            alerta: (t?.due_soon_count ?? 0) > 0,
+            notaCurta: detalheDePertoDeVencer(t, fotografia),
+          } as Kpi,
+        ]
+      : []),
     prazo("due24h", "Vence em 24h", v(t?.due_within_24h_count), false),
+    // EXPEDICAO-VENCE-AMANHA: so' no canal com prazo. No Mercado Livre o
+    // cartao N/D repetiria a ausencia que "Vencidos" ja' explica.
+    ...(temPrazo
+      ? [
+          {
+            chave: "due_next_day",
+            rotulo: rotuloDoProximoVencimento(fotografia?.next_due_date, fotografia?.effective_at),
+            valor: v(t?.due_next_day_count),
+            alerta: false,
+          } as Kpi,
+        ]
+      : []),
     ...(temPrazo
       ? []
       : [
@@ -578,7 +758,7 @@ export function montarKpis(
       alerta: (t?.over_48h_count ?? 0) > 0,
       // A nota e' do CANAL: a da Shopee cita "Vencidos" e `ship_by_date`,
       // que nao existem no Mercado Livre (achado do QA do EXPEDICAO-UX-3).
-      nota: temPrazo ? EXPLICACAO_LIMIAR_48H : EXPLICACAO_LIMIAR_48H_SEM_PRAZO,
+      nota: explicacaoLimiar48h(canal, temPrazo),
       notaCurta: "Limiar interno da Torre, não é SLA do marketplace.",
     },
     {
@@ -772,7 +952,24 @@ export function estadoDaTendencia(
  * omitido por erro — ele foi retido por decisao de acesso.
  */
 export function mostrarColunaReferencia(linhas: LinhaFila[]): boolean {
-  return linhas.some((l) => typeof l.order_ref === "string" && l.order_ref.length > 0);
+  return linhas.some((l) => numeroDoPedido(l) !== null);
+}
+
+/**
+ * Nome do identificador da linha. Na Shopee e' o numero do pedido (`order_sn`).
+ * No Mercado Livre a fila e' por ENVIO: `marketplace_order_id` recebe o
+ * `shipment_id` (um pedido pode ter mais de um envio), nunca o numero da venda.
+ * Chamar de "Pedido" faria alguem procurar no painel um numero que nao e' o da venda.
+ */
+export function rotuloDoNumero(canal: Canal): string {
+  return canal === "mercadolivre" ? "Envio" : "Pedido";
+}
+
+/** EXPEDICAO-NUMERO-PEDIDO — o numero real; sem ele, o `order_ref` opaco. */
+export function numeroDoPedido(l: Pick<LinhaFila, "order_number" | "order_ref">): string | null {
+  if (typeof l.order_number === "string" && l.order_number.length > 0) return l.order_number;
+  if (typeof l.order_ref === "string" && l.order_ref.length > 0) return l.order_ref;
+  return null;
 }
 
 export function paginaAtual(p: Paginacao | null): { pagina: number; total: number } {
@@ -804,7 +1001,7 @@ export function formatarHoras(h: number | null): string {
  * nobre da tela. La' a pergunta e' idade operacional e saude da fonte.
  */
 export const KPIS_PRINCIPAIS: Record<Canal, readonly string[]> = {
-  shopee: ["backlog", "overdue", "due24h", "stalled"],
+  shopee: ["backlog", "overdue", "due_soon", "stalled"],
   mercadolivre: ["backlog", "over48h", "stalled", "marcas_alerta"],
 };
 
@@ -813,9 +1010,10 @@ export function montarKpisPrincipais(
   t: Totais | null,
   frescor: FrescorMarca[],
   canal: Canal = CANAL_PADRAO,
+  fotografia: FotografiaDoPrazo | null = null,
 ): Kpi[] {
-  const todos = montarKpis(t, frescor, canal);
-  const ordem = KPIS_PRINCIPAIS[canal];
+  const todos = montarKpis(t, frescor, canal, fotografia);
+  const ordem = listaDeKpis(KPIS_PRINCIPAIS, canal, canalTemPrazo(canal, fotografia));
   return ordem
     .map((chave) => todos.find((k) => k.chave === chave))
     .filter((k): k is Kpi => k !== undefined);
@@ -826,9 +1024,12 @@ export function montarKpisSecundarios(
   t: Totais | null,
   frescor: FrescorMarca[],
   canal: Canal = CANAL_PADRAO,
+  fotografia: FotografiaDoPrazo | null = null,
 ): Kpi[] {
-  const principais = new Set(KPIS_PRINCIPAIS[canal]);
-  return montarKpis(t, frescor, canal).filter((k) => !principais.has(k.chave));
+  const principais = new Set(
+    listaDeKpis(KPIS_PRINCIPAIS, canal, canalTemPrazo(canal, fotografia)),
+  );
+  return montarKpis(t, frescor, canal, fotografia).filter((k) => !principais.has(k.chave));
 }
 
 // ---------------------------------------------------------------------------
@@ -970,16 +1171,17 @@ export function montarAtencaoDaFila(
   t: Totais | null,
   contas: ResumoConta[],
   canal: Canal = CANAL_PADRAO,
+  fotografia: FotografiaComPrazo | null = null,
 ): ItemAtencao[] {
   if (!t) return [];
-  const temPrazo = canalTemPrazo(canal);
+  const temPrazo = canalTemPrazo(canal, fotografia);
   const itens: ItemAtencao[] = [];
   if (temPrazo && t.overdue_count > 0) {
     itens.push({
       chave: "overdue",
       tom: "critico",
       texto:
-        `${inteiro(t.overdue_count)} pedido(s) já passaram do prazo da Shopee e seguem ` +
+        `${inteiro(t.overdue_count)} pedido(s) já passaram ${PRAZO_NA_FRASE[canal]} e seguem ` +
         `sem expedição.${concentracao(contas, "overdue_count")}`,
     });
   }
@@ -1038,8 +1240,11 @@ const NOME_NO_SINGULAR: Record<MedidaDeConta, string> = {
 };
 
 /** A medida em destaque do canal: vencidos com prazo publicado; sem ele, +48 h. */
-export function medidasDoDestaque(canal: Canal = CANAL_PADRAO): MedidaDeConta[] {
-  return canalTemPrazo(canal)
+export function medidasDoDestaque(
+  canal: Canal = CANAL_PADRAO,
+  fotografia: FotografiaComPrazo | null = null,
+): MedidaDeConta[] {
+  return canalTemPrazo(canal, fotografia)
     ? ["overdue_count", "due_within_24h_count", "stalled_count", "over_48h_count"]
     : ["over_48h_count", "stalled_count"];
 }
@@ -1055,9 +1260,10 @@ export function ondeAgirNaFila(
   t: Totais | null,
   contas: ResumoConta[],
   canal: Canal = CANAL_PADRAO,
+  fotografia: FotografiaComPrazo | null = null,
 ): ItemAtencao | null {
   if (!t || contas.length < 2) return null;
-  for (const medida of medidasDoDestaque(canal)) {
+  for (const medida of medidasDoDestaque(canal, fotografia)) {
     if (t[medida] <= 0) continue;
     const maior = maiorConta(contas, medida);
     if (!maior) return null;
@@ -1123,13 +1329,18 @@ export interface MapaRisco {
 export function montarMapaDeRisco(
   contas: ResumoConta[],
   canal: Canal = CANAL_PADRAO,
+  fotografia: FotografiaComPrazo | null = null,
 ): MapaRisco {
-  const temPrazo = canalTemPrazo(canal);
+  const temPrazo = canalTemPrazo(canal, fotografia);
   const linhas: LinhaRisco[] = contas.map((a) => ({
     conta: a.shop_account,
     marca: a.brand,
     backlog: a.backlog_count,
-    segmentos: temPrazo
+    // EXPEDICAO-PERTO-DE-VENCER: com a medida publicada, a barra da conta e' a
+    // MESMA particao do topo (vencidos / perto de vencer / no prazo / sem prazo).
+    segmentos: temPrazo && typeof a.due_soon_count === "number"
+      ? (faixasDePrazo(a) ?? [])
+      : temPrazo
       ? [
           { chave: "overdue", rotulo: "Vencidos", valor: a.overdue_count },
           { chave: "due24h", rotulo: "Vence em 24h", valor: a.due_within_24h_count },
@@ -1287,8 +1498,9 @@ export function montarTimeline(
   fila: LinhaFila[],
   canal: Canal = CANAL_PADRAO,
   limite: number = TIMELINE_MAX_LINHAS,
+  fotografia: FotografiaComPrazo | null = null,
 ): BarraTimeline[] {
-  const temPrazo = canalTemPrazo(canal);
+  const temPrazo = canalTemPrazo(canal, fotografia);
   return [...fila]
     .sort((a, b) => (b.hours_open ?? 0) - (a.hours_open ?? 0))
     .slice(0, Math.max(0, limite))
@@ -1314,8 +1526,20 @@ export const DEFINICAO_FILA: Record<Canal, string> = {
     "prazo de envio publicado pela Shopee (ship_by_date).",
   mercadolivre:
     "Pedidos pagos aguardando expedição, fotografados a cada publicação. O " +
-    "Mercado Livre não publica prazo de despacho: o risco é lido pela idade da fila.",
+    "Mercado Livre não publica prazo de despacho nesta fotografia: o risco é lido " +
+    "pela idade da fila.",
 };
+
+/** A linha de definicao do canal, conforme a FOTOGRAFIA tenha prazo. */
+export function definicaoDaFila(canal: Canal, fotografia?: FotografiaComPrazo | null): string {
+  if (canal === "mercadolivre" && canalTemPrazo(canal, fotografia)) {
+    return (
+      "Envios pagos aguardando expedição, fotografados a cada publicação, com o " +
+      "prazo de despacho do SLA oficial do Mercado Livre."
+    );
+  }
+  return DEFINICAO_FILA[canal];
+}
 
 /**
  * "Risco atual" — os indicadores que o CANAL sustenta, na ordem da leitura.
@@ -1323,7 +1547,7 @@ export const DEFINICAO_FILA: Record<Canal, string> = {
  * a ausencia e' explicada na secao de prazo, nao em cartoes N/D.
  */
 export const KPIS_RISCO_ATUAL: Record<Canal, readonly string[]> = {
-  shopee: ["backlog", "overdue", "due24h", "over48h", "stalled", "marcas_alerta"],
+  shopee: ["backlog", "overdue", "due_soon", "over48h", "stalled", "marcas_alerta"],
   mercadolivre: ["backlog", "over48h", "stalled", "marcas_alerta"],
 };
 
@@ -1331,9 +1555,10 @@ export function montarRiscoAtual(
   t: Totais | null,
   frescor: FrescorMarca[],
   canal: Canal = CANAL_PADRAO,
+  fotografia: FotografiaDoPrazo | null = null,
 ): Kpi[] {
-  const todos = montarKpis(t, frescor, canal);
-  return KPIS_RISCO_ATUAL[canal]
+  const todos = montarKpis(t, frescor, canal, fotografia);
+  return listaDeKpis(KPIS_RISCO_ATUAL, canal, canalTemPrazo(canal, fotografia))
     .map((chave) => todos.find((k) => k.chave === chave))
     .filter((k): k is Kpi => k !== undefined);
 }
@@ -1348,6 +1573,9 @@ const MEDIDAS: readonly (keyof Totais)[] = [
   "slow_count",
   "zombie_count",
   "stalled_count",
+  "due_next_day_count",
+  "due_today_count",
+  "due_soon_count",
 ];
 
 export interface RecorteMarca {
@@ -1406,23 +1634,39 @@ export function recortarPorMarca(r: RespostaExpedicao | null, marca: string | nu
 }
 
 export interface FaixaPrazo {
-  chave: "overdue" | "due24h" | "on_time" | "sem_prazo";
+  chave: "overdue" | "due_soon" | "due24h" | "on_time" | "sem_prazo";
   rotulo: string;
   valor: number;
 }
 
 /**
  * Prazo da Shopee pela SITUACAO de cada pedido em fila (do `ship_by_date`).
- * E' uma particao do backlog — o pipeline garante a soma exata —, entao pode
- * ser desenhada empilhada. NAO e' LDR: a fotografia so' tem pedidos em aberto.
+ * E' uma particao do backlog, entao pode ser desenhada empilhada. NAO e' LDR:
+ * a fotografia so' tem pedidos em aberto.
+ *
+ * EXPEDICAO-PERTO-DE-VENCER: a faixa do meio e' "Perto de vencer" (hoje +
+ * proximo dia de prazo), o MESMO numero do cartao e da coluna da tabela; "No
+ * prazo" e' o que vence depois disso. Sem a medida (API antiga), volta a
+ * particao do pipeline (vence em 24 h / no prazo).
  */
 export function faixasDePrazo(t: Totais | null): FaixaPrazo[] | null {
   if (!t) return null;
+  const vencidos = { chave: "overdue", rotulo: "Vencidos", valor: t.overdue_count } as const;
+  const semPrazo = { chave: "sem_prazo", rotulo: "Sem prazo publicado", valor: t.deadline_unavailable_count } as const;
+  if (typeof t.due_soon_count !== "number") {
+    return [
+      vencidos,
+      { chave: "due24h", rotulo: "Vence em 24 h", valor: t.due_within_24h_count },
+      { chave: "on_time", rotulo: "No prazo", valor: t.on_time_count },
+      semPrazo,
+    ];
+  }
+  const depois = t.backlog_count - t.overdue_count - t.due_soon_count - t.deadline_unavailable_count;
   return [
-    { chave: "overdue", rotulo: "Vencidos", valor: t.overdue_count },
-    { chave: "due24h", rotulo: "Vence em 24 h", valor: t.due_within_24h_count },
-    { chave: "on_time", rotulo: "No prazo", valor: t.on_time_count },
-    { chave: "sem_prazo", rotulo: "Sem prazo publicado", valor: t.deadline_unavailable_count },
+    vencidos,
+    { chave: "due_soon", rotulo: "Perto de vencer", valor: t.due_soon_count },
+    { chave: "on_time", rotulo: "No prazo", valor: Math.max(0, depois) },
+    semPrazo,
   ];
 }
 
@@ -1431,6 +1675,16 @@ export const SEM_LDR_SHOPEE =
   "Taxa de atraso (LDR) da Shopee ainda não calculada: a fotografia guarda só os " +
   "pedidos em aberto. A fonte tem o prazo e a coleta de cada pedido; falta a série " +
   "diária por vencimento no backend.";
+
+/** EXPEDICAO-ML-PRAZO: o "ⓘ" da secao Prazo do ML com o SLA na fotografia. */
+export const SEM_LDR_ML =
+  "Taxa de atraso (LDR) do Mercado Livre ainda não calculada: o prazo é o SLA " +
+  "oficial de despacho, lido só enquanto o envio está em aberto.";
+
+/** O "ⓘ" do titulo da secao Prazo quando a fotografia TEM prazo. */
+export function dicaDaSecaoPrazo(canal: Canal): string {
+  return canal === "shopee" ? SEM_LDR_SHOPEE : SEM_LDR_ML;
+}
 
 /** T-0021: mesmo padrao da Jornada ("Indisponível neste canal: <motivo>"). */
 export const SEM_PRAZO_CANAL_ML =

@@ -13,7 +13,7 @@
  *    lote — exatamente a definicao de `totals` do backend. Marca sem conta no
  *    canal vira `marcas_sem_conta`, nunca backlog zero.
  * 2. Prazo nao publicado nao e' "zero vencidos": quando todo o backlog esta em
- *    `deadline_unavailable` (o Mercado Livre, hoje), vencidos/em risco/no prazo
+ *    `deadline_unavailable` (o Mercado Livre sem SLA na fotografia), vencidos/em risco/no prazo
  *    saem nulos.
  * 3. A LDR do TikTok traz `deadline_is_reconstructed`: enquanto for `true`, e'
  *    medicao INTERNA, nao a oficial de penalizacao da plataforma.
@@ -437,7 +437,7 @@ export const expedicaoTool: OracleTool = {
       "Use para 'quanto esta parado na expedicao', 'quantos pedidos vencidos ou em risco', 'o que esta travado', 'como evoluiu o backlog' e 'como esta a LDR do TikTok'.",
       "Cobre Shopee e Mercado Livre (fotografia atual por conta, com tendencia horaria) e TikTok Shop (LDR por vencimento na janela, por loja).",
       "Somente AGREGADOS por canal, conta/loja e data — nunca pedido individual, cliente ou endereco.",
-      "Prazo nao publicado nao e' zero: quando o canal nao publica prazo (Mercado Livre hoje), vencidos/em_risco_24h/no_prazo vem nulos e prazo='nao_publicado_pelo_canal'.",
+      "Prazo nao publicado nao e' zero: quando o canal nao publica prazo (Mercado Livre sem o SLA de despacho na fotografia), vencidos/em_risco_24h/no_prazo vem nulos e prazo='nao_publicado_pelo_canal'.",
       "No TikTok, leia 'medicao': 'interna_reconstruida' significa prazo reconstruido pela Torre, NAO a medicao oficial de penalizacao da plataforma — diga isso ao usuario.",
       "Marca sem conta no canal aparece em marcas_sem_conta, nunca como backlog zero. A fotografia e' manual: confira fotografia.idade_horas.",
     ].join(" "),

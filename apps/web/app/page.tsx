@@ -73,17 +73,20 @@ import MovementsPanels from "@/components/gerencial/MovementsPanels";
 import AttentionQueue from "@/components/gerencial/AttentionQueue";
 import MetaHero from "@/components/gerencial/MetaHero";
 import DecisoesTopo from "@/components/gerencial/DecisoesTopo";
-import MarcasMeta from "@/components/gerencial/MarcasMeta";
+import MarcasMeta, { type MetaDaMarca } from "@/components/gerencial/MarcasMeta";
 import { useMetasDoMes } from "@/hooks/useMetasDoMes";
 import {
   avisoQueAfetaOGmv,
+  celulasDoEscopo,
+  diaDaMeta,
   mesDaMeta,
   metaDoEscopo,
   progressoMeta,
+  realizadoDoEscopo,
   topComerciais,
   ultimoDiaComDado,
-  type ProgressoMeta,
 } from "@/lib/gerencial/meta-progress";
+import { escopoTemCurva, fracaoDoEscopo, progressoDoDia, resumoSemDado } from "@/lib/metas-curva";
 import { hojeBrt } from "@/lib/metas";
 import {
   ChannelSeriesDrilldownContent,
@@ -257,50 +260,88 @@ function GerencialInner() {
     return map;
   }, [sources.canais.data]);
 
-  // ---- metas (GERENCIAL-METAS-1) -----------------------------------------
+  // ---- metas (GERENCIAL-METAS-1 + METAS-DIARIAS-1) -----------------------
   // Fonte PROPRIA (`useMetasDoMes`), fora do hook das fontes do Data Mart: a
-  // meta falhar nao apaga nenhum outro bloco. So' ha meta quando o periodo e'
-  // um mes inteiro, ou o mes corrente ate' hoje.
+  // meta falhar nao apaga nenhum outro bloco. Periodo de um dia so' ("Hoje")
+  // compara com a META DO DIA; mes inteiro ou mes corrente ate' ontem, com a
+  // meta do mes. O realizado so' conta marca x canal que tem meta, e precisa
+  // de `/brands` fresco: sem ele, "sem linha" nao quer dizer "sem venda".
   const hoje = useMemo(() => hojeBrt(), []);
-  const mesMeta = mesDaMeta(filters.dateFrom, filters.dateTo, hoje);
-  const metas = useMetasDoMes(mesMeta);
+  const diaMeta = diaDaMeta(filters.dateFrom, filters.dateTo, hoje);
+  const mesMeta = diaMeta ? null : mesDaMeta(filters.dateFrom, filters.dateTo, hoje);
+  const metas = useMetasDoMes(mesMeta ?? diaMeta?.slice(0, 7) ?? null);
+  const celulasEscopo = useMemo(
+    () => celulasDoEscopo(metas.celulas, filters.channels, filters.brands),
+    [metas.celulas, filters.channels, filters.brands],
+  );
   const metaEscopo = useMemo(
     () => metaDoEscopo(metas.celulas, filters.channels, filters.brands),
     [metas.celulas, filters.channels, filters.brands],
   );
+  const realizadoEscopo = useMemo(() => realizadoDoEscopo(brands, celulasEscopo), [brands, celulasEscopo]);
+  const canaisForaDaMeta = filters.channels.filter((c) => !celulasEscopo.some((x) => x.channel === c));
+  const comCurva = mesMeta ? escopoTemCurva(celulasEscopo, mesMeta) : false;
   const ultimoDia = useMemo(
     () => ultimoDiaComDado(merged.buckets, merged.granularity),
     [merged.buckets, merged.granularity],
   );
   // Em modo demonstracao o GMV e' exemplo: atingimento contra meta real seria
   // um numero falso com cara de decisao.
-  const metaAplicavel = mesMeta != null && metas.status === "fresh" && !sources.demoMode;
+  const metaAplicavel = metas.status === "fresh" && !sources.demoMode && sources.brands.status.fresh;
   const progresso = useMemo(
     () =>
       metaAplicavel && mesMeta
-        ? progressoMeta({ meta: metaEscopo.total, realizado: overview?.gmv ?? null, mes: mesMeta, hoje, ultimoDia })
+        ? progressoMeta({
+            meta: metaEscopo.total,
+            realizado: realizadoEscopo.total,
+            mes: mesMeta,
+            hoje,
+            ultimoDia,
+            fracaoAte: fracaoDoEscopo(celulasEscopo, mesMeta),
+          })
         : null,
-    [metaAplicavel, mesMeta, metaEscopo.total, overview, hoje, ultimoDia],
+    [metaAplicavel, mesMeta, metaEscopo.total, realizadoEscopo.total, celulasEscopo, hoje, ultimoDia],
+  );
+  const progressoDia = useMemo(
+    () =>
+      metaAplicavel && diaMeta ? progressoDoDia({ celulas: celulasEscopo, linhas: brands, dia: diaMeta, hoje }) : null,
+    [metaAplicavel, diaMeta, celulasEscopo, brands, hoje],
   );
   const progressoPorMarca = useMemo(() => {
-    const mapa: Record<string, ProgressoMeta | null> = {};
-    // So' com `/brands` fresco: sem ele, "sem linha" nao quer dizer "sem venda".
-    if (!metaAplicavel || !mesMeta || !sources.brands.status.fresh) return mapa;
-    const realizado = new Map(brands.map((b) => [b.brand, b.total_gmv]));
+    const mapa: Record<string, MetaDaMarca | null> = {};
+    if (progressoDia) return progressoDia.porMarca;
+    if (!metaAplicavel || !mesMeta) return mapa;
     // Marca com meta e SEM linha em `/brands` (nada vendido no recorte) entra
     // com realizado zero: e' o caso mais urgente, nao pode sumir.
-    const ids = new Set([...realizado.keys(), ...Object.keys(metaEscopo.porMarca)]);
-    for (const id of ids) {
-      mapa[id] = progressoMeta({
-        meta: metaEscopo.porMarca[id] ?? null,
-        realizado: realizado.get(id) ?? 0,
+    for (const [id, meta] of Object.entries(metaEscopo.porMarca)) {
+      const p = progressoMeta({
+        meta,
+        realizado: realizadoEscopo.porMarca[id] ?? 0,
         mes: mesMeta,
         hoje,
         ultimoDia,
+        fracaoAte: fracaoDoEscopo(
+          celulasEscopo.filter((c) => c.brand === id),
+          mesMeta,
+        ),
       });
+      mapa[id] = p && { ...p, canais: realizadoEscopo.canaisPorMarca[id] ?? [] };
     }
     return mapa;
-  }, [metaAplicavel, mesMeta, sources.brands.status.fresh, metaEscopo.porMarca, brands, hoje, ultimoDia]);
+  }, [progressoDia, metaAplicavel, mesMeta, metaEscopo.porMarca, realizadoEscopo, celulasEscopo, hoje, ultimoDia]);
+  // A meta so' e' lida com `/brands`: enquanto ele carrega (ou falha), o bloco
+  // diz isso em vez de "nenhuma meta definida".
+  const metasStatusTela: "loading" | "error" | "fresh" =
+    metas.status === "idle"
+      ? "fresh"
+      : metas.status !== "fresh"
+        ? metas.status
+        : sources.brands.status.fresh || sources.demoMode
+          ? "fresh"
+          : sources.brands.status.error
+            ? "error"
+            : "loading";
+  const mesDasMetas = mesMeta ?? diaMeta?.slice(0, 7) ?? null;
   // Lista compacta (UI-DENSIDADE-1): cabem ate' 5 sinais no espaco que 3 cartoes ocupavam.
   const decisoes = useMemo(() => topComerciais(queue.commercial, 5), [queue.commercial]);
   const avisoDeDado = avisoQueAfetaOGmv(queue.dataConfidence);
@@ -439,12 +480,18 @@ function GerencialInner() {
           shopee: overview?.shopee_gmv ?? null,
         }}
         mesMeta={mesMeta}
-        metasStatus={metas.status === "idle" ? "fresh" : metas.status}
-        onRetryMetas={metas.tentarDeNovo}
+        diaMeta={diaMeta}
+        hoje={hoje}
+        metasStatus={metasStatusTela}
+        onRetryMetas={metas.status === "error" ? metas.tentarDeNovo : sources.retry}
         progresso={progresso}
+        comCurva={comCurva}
+        progressoDia={progressoDia}
+        semDado={progressoDia ? resumoSemDado(progressoDia.semDado, celulasEscopo) : []}
+        canaisForaDaMeta={celulasEscopo.length > 0 ? canaisForaDaMeta : []}
         ultimoDia={ultimoDia}
         aviso={avisoDeDado ? { texto: avisoDeDado.message, onOpen: () => setDialog({ kind: "confidence" }) } : null}
-        metasHref={mesMeta ? `/metas?mes=${mesMeta}` : "/metas"}
+        metasHref={mesDasMetas ? `/metas?mes=${mesDasMetas}` : "/metas"}
         onOpenGmv={() => setDialog({ kind: "kpi", key: "gmv" })}
       />
 
@@ -491,6 +538,7 @@ function GerencialInner() {
             brands={brands}
             channels={filters.channels}
             progressoPorMarca={progressoPorMarca}
+            rotuloMeta={progressoDia ? "da meta do dia" : "da meta"}
             compareActive={comparar}
             loading={sources.brands.status.loading}
             error={sources.brands.status.error}

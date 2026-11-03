@@ -105,10 +105,11 @@ test("cada canal destaca exatamente quatro KPIs", () => {
 });
 
 test("a Shopee destaca prazo; o Mercado Livre destaca idade e fonte", () => {
+  // EXPEDICAO-PERTO-DE-VENCER: "perto de vencer" (hoje + proximo dia) no lugar de "24 h".
   assert.deepEqual([...KPIS_PRINCIPAIS.shopee], [
     "backlog",
     "overdue",
-    "due24h",
+    "due_soon",
     "stalled",
   ]);
   assert.deepEqual([...KPIS_PRINCIPAIS.mercadolivre], [
@@ -871,7 +872,7 @@ test("demo jornadaCoorteAusente: a pagina fica ok e a fila Shopee continua com a
   const html = htmlF(
     hF(JornadaF, { carga: { carregando: false, http: 200, erroDeRede: false, resultado: r }, aoTentarDeNovo: () => {} }),
   );
-  assert.match(html, /1\.820 pedidos pagos aguardando expedição\./, "a fila nao some");
+  assert.match(html, /1\.820 pedidos agora, por etapa\./, "a fila nao some");
   assert.match(html, /Indisponível agora: a tabela ainda não foi publicada nesta base\./);
   assert.doesNotMatch(html, /Jornada indisponível/);
 });

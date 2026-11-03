@@ -61,9 +61,16 @@ export default function TableScrollHint({ children, className = "" }: Props) {
     update();
   });
 
+  // Dois `relative`, cada um com um papel:
+  // - o EXTERNO e' a referencia das sombras (irmas do scroller, `absolute
+  //   inset-y-0`), que precisam ficar paradas na borda enquanto o conteudo rola;
+  // - o do SCROLLER prende qualquer `absolute` do conteudo (ex.: `sr-only` nas
+  //   celulas) dentro da area que ele corta. Sem ele, o ancestral posicionado
+  //   era o externo, fora do `overflow-x-auto`, e esses elementos vazavam para
+  //   a pagina: +112px de rolagem lateral na Gerencial em 390px (T-0032).
   return (
     <div className="relative min-w-0">
-      <div ref={ref} className={`overflow-x-auto ${className}`}>
+      <div ref={ref} className={`relative overflow-x-auto ${className}`}>
         {children}
       </div>
       {edges.canScrollLeft && (

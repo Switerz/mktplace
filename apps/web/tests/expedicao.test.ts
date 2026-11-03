@@ -195,8 +195,10 @@ test("com a flag desligada nenhum fetch pode ser disparado", () => {
 // ===========================================================================
 // Allowlists
 // ===========================================================================
-test("situacao: oito valores, nada fora da allowlist passa", () => {
-  assert.equal(SITUACOES.length, 8);
+// EXPEDICAO-VENCE-AMANHA: `due_next_day` e' o nono.
+// EXPEDICAO-PERTO-DE-VENCER: `due_soon` e' o decimo.
+test("situacao: dez valores, nada fora da allowlist passa", () => {
+  assert.equal(SITUACOES.length, 10);
   assert.deepEqual(sanitizarSituacoes(["overdue", "hack", "stalled"]), ["overdue", "stalled"]);
   assert.deepEqual(sanitizarSituacoes(["'; DROP TABLE x; --"]), []);
 });
@@ -259,7 +261,7 @@ test("48h e descrito como limiar INTERNO, nunca como SLA do marketplace", () => 
   const kpi = montarKpis(TOTAIS, []).find((k) => k.chave === "over48h");
   assert.match(String(kpi?.nota), /não é SLA/i);
   const tela = fonte("app/expedicao/ExpedicaoClient.tsx");
-  assert.ok(tela.includes("EXPLICACAO_LIMIAR_48H"), "a tela precisa exibir a ressalva");
+  assert.ok(tela.includes("explicacaoLimiar48h("), "a tela precisa exibir a ressalva");
   assert.ok(!/SLA da Shopee|SLA oficial|garantia de prazo/i.test(tela));
 });
 

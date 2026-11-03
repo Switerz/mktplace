@@ -143,10 +143,13 @@ def test_flag_desligada_nao_consulta(monkeypatch, geral, ldr_flag):
     assert s.consultas == []
 
 
-def test_flags_nascem_desligadas():
+def test_flag_da_ldr_ligada_por_padrao_e_desligavel():
+    """Ligada em 30/10/2026; a env var `false` no Render desliga sem deploy."""
     from app.config import Settings
     campos = Settings.model_fields
-    assert campos["expedicao_shopee_ldr_api_enabled"].default is False
+    assert campos["expedicao_shopee_ldr_api_enabled"].default is True
+    # continua exigindo a flag geral, que segue desligada por padrao
+    assert campos["expedicao_api_enabled"].default is False
 
 
 def test_tabela_ausente_e_vazio_sao_motivos_distintos(ligado):

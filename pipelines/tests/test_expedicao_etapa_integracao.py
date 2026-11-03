@@ -281,14 +281,18 @@ def _revisoes_por_ast() -> dict[str, str | None]:
     return revisoes
 
 
-def test_cadeia_real_e_linear_e_termina_na_033(tmp_path):
-    """Grafo REAL do alembic sobre `apps/api/alembic/versions/` (so' leitura)."""
+def test_cadeia_real_e_linear_e_passa_pela_033(tmp_path):
+    """Grafo REAL do alembic sobre `apps/api/alembic/versions/` (so' leitura).
+
+    A 034 (EXPEDICAO-KOKESHI-EXPORT) entrou depois da 033 e nao a altera.
+    """
     grafo = json.loads(
         _python_isolado(ROTEIRO_GRAFO, str(VERSIONS.parent), cwd=tmp_path)
     )
-    assert grafo["heads"] == ["033"]
+    assert grafo["heads"] == ["034"]
     assert grafo["bases"] == ["001"]
-    assert grafo["revisoes"][:4] == ["033", "032", "031", "030"]
+    assert grafo["revisoes"][:5] == ["034", "033", "032", "031", "030"]
+    assert grafo["pais"]["034"] == "033"
     assert grafo["pais"]["033"] == "032"
     assert grafo["pais"]["032"] == "031"
     assert grafo["pais"]["031"] == "030"

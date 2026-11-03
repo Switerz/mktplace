@@ -23,18 +23,47 @@ permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
 | Migration `018` | **aplicada** no Neon em 16/09/2026 (`016` = Full ML, `017` = PMA) |
 | Tabelas em producao | criadas e populadas; `expedicao_refresh_run` acumula 4 linhas por hora |
 | Registry (`marts.dim_seller_account`) | **4 contas ativas** (Kokeshi fora: nao existe na fonte) |
+| Kokeshi Shopee | **pelo export do Seller Centre** (migration `034`, EXPEDICAO-KOKESHI-EXPORT): registry proprio, fila em tabelas proprias, juntada pela API. Ver `docs/expedicao_kokeshi_export_runbook.md` |
 | Orquestracao do `--apply` | implementada (EXP-1D-H1) e **executada em producao** (EXP-1E, 1F-P, 2C1-P) |
 | Refresh publicado | 3, todos **manuais** (ultimo: batch `494c2441-52b3-48bf-afea-dbea850effe7`, auditoria #319 `success`, 821 pedidos) |
 | API read-only | **implementada e ATIVA** (EXP-2A), `EXPEDICAO_API_ENABLED=true` no Render |
 | Tela (frontend) | **implementada e ATIVA** (EXP-2B), `NEXT_PUBLIC_EXPEDICAO_ENABLED=true` na Vercel |
 | Autenticacao | **inexistente** — API publica por decisao temporaria (EXP-2C0/2C1-P); divida registrada |
-| `order_ref` | **desativado**: `expedicao_order_ref_secret` vazio, identificador do pedido nao e' servido |
+| `order_ref` | **desativado**: `expedicao_order_ref_secret` vazio |
+| Numero do pedido | **servido** em `order_number` desde 30/10/2026 (decisao de produto, ate' haver login); `EXPEDICAO_NUMERO_PEDIDO_PUBLICO=false` no Render volta a reter |
 | MCP | nao iniciado |
 | ML / TikTok / calendario | fora deste gate |
 | Airflow | **ATIVO desde 21/10/2026** — DAG `marketplace_tower_expedicao_refresh`, a cada 2 h, tres canais (a API ainda nao reflete: ver pendencia do modo de publicacao) |
+| Alerta de vencidos da Shopee no Slack | **implementado** (EXPEDICAO-ALERTA-VENCIDOS-1), falta o agendamento no Airflow — ver a secao propria |
 
 A `018` e' a proxima revisao linear depois da `017` (PMA). Cadeia: `001 -> ... ->
 016 -> 017 -> 018`, raiz unica, head unico.
+
+---
+
+## Conta pelo export do Seller Centre (EXPEDICAO-KOKESHI-EXPORT)
+
+A Kokeshi nao tem app na Open Platform. O operador dela carrega o export de pedidos
+com `python -m pipelines.expedicao.shopee_export_cli` (runbook proprio). Regras:
+
+- **Tabelas proprias** (`034`): `marts.expedicao_fila_export` e
+  `marts.expedicao_refresh_run_export` tem a MESMA forma da fila e do resumo da
+  `018`/`033` (`LIKE ... INCLUDING ALL`). O publicador agendado apaga a fila da
+  Shopee inteira; uma linha do export gravada la' sumiria.
+- **Registry proprio**: `marts.expedicao_conta_export`. A conta NAO entra em
+  `dim_seller_account`, onde viraria `ACCOUNT_MISSING` no publicador agendado e
+  travaria a Shopee. O CLI recusa conta que ja' esteja em `dim_seller_account`.
+- **Mesma publicacao**: `publish_channel` com `Destino(fila, resumo, contas)`. O
+  DELETE continua restrito ao canal e ganha `AND shop_account = ANY(...)`. O
+  destino padrao e' identico ao de antes.
+- **Leitura**: a API junta o lote agendado com o ultimo lote coerente de cada
+  conta do export (`_fotografia_export`). Conta incoerente fica fora e volta a
+  `brands_not_covered`; nunca derruba a Shopee. `snapshot.effective_at` continua
+  sendo o do lote agendado; `accounts[].observed_at` traz a hora de cada conta.
+  As contagens, as listas, a Jornada e a tendencia leem a uniao (`_origem_da_fila`).
+- **Frescor** da conta do export: idade do watermark contra o instante mais
+  recente da resposta (`max(effective_at, observed_at)`), nunca contra a propria
+  carga, que a deixaria fresca para sempre.
 
 ---
 
@@ -462,7 +491,7 @@ Somente `GET`. Nao existe `POST`, `PATCH` nem `DELETE`, e o servico so' emite
 |---|---|---|
 | `brands` | ambos | CSV, ate 50 itens de ate 64 caracteres |
 | `accounts` | ambos | CSV, mesma regra |
-| `situacao` | principal | `overdue`, `due_within_24h`, `on_time`, `deadline_unavailable`, `over_48h`, `stalled`, `slow`, `zombie`. Varias combinam com E logico |
+| `situacao` | principal | `overdue`, `due_within_24h`, `on_time`, `deadline_unavailable`, `over_48h`, `stalled`, `slow`, `zombie`, `due_next_day`, `due_soon` (ver "Perto de vencer e proximo vencimento"). Varias combinam com E logico |
 | `order_by` | principal | `criticidade` (padrao), `deadline`, `oldest` |
 | `limit` / `offset` | principal | 1..500 / >= 0 |
 | `include_queue` | principal | `false` devolve so' o resumo |
@@ -520,16 +549,67 @@ convida a decidir sobre estado vencido.
 leitura anterior", nao falha. O estado e' recomputado por relogio a cada
 execucao justamente porque a fonte pode ficar parada.
 
+### Perto de vencer e proximo vencimento (EXPEDICAO-VENCE-AMANHA e PERTO-DE-VENCER, 30/10/2026)
+
+**Por que existe.** O `ship_by_date` da Shopee cai sempre as 23:59 de Brasilia
+e nunca em fim de semana ou feriado (medido no SHOPEE-LDR-1). Logo
+`due_within_24h` e', na pratica, "vence hoje", e os pedidos que vencem amanha
+ficavam diluidos em `on_time`, sem contagem nem lista. Pedido do usuario
+(30/10/2026): a prioridade da operacao e' **"perto de vencer"** = o que vence
+HOJE ate' 23:59 + o que vence no PROXIMO dia de prazo, sem os ja' vencidos — e
+o cartao, a coluna da tabela por marca e a lista tem de ser o MESMO numero.
+
+**Campos** (`GET /api/v1/expedicao`):
+
+- `snapshot.next_due_date` — primeiro dia de prazo (data de Brasilia) DEPOIS do
+  dia de `effective_at`: amanha de segunda a quinta; na sexta, o proximo dia
+  util. Vem da propria fila (menor dia de prazo maior que o dia da fotografia),
+  entao feriado ja' sai certo. `null` sem prazo publicado ou sem pedido
+  vencendo depois de hoje.
+- `accounts[].due_today_count` / `totals.due_today_count` — ainda nao vencidos
+  com prazo no dia da fotografia (ate' 23:59).
+- `accounts[].due_next_day_count` / `totals.due_next_day_count` — pedidos com
+  prazo em `next_due_date`. Subconjunto de `on_time_count`.
+- `accounts[].due_soon_count` / `totals.due_soon_count` — **perto de vencer** =
+  hoje + proximo dia. `totals` e' a soma das contas (o cartao e' a soma da
+  coluna).
+- Nenhum dos tres entra na particao de prazo. Shopee: inteiros (0 quando nao
+  ha). Mercado Livre: inteiros quando a fotografia traz o SLA
+  (`snapshot.deadline_published = true`, EXPEDICAO-ML-PRAZO); senao `null` e
+  a consulta nem e' feita.
+
+**Regras.**
+
+- "Hoje" e' o dia de Brasilia da FOTOGRAFIA (`effective_at`), calculado UMA vez
+  no servico e passado como `:hoje` ao SQL — nunca o relogio da requisicao:
+  dois consumidores do mesmo lote veem o mesmo dia, e o Python e o SQL nao tem
+  como discordar sobre que dia e' hoje.
+- **Uma base so'** (`NAO_VENCIDO_COM_PRAZO_SQL`): `dispatch_deadline IS NOT
+  NULL AND deadline_status <> 'overdue' AND dia >= :hoje`, com
+  `dia = (dispatch_deadline AT TIME ZONE 'America/Sao_Paulo')::date`. A
+  contagem agrupa por dia x conta sobre ela, numa consulta (`channel` +
+  `refresh_batch_id`); as listas so' acrescentam o limite superior. Nao e'
+  materializado.
+- Canal inteiro, como `totals`: `brands`/`accounts` recortam so' a lista.
+- `situacao=due_soon` lista os perto de vencer: base `AND dia <= :limite_perto`
+  (`next_due_date`, ou hoje quando nao ha proximo dia). `situacao=due_next_day`
+  lista o proximo dia: base `AND dia = :proximo_vencimento`. Os dois ficam FORA
+  de `SITUACAO_SQL`, que a jornada usa em `count(*) FILTER` so' com predicados
+  fixos. No ML sem SLA na fotografia (ou sem data, no `due_next_day`), o
+  filtro e' `FALSE`: lista vazia, nunca a fila inteira.
+- A fila publicada inclui FBS (o extrator nao le `fulfillment_flag`): as
+  contagens tambem.
+
 ### Hierarquia gerencial, filtro de marca e LDR (EXPEDICAO-UX-3, 21/10/2026)
 
 **O que cada canal sustenta** (medido na resposta de producao, so' estrutura):
 
 | | Shopee | Mercado Livre | TikTok |
 |---|---|---|---|
-| Prazo por pedido | `ship_by_date` (`marketplace_native`) em todas as linhas | ausente (`deadline_source = unavailable`) | reconstruido pela politica de dias uteis |
-| Situacao de prazo na fotografia | `overdue / due_within_24h / on_time / deadline_unavailable` | so' `deadline_unavailable` | — |
+| Prazo por pedido | `ship_by_date` (`marketplace_native`) em todas as linhas | SLA oficial do envio (`sla_expected_date`, `marketplace_native`) quando gravado; senao `unavailable` (EXPEDICAO-ML-PRAZO) | reconstruido pela politica de dias uteis |
+| Situacao de prazo na fotografia | `overdue / due_within_24h / on_time / deadline_unavailable` | a mesma particao com SLA; so' `deadline_unavailable` sem ele | — |
 | Idade da fila | `over_48h`, `stalled`, `oldest_row_age_hours` | idem | — |
-| Taxa de atraso (LDR) | **nao existe no contrato** | **impossivel** (sem prazo na fonte) | `ldr`, por vencimento, coleta e despacho |
+| Taxa de atraso (LDR) | **nao existe no contrato** | nao construida (o SLA so' e' relido com o envio aberto) | `ldr`, por vencimento, coleta e despacho |
 
 A tela mostra a MESMA hierarquia (Risco atual -> Prazo -> Evolucao ->
 Concentracao por marca) e, em cada secao, so' o que o canal sustenta. Nenhuma
@@ -561,10 +641,11 @@ estiverem desligadas, a secao "Prazo" da Shopee continua mostrando a particao
 do backlog por situacao de prazo e dizendo, por escrito, que a LDR ainda nao e'
 calculada.
 
-**Mercado Livre.** O canal nao publica prazo de envio (campos candidatos 0%
-preenchidos, medido no EXP-3A). Nao ha vencimento nem LDR a construir sem uma
-fonte nova de prazo; a secao "Prazo" diz isso e mostra o envelhecimento da
-fila (acima de 48 h, limiar interno, e o pedido mais antigo por marca).
+**Mercado Livre.** Ate' 03/11/2026 o canal nao tinha prazo de envio (campos
+candidatos 0% preenchidos, medido no EXP-3A). Com o SLA oficial na fotografia
+(secao "Prazo do Mercado Livre"), a secao "Prazo" e os cartoes ficam como
+os da Shopee; sem ele, a secao diz que nao ha prazo e mostra o envelhecimento
+da fila (acima de 48 h, limiar interno, e o pedido mais antigo por marca).
 
 **Evolucao em tabela.** Uma linha por conta, titulada pela marca: backlog
 atual, variacao, acima de 48 h, travados e sparkline. Sem escala escrita e sem
@@ -785,7 +866,18 @@ quando alguem executa o refresh manualmente"** ficam sempre visiveis. Acima de
 
 ### Identificadores
 
-A tela **nao recebe e nao exibe** `order_sn`. `order_ref` e' opaco e opcional:
+EXPEDICAO-NUMERO-PEDIDO (30/10/2026): a API serve o numero real do pedido em
+`order_number`, por decisao de produto e com o risco aceito de a API ser
+publica, ate' a Torre ter login. A tela o mostra no popup de travados e na
+fila do operador, e o popup exporta a lista em CSV. O numero **nunca vira
+link** para o marketplace. Com `EXPEDICAO_NUMERO_PEDIDO_PUBLICO=false` no
+Render ele volta a nulo, sem deploy de codigo.
+
+No Mercado Livre a fila e' por envio: `order_number` e' o `shipment_id`, e a
+tela o chama de **Envio**, nunca de pedido. O numero da venda do ML nao esta
+na fila (seria preciso publicar `order_id` junto).
+
+Sem o numero, `order_ref` e' opaco e opcional:
 
 * quando a API o omite (default), a coluna de referencia simplesmente **nao
   aparece** — nada de coluna vazia nem de mensagem sugerindo erro;
@@ -809,6 +901,7 @@ renderizam nos estados `ok` e `fila vazia por filtro`.
 | `NEXT_PUBLIC_EXPEDICAO_ENABLED` | Vercel (frontend) | ausente = `false` | **`true`** (EXP-2C1-P) |
 | `EXPEDICAO_API_ENABLED` | Render (API) | `False` | **`true`** (EXP-2C1-P) |
 | `expedicao_order_ref_secret` | Render (API) | `""` | **vazia** — `order_ref` desativado |
+| `EXPEDICAO_NUMERO_PEDIDO_PUBLICO` | Render (API) | `true` | ausente = **`true`** — numero do pedido servido (30/10/2026) |
 
 As duas precisam ser ligadas **em conjunto e nessa ordem**: primeiro a API,
 depois a tela. Ligar so' a tela produz `unavailable` em toda requisicao; ligar
@@ -857,7 +950,8 @@ e' apagado; a fotografia publicada segue no banco.
 * A tendencia depende de quantas fotografias existirem.
 * Kokeshi continua **fora da cobertura** — declarada em `brands_not_covered`,
   nunca como zero.
-* `order_ref` desativado enquanto a API nao tiver autenticacao.
+* `order_ref` desativado; o numero real do pedido e' servido sem autenticacao
+  por decisao de 30/10/2026, ate' haver login.
 
 ---
 
@@ -1014,10 +1108,98 @@ faixa de 48h (`operational_age_status`) e `is_stalled`.
 100, e a coorte de 7 dias nao a sustenta. `is_stalled` fica valendo so' pelo
 zumbi — declarado, nao silencioso.
 
-**Caminho para o prazo oficial:** reextrair
-`shipping_option.estimated_handling_limit` da API do Mercado Livre e
-materializar a coluna. E' gate proprio; enquanto nao existir, a tela do ML nao
-pode mostrar colunas de prazo.
+**Caminho para o prazo oficial — FEITO em 03/11/2026 (EXPEDICAO-ML-PRAZO).**
+O `estimated_handling_limit` foi descontinuado pelo ML em 13/05/2025; o prazo
+vem do SLA do envio. Ver a secao "Prazo do Mercado Livre". O que esta secao
+descreve continua valendo para todo envio SEM SLA valido.
+
+## Prazo do Mercado Livre — SLA oficial do envio (EXPEDICAO-ML-PRAZO, 03/11/2026)
+
+Pedido do usuario: "faca o mesmo para o Mercado Livre" — cartao, coluna e lista
+"Perto de vencer", vencidos em vermelho e ⓘ, como na Shopee.
+
+**Por que o ML nao tinha prazo.** O ML descontinuou
+`shipping_option.estimated_handling_limit` em 13/05/2025. Desde entao o prazo de
+despacho so' sai de `GET /shipments/{shipment_id}/sla`:
+
+```json
+{"status": "on_time", "service": "xd_same_day",
+ "expected_date": "2024-05-22T23:59:59-03:00", "last_updated": "2024-05-21T17:16:04Z"}
+```
+
+`expected_date` e' a "data e hora limite para despachar o produto", com o fuso
+do site. No Mercado Coleta (`cross_docking`, 100% dos 757 envios abertos em
+03/11/2026) e' o horario da coleta agendada. O ML pode muda-lo ate' a vespera e
+nao responde para envio cancelado nem Full. Fonte: developers.mercadolivre.com.br,
+"Gerenciamento de envios", secoes "Prazo maximo de despacho (SLA)" e "Prazos de
+entrega".
+
+**Extrator (goca-se/airflow, branch `feat/ml-shipments-sla`).** Migration
+`migrations/53_ml_shipments_sla.sql` acrescenta a `raw.ml_shipments`:
+`sla_expected_date timestamptz`, `sla_status`, `sla_service`,
+`sla_last_updated timestamptz` e `sla_extracted_at timestamptz` (quando o SLA
+foi buscado; gravado tambem quando o ML nao devolve SLA). A task nova
+`refresh_open_shipments` do `ml_orders_etl` (Fase 3, a cada 15 min, token sem
+renovar) rele os envios abertos dos ultimos 30 dias — a Fase 2 so' relia quando
+o PEDIDO mudava, e em 03/11/2026 240 dos 757 envios abertos estavam ha' mais de
+6 h sem releitura, o pior ha' 11 dias — e rebusca o SLA de hora em hora.
+
+**Pipeline (este repo).**
+
+- `ML_BACKLOG_SQL` le `to_jsonb(s) ->> 'sla_expected_date'` e
+  `->> 'sla_extracted_at'`: o MESMO SELECT roda antes e depois de a coluna
+  existir. Coluna ausente = NULL = envio sem prazo, como antes. A ordem dos
+  deploys (Airflow x mktplace) nao importa.
+- `transform.prazo_sla_ml`: o prazo vale se houver `expected_date` E leitura do
+  SLA com ate' `ML_SLA_MAX_AGE` (24 h). Senao `unavailable`. Nunca derivado de
+  outra coluna.
+- `transform.instante_iso_com_fuso`: o texto TEM de trazer fuso. Sem fuso
+  (coluna criada como `timestamp` naive) a publicacao falha FECHADA — ler o
+  prazo num fuso suposto erraria de 1 a 4 h justo na fronteira do vencido.
+  Terceira convencao por coluna: `ML_ZONED_TIMESTAMPS` (as outras duas seguem
+  intactas: ingestao em UTC, negocio em -04:00).
+- `build_fila_ml`: `dispatch_deadline` = SLA, `deadline_source =
+  marketplace_native`, `deadline_status` e `hours_overdue` pelas MESMAS funcoes
+  da Shopee. `timestamp_quality` continua `assumed` (as datas de negocio do ML
+  seguem inferidas).
+
+**API.** `prazo_publicado(canal, resumos)`: Shopee sempre; ML quando alguma
+conta do lote tem `deadline_unavailable_count < backlog_count`. Sai em
+`snapshot.deadline_published`. Com `true`, o ML ganha `due_today_count`,
+`due_next_day_count`, `due_soon_count`, `next_due_date`, as listas `due_soon`
+e `due_next_day` e as sobreposicoes `vencido`/`vence_24h` da jornada — tudo
+pela mesma base da Shopee (`NAO_VENCIDO_COM_PRAZO_SQL`). Com `false`, a
+resposta e' a de antes. Nenhuma flag nova.
+
+**Tela.** `canalTemPrazo(canal, fotografia)` le `deadline_published` da
+fotografia DO MESMO canal. ML com SLA: os cartoes, a barra empilhada, a coluna
+"Perto de vencer", a lista e o vermelho dos vencidos da Shopee, com "prazo
+Mercado Livre" no rotulo e textos proprios (nenhum cita a Shopee nem o
+`ship_by_date`). ML sem SLA: exatamente a tela anterior.
+
+**Coletados e veredito do ML (EXPEDICAO-ML-COLETADOS, 03/11/2026).** Com o SLA
+gravado em producao (11:14), o prazo do Mercado Coleta se mostrou o HORARIO DA
+COLETA, e o envio segue `ready_to_ship` por horas depois de coletado: 199 de
+200 envios com o horario de hoje passado estavam `picked_up`, e o ML os dava
+como `on_time`. A regra so' pelo relogio publicaria ~228 vencidos falsos.
+Decisao do usuario: **coletado = expedido**.
+
+- `picked_up`, `dropped_off` e `in_hub` (`ML_COLLECTED_SUBSTATUSES`) SAEM da
+  fila em `classify_candidates`, contados em `collected_excluded_count` (274 de
+  768 as 11:20). A etapa `entregue_transportadora` deixa de aparecer no ML.
+- `classificar_prazo_ml` (envio ainda com o vendedor): ML `delayed` = vencido;
+  prazo de dia anterior (Brasilia) = vencido; horario de hoje passado sem
+  `delayed` = vence hoje (a coleta pode ainda passar); resto pelo relogio.
+- `sla_status` entra no SELECT pelo mesmo `to_jsonb(s) ->> ...`.
+- Simulacao no Data Mart as 11:25: 10 vencidos, 85 vencem hoje, 52 amanha.
+- **Trava:** `expedicao_ml_prazo_enabled` (Render, default `false`, #147) mantem
+  o ML sem prazo na tela ate' este pipeline estar no pin do Airflow.
+
+**Fora deste gate.**
+
+- LDR do ML: o SLA so' e' relido enquanto o envio esta' aberto.
+- Rituaria deixou de ser "100% Full": 141 envios `cross_docking` abertos em
+  03/11/2026 (a tabela de cobertura abaixo e' de 17/09).
 
 ## Cobertura por marca e conta
 
@@ -1308,11 +1490,15 @@ e na resposta da API. Motivo NULO e' contado como ausente, sem alerta.
 vencida, > 6 h). Exclusoes em `exclusions`, cobertura em `coverage`, por marca
 em `brands` (nunca somadas entre marcas).
 
-### Flags (todas nascem desligadas)
+### Flags (nasceram desligadas)
+
+Em 30/10/2026, a pedido do usuario, `EXPEDICAO_SHOPEE_LDR_API_ENABLED` passou
+a vir LIGADA por padrao no codigo (sem acesso ao painel do Render); `false`
+na env volta a desligar sem deploy. `EXPEDICAO_API_ENABLED` continua exigida.
 
 | Onde | Flag |
 |---|---|
-| API (Render) | `EXPEDICAO_API_ENABLED` **e** `EXPEDICAO_SHOPEE_LDR_API_ENABLED` |
+| API (Render) | `EXPEDICAO_API_ENABLED` **e** `EXPEDICAO_SHOPEE_LDR_API_ENABLED` (padrao `true` desde 30/10/2026) |
 | Web (Vercel) | `NEXT_PUBLIC_EXPEDICAO_SHOPEE_LDR_ENABLED=true` |
 | Airflow | DAG `marketplace_tower_expedicao_shopee_ldr_publish` nasce PAUSADA |
 
@@ -1464,3 +1650,47 @@ O TikTok usa o modo completo e não muda.
 | Shopee | por pedido (`READY_TO_SHIP` + `PROCESSED`); etapa interna e FBS não separados | por vencimento, só com a LDR operacional ativa (indicador interno, não o Account Health oficial) |
 | Mercado Livre | por shipment `ready_to_ship`; Full fora; `substatus` não publicado; `vencido`/`vence_24h` = `null` | não existe: o canal não publica prazo de despacho |
 | TikTok | não existe: não há fila em grão de pedido | por dia de pagamento × marca, evento coleta ou despacho; prazo reconstruído da política de dias úteis |
+
+---
+
+## Alerta de vencidos da Shopee no Slack (EXPEDICAO-ALERTA-VENCIDOS-1, 03/11/2026)
+
+`python -m pipelines.expedicao.alerta_vencidos --enviar` le a fila servida no
+Neon (read-only) e manda, por DM do bot "Torre" (app do Slack em
+`infra/slack/torre-bot`), um aviso quando a razao
+`overdue_count / backlog_count` da **Shopee** passa de **3%** — a mesma razao
+do "% vencidos" da tabela por marca, sobre o resumo por conta do lote servido.
+A mensagem traz o %, "N de M", o instante da fotografia, as marcas acima de 3%
+e o link da aba.
+
+Substitui o alerta de travados (EXPEDICAO-ALERTA-TRAVADOS-1, 29/10/2026, nunca
+agendado): os travados ficaram acima de 3% em todas as leituras de 21 a
+29/10/2026 e o alerta viraria ruido. **So' a Shopee**: o Mercado Livre nao
+publica prazo de despacho (`vencido` = `null`), entao precisa de regra propria.
+
+- **Quando avisa:** ao passar de 3% ("entrou"); enquanto continua acima, um
+  lembrete quando o relogio de Brasilia atravessa 9h, 13h ou 17h desde a
+  fotografia anterior; UM aviso quando volta para 3% ou menos. Sem estado
+  gravado: a fotografia anterior vem do proprio resumo.
+- **Volume medido** (regra aplicada ao resumo de 25/10 a 03/11/2026): 15
+  mensagens em 9 dias, em 4 episodios (25, 28, 29 e 30/10). Os episodios
+  comecam a meia-noite, quando os pedidos com prazo 23:59 viram vencidos.
+- **Fotografia velha nao avisa:** mais velha que `--max-idade-min` (padrao 45),
+  o canal nao e' avaliado. Sem isso, uma publicacao que falhou repetiria o
+  aviso da hora anterior.
+- **Shopee inclui FBS** na base, como a tabela por marca.
+- **Sem `--enviar`**, so' imprime o que enviaria. Exit `1` em falha de leitura,
+  token ou destinatarios ausentes, ou Slack recusando; o token nunca aparece
+  na saida. Sem retry automatico: repetir manda a mensagem de novo.
+
+Configuracao do envio:
+
+- `DATABASE_URL`: Neon; basta `SELECT` em `marts.expedicao_fila_atual` e
+  `marts.expedicao_refresh_run` (a sessao e' aberta read-only);
+- `SLACK_BOT_TOKEN`: token `xoxb-` do bot, em app settings → OAuth & Permissions;
+- `EXPEDICAO_ALERTA_DESTINATARIOS`: e-mails do Slack, separados por virgula.
+  Cada um recebe a mensagem no privado (`users.lookupByEmail` +
+  `chat.postMessage`).
+
+Agendamento: uma task na DAG `marketplace_tower_expedicao_refresh`, logo
+depois de `publicar_shopee`, para o aviso sair minutos depois da fotografia.

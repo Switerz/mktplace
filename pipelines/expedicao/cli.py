@@ -260,14 +260,25 @@ def diagnose_ml(conn, effective_at: datetime) -> dict:
                 "aguardando": 0,
                 "over_48h": 0,
                 "source_zombie": 0,
+                "vencidos": 0,
                 "sem_prazo": 0,
             },
         )
         bucket["aguardando"] += 1
-        # TODO do contrato, nao omissao: o ML nao entrega prazo de despacho,
-        # entao TODA linha e' `unavailable`. A coluna existe para deixar isso
-        # visivel no diagnostico em vez de sumir da tela.
-        bucket["sem_prazo"] += 1
+        # Prazo = SLA oficial do ML (EXPEDICAO-ML-PRAZO), pela MESMA funcao da
+        # publicacao. Sem SLA valido a linha e' `unavailable` e aparece aqui
+        # em `s/prazo`, em vez de sumir.
+        prazo = transform.prazo_sla_ml(
+            linha.get("sla_expected_date"), linha.get("sla_extracted_at"),
+            effective_at,
+        )
+        situacao = transform.classificar_prazo_ml(
+            prazo, linha.get("sla_status"), effective_at
+        ).value
+        if situacao == "unavailable":
+            bucket["sem_prazo"] += 1
+        elif situacao == "overdue":
+            bucket["vencidos"] += 1
         marco = transform.normalizar_negocio_ml(linha.get("date_ready_to_ship"))
         if marco is None:
             marco = transform.normalizar_negocio_ml(linha.get("order_created_at"))
@@ -301,18 +312,20 @@ def format_diagnose_ml(resultado: dict) -> str:
         f"    seller-managed (fora Full)               : {d['seller_managed_count']}",
         f"    excluidos por Full (armazem do ML)       : {d['fulfillment_excluded_count']}",
         f"    excluidos por registro congelado         : {d['stale_source_record_count']}",
+        f"    excluidos por ja' coletados (no hub)     : {d.get('collected_excluded_count', 0)}",
         f"    modalidade nao mapeada                   : {d['unmapped_logistic_type_count']}",
         f"    FILA                                     : {d['queue_count']}",
         "",
-        "  SEM PRAZO: o Mercado Livre nao entrega prazo de despacho no armazem.",
-        "  Nenhuma linha e' classificada como vencida, a vencer ou no prazo.",
+        "  PRAZO: SLA oficial do Mercado Livre (`sla_expected_date`). Sem SLA",
+        "  valido o envio conta em s/prazo — nenhum prazo e' derivado.",
         "",
-        "  conta            marca        aguard  >48h  zumbi  s/prazo",
+        "  conta            marca        aguard  >48h  zumbi  vencid  s/prazo",
     ]
     for conta, b in sorted(resultado["por_conta"].items()):
         linhas.append(
             f"  {conta:<16} {b['marca']:<12} {b['aguardando']:>6} "
-            f"{b['over_48h']:>5} {b['source_zombie']:>6} {b['sem_prazo']:>8}"
+            f"{b['over_48h']:>5} {b['source_zombie']:>6} {b['vencidos']:>6} "
+            f"{b['sem_prazo']:>8}"
         )
     linhas.append("")
     linhas.append("  watermark por conta (extracted_at, ja em UTC):")

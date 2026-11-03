@@ -13,7 +13,16 @@ from pathlib import Path
 
 import pytest
 
-from pipelines.expedicao import audit, cli, contract, publisher, shopee_extract, transform
+from pipelines.expedicao import (
+    audit,
+    cli,
+    contract,
+    publisher,
+    shopee_export,
+    shopee_export_cli,
+    shopee_extract,
+    transform,
+)
 from pipelines.expedicao.contract import (
     ADVISORY_LOCK_KEYS,
     ALERT_EVENT_TABLE_FUTURE,
@@ -336,7 +345,8 @@ DML_CONTRATADO = (
 ALEMBIC_PROIBIDO = {"upgrade", "downgrade", "stamp", "revision", "op"}
 
 #: Modulos de PRODUCAO do pacote (os testes ficam de fora).
-MODULOS_PRODUCAO = [contract, shopee_extract, transform, publisher, audit, cli]
+MODULOS_PRODUCAO = [contract, shopee_extract, transform, publisher, audit, cli,
+                    shopee_export, shopee_export_cli]
 
 
 def _sql_literais(modulo) -> list[str]:

@@ -8,6 +8,10 @@
  * E' o mesmo `InfoDica` do resto da Torre: focavel (Tab ou toque), com o
  * texto no `aria-label` e no balao. So' `<span>`: o "ⓘ" mora dentro de `<p>`
  * (a linha de comparacao do KpiTile).
+ *
+ * EXPEDICAO-DICA-LEGIVEL: no balao, o nome da metrica em negrito, a definicao
+ * e a ressalva separada embaixo. O leitor de tela continua lendo
+ * `textoDaAjuda` (definicao + limitacao).
  */
 import InfoDica from "@/components/ui/InfoDica";
 import { definicaoDe, type ChaveMetrica } from "@/lib/expedicao-definicoes";
@@ -19,5 +23,13 @@ export function textoDaAjuda(chave: ChaveMetrica): string {
 }
 
 export default function AjudaMetrica({ chave, className = "" }: { chave: ChaveMetrica; className?: string }) {
-  return <InfoDica texto={textoDaAjuda(chave)} className={`align-middle ${className}`} />;
+  const def = definicaoDe(chave);
+  return (
+    <InfoDica
+      titulo={def.nome}
+      texto={def.definicao}
+      nota={def.limitacoes}
+      className={`align-middle ${className}`}
+    />
+  );
 }

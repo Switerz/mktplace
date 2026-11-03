@@ -53,6 +53,20 @@ FILA_TABLE = "marts.expedicao_fila_atual"
 #: backlog zero — e assim que a fotografia vazia deixa prova.
 RUN_TABLE = "marts.expedicao_refresh_run"
 
+#: EXPEDICAO-KOKESHI-EXPORT (migration 034). Conta sem app na Open Platform tem
+#: a fila montada do export do Seller Centre e publicada em tabelas PROPRIAS,
+#: com a MESMA forma das duas acima: o publicador agendado apaga a fila da
+#: Shopee inteira a cada execucao, e uma linha do export gravada la' sumiria.
+#: A API junta as duas fotografias na leitura.
+FILA_EXPORT_TABLE = "marts.expedicao_fila_export"
+RUN_EXPORT_TABLE = "marts.expedicao_refresh_run_export"
+#: Registry das contas alimentadas por export. NAO e' `dim_seller_account`: la',
+#: a conta passaria a ser esperada no Data Mart e bloquearia a Shopee inteira.
+CONTA_EXPORT_TABLE = "marts.expedicao_conta_export"
+#: Ultimo estado conhecido de cada pedido exportado. Grao (shop_account,
+#: order_sn), espelho de `pk_shopee_orders`, sem coluna de comprador.
+PEDIDO_EXPORT_TABLE = "marts.expedicao_shopee_export_pedido"
+
 #: EVOLUCAO FUTURA, nao implementada neste gate.
 #: `marts.expedicao_alert_event` — uma linha quando um pedido ENTRA ou SAI de
 #: `overdue`, `over_48h`, `slow`, `zombie` ou `stalled`. Substitui a ideia de
@@ -163,6 +177,11 @@ ADVISORY_LOCK_KEYS = {
     Channel.MERCADOLIVRE: 916_120_016,
     Channel.TIKTOKSHOP: 917_120_017,
 }
+
+#: Lock da carga do export (EXPEDICAO-KOKESHI-EXPORT). Chave PROPRIA: com a da
+#: Shopee, a carga do bot falharia toda vez que coincidisse com a execucao
+#: agendada, sem que as duas escrevam uma tabela em comum.
+EXPORT_ADVISORY_LOCK_KEY = 915_120_115
 
 KNOWN_FOREIGN_LOCK_KEYS = frozenset(
     {
@@ -523,6 +542,12 @@ ML_BUSINESS_TIMESTAMPS = frozenset(
     {"date_created", "date_ready_to_ship", "order_created_at"}
 )
 
+#: CARIMBO COM FUSO DECLARADO (EXPEDICAO-ML-PRAZO): as colunas do SLA sao
+#: `timestamptz` na fonte e viajam como texto ISO 8601 COM offset. Nenhum
+#: offset e' aplicado nem inferido; o unico conversor e'
+#: `transform.instante_iso_com_fuso`, que recusa texto sem fuso.
+ML_ZONED_TIMESTAMPS = frozenset({"sla_expected_date", "sla_extracted_at"})
+
 #: Offset dos carimbos de NEGOCIO. O nome diz a que se aplica de proposito: o
 #: antigo `ML_SOURCE_UTC_OFFSET` sugeria "toda a fonte" e foi exatamente assim
 #: que `extracted_at` acabou convertido junto.
@@ -547,8 +572,57 @@ ML_ALLOWED_SOURCE_COLUMNS = frozenset(
         "date_cancelled",
         "tracking_method",
         "extracted_at",
+        # Prazo de despacho do SLA do Mercado Livre (EXPEDICAO-ML-PRAZO).
+        # Viajam como TEXTO ISO 8601 com fuso: ver `ML_BACKLOG_SQL`.
+        "sla_expected_date",
+        "sla_extracted_at",
+        # Veredito do proprio ML sobre o prazo (`on_time`, `delayed`...).
+        "sla_status",
     }
 )
+
+#: ENVIO JA' COLETADO (EXPEDICAO-ML-COLETADOS, decisao do usuario 03/11/2026).
+#:
+#: No Mercado Coleta o envio segue `ready_to_ship` por horas depois que a
+#: transportadora o recolhe, ate' ser escaneado no hub. Medido em 03/11/2026
+#: as 11:20: 274 dos 768 envios da fila (36%) ja' estavam coletados, e 199
+#: deles viravam "vencido" pelo relogio com o ML dando `on_time`. Para o
+#: vendedor o envio ja' saiu — o mesmo que o pedido enviado da Shopee, que
+#: deixa a fila. Entao SAEM da fila e sao contados em
+#: `collected_excluded_count`, como o Full.
+ML_COLLECTED_SUBSTATUSES = frozenset({"picked_up", "dropped_off", "in_hub"})
+
+#: Veredito de atraso do ML no SLA. O prazo do Mercado Coleta e' o horario da
+#: coleta: passado o horario, so' o ML sabe se a coleta falhou por culpa do
+#: vendedor. `delayed` = vencido; horario de hoje passado sem `delayed` = vence
+#: hoje (a coleta pode ainda passar); prazo de dia anterior sem coleta =
+#: vencido mesmo com o ML calado.
+ML_SLA_STATUS_ATRASADO = "delayed"
+
+#: PRAZO DE DESPACHO DO MERCADO LIVRE (EXPEDICAO-ML-PRAZO, 03/11/2026).
+#:
+#: A unica fonte oficial e' `GET /shipments/{id}/sla`: `expected_date` e' a
+#: "data e hora limite para despachar o produto" (no Mercado Coleta, o horario
+#: da coleta agendada). O antigo `shipping_option.estimated_handling_limit` foi
+#: descontinuado pelo ML em 13/05/2025 — por isso as colunas candidatas estavam
+#: 0% preenchidas no EXP-3A.
+#:
+#: O extrator do Airflow (goca-se/airflow, task `refresh_open_shipments` do
+#: `ml_orders_etl`) grava o SLA em `raw.ml_shipments`:
+#:   - `sla_expected_date timestamptz` — o prazo, COM o fuso que o ML manda;
+#:   - `sla_extracted_at  timestamptz` — quando o SLA foi buscado.
+#: Diferente das colunas antigas da fonte, que sao naive (ver a convencao por
+#: coluna abaixo), estas sao `timestamptz`: nada de offset inferido aqui.
+#:
+#: Prazo NUNCA e' derivado de outra coluna. Sem SLA (coluna ainda inexistente,
+#: ML sem dado, `insuficient_info`, leitura velha), o envio sai `unavailable`,
+#: exatamente como antes.
+#:
+#: Idade maxima da LEITURA do SLA para ele valer. O ML pode mudar o horario
+#: ate' a vespera do despacho e o extrator rebusca o SLA a cada hora; um SLA
+#: lido ha' mais de 24 h indica que o extrator parou de reler o envio, e um
+#: "vencido" sobre ele seria palpite. Sai `unavailable`, nao some da fila.
+ML_SLA_MAX_AGE = timedelta(hours=24)
 
 
 # ---------------------------------------------------------------------------

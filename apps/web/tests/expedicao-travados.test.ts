@@ -49,10 +49,13 @@ test("a lista usa a rota da fila: so' travados, mais antigos primeiro, da marca 
   assert.equal(todas.get("accounts"), null);
 });
 
-test("tela: cartao de travados com % e 'ver quais'; popup montado uma vez", () => {
-  assert.match(CLIENTE, /k\.chave === "stalled" && k\.valor !== null \? \(\s*cartaoTravados\(k\)/);
-  assert.match(CLIENTE, /\{pct \? `\$\{pct\} da fila` : null\}/);
-  assert.match(CLIENTE, />\s*ver quais\s*</);
+test("tela: cartao de travados com % e abre a lista; popup montado uma vez", () => {
+  // EXPEDICAO-PERTO-DE-VENCER: todo cartao do Risco atual e' o `CartaoDeRisco`
+  // clicavel ("Ver pedidos →" no hover), com a fatia da fila na linha de baixo.
+  assert.match(CLIENTE, /stalled: "travados"/);
+  assert.match(CLIENTE, /secundarios=\{secundariosDoRisco\.map\(cartaoDeRisco\)\}/);
+  assert.match(CLIENTE, /pct \? `\$\{pct\} da fila` : undefined/);
+  assert.match(CLIENTE, /aoAbrir=\{abrirLista\(k, LISTA_DO_KPI\[k\.chave\]\)\}/);
   assert.equal((CLIENTE.match(/<TravadosDialog\b/g) ?? []).length, 1);
   assert.match(CLIENTE, /pctTravados: percentualDaFila\(a\.stalled_count, a\.backlog_count\)/);
 });
@@ -81,7 +84,7 @@ test("tabela: o numero de travados abre a lista e mostra o %", () => {
 });
 
 test("menos texto: Prazo some sem LDR; jornada so' com coorte; convite curto", () => {
-  assert.match(CLIENTE, /const secaoPrazo = temPrazo && !LDR_SHOPEE_LIGADA && destaque && temBarraDePrazo \? null/);
+  assert.match(CLIENTE, /const secaoPrazo = temPrazo && !ldrNaSecao && destaque && temBarraDePrazo \? null/);
   assert.match(CLIENTE, /<JornadaPedidos [^>]*compacta \/>/);
   assert.match(CLIENTE, /conteudo="Lista de pedidos, mais críticos e fonte por conta\."/);
   assert.match(CLIENTE, /<SecaoGerencial titulo="Prazo" dica=\{SEM_PRAZO_CANAL_ML\}>/);
@@ -107,7 +110,7 @@ test("revisao #124: popup sem coluna inutil, remonta por alvo e diz quando inclu
   assert.match(POPUP, /alvo\?\.incluiFbs \? "Lista da fila publicada, com pedidos FBS/);
   assert.match(POPUP, /estado\.tipo === "ok" && !temCodigo \? "Por segurança/);
   assert.match(POPUP, /\{rodape \? <p className="text-xs text-ink-faint">\{rodape\}<\/p> : null\}/);
-  assert.match(CLIENTE, /<TravadosDialog\s+key=\{alvoTravados \?/);
+  assert.match(CLIENTE, /<TravadosDialog\s+key=\{\s*alvoTravados\s*\?/);
   assert.match(CLIENTE, /incluiFbs: divisao !== null/);
   const JORNADA = fonte("src/components/expedicao/JornadaPedidos.tsx");
   // revisao #127: o modo compacto mantem o aviso de marca e as limitacoes
@@ -142,4 +145,91 @@ test("popup: coluna e resumo de etapa so' com etapa publicada", () => {
   assert.match(POPUP, /\{temEtapa \? <th scope="col">Etapa<\/th> : null\}/);
   assert.match(POPUP, /data-testid="exp-travados-por-etapa"/);
   assert.match(POPUP, /Onde estão travados/);
+});
+
+// ---------------------------------------------------------------------------
+// EXPEDICAO-NUMERO-PEDIDO — numero real do pedido e CSV dos travados
+// ---------------------------------------------------------------------------
+const { numeroDoPedido, mostrarColunaReferencia, rotuloDoNumero } = await import("../src/lib/expedicao-contract.ts");
+const { colunasDoCsvTravados, linhaDoCsvTravados, csvDosTravados, nomeDoCsvTravados } = await import(
+  "../src/lib/expedicao-travados.ts"
+);
+
+function travado(extra: Record<string, unknown> = {}) {
+  return {
+    order_number: "261027NUB4AHWG", order_ref: null, shop_account: "barbours", brand: "barbours",
+    created_at: "2026-10-26T15:00:00Z", paid_at: null, dispatch_deadline: "2026-10-30T02:59:00Z",
+    deadline_source: "native", deadline_status: "overdue", operational_age_status: "over_48h",
+    is_slow_vs_baseline: true, is_source_zombie: false, is_stalled: true, hours_open: 91.2,
+    hours_overdue: 12, logistic_type: null, carrier: "Full", source_ingested_at: null,
+    source_freshness_status: "fresh", timestamp_quality: "ok", etapa: "aguardando_coleta",
+    ...extra,
+  } as never;
+}
+
+test("numero do pedido: o real primeiro, o order_ref como reserva, nunca vazio", () => {
+  assert.equal(numeroDoPedido({ order_number: "47951836990", order_ref: "abc" }), "47951836990");
+  assert.equal(numeroDoPedido({ order_number: null, order_ref: "abc" }), "abc");
+  assert.equal(numeroDoPedido({ order_number: "", order_ref: null }), null);
+  assert.equal(mostrarColunaReferencia([travado()]), true);
+  assert.equal(mostrarColunaReferencia([travado({ order_number: null })]), false);
+});
+
+test("CSV dos travados: numero, etapa, dias em pt-BR, prazo em Brasilia, transportadora", () => {
+  const r = linhaDoCsvTravados(travado(), "shopee");
+  assert.equal(r["Pedido"], "261027NUB4AHWG");
+  assert.equal(r["Canal"], "Shopee");
+  assert.equal(r["Marca"], "BARBOURS");
+  assert.equal(r["Etapa"], "Aguardando coleta");
+  assert.equal(r["Dias em aberto"], "3,8");
+  assert.equal(r["Por que travou"], "Mais lento que o normal da conta");
+  assert.equal(r["Prazo de envio"], "29/10/2026 23:59");
+  assert.equal(r["Transportadora"], "Full");
+  // etapa ainda nao publicada sai vazia, nunca como texto de aviso
+  assert.equal(linhaDoCsvTravados(travado({ etapa: "nao_publicada" }), "shopee")["Etapa"], null);
+
+  const csv = csvDosTravados([travado()], "shopee");
+  assert.ok(csv.startsWith("﻿"), "BOM para o Excel pt-BR");
+  const [cab, linha] = csv.slice(1).split("\r\n");
+  assert.equal(cab, colunasDoCsvTravados("shopee").join(";"));
+  assert.match(linha, /^261027NUB4AHWG;Shopee;BARBOURS;Aguardando coleta;3,8;/);
+});
+
+test("Mercado Livre: o identificador e' o ENVIO, nunca chamado de pedido", () => {
+  assert.equal(rotuloDoNumero("shopee"), "Pedido");
+  assert.equal(rotuloDoNumero("mercadolivre"), "Envio");
+  assert.equal(colunasDoCsvTravados("mercadolivre")[0], "Envio");
+  const r = linhaDoCsvTravados(travado({ order_number: "47951836990" }), "mercadolivre");
+  assert.equal(r["Envio"], "47951836990");
+  assert.equal(r["Pedido"], undefined);
+  assert.match(csvDosTravados([travado({ order_number: "47951836990" })], "mercadolivre"), /^\ufeffEnvio;Canal;/);
+  assert.match(CLIENTE, /\{mostrarRef && <th scope="col" className="pl-4">\{rotuloDoNumero\(filtros\.channel\)\}<\/th>\}/);
+});
+
+test("nome do arquivo: canal, marca e dia de Brasilia", () => {
+  const d = new Date("2026-10-31T01:00:00Z"); // ainda 30/10 em Brasilia
+  assert.equal(nomeDoCsvTravados("shopee", "barbours", d), "travados-shopee-barbours-2026-10-30.csv");
+  assert.equal(nomeDoCsvTravados("mercadolivre", null, d), "travados-mercadolivre-todas-2026-10-30.csv");
+});
+
+test("popup: coluna Pedido com o numero e botao Exportar CSV", () => {
+  const POPUP = fonte("src/components/expedicao/TravadosDialog.tsx");
+  assert.match(POPUP, /\{temCodigo \? <th scope="col">\{rotuloDoNumero\(canal\)\}<\/th> : null\}/);
+  assert.match(POPUP, /\{numeroDoPedido\(l\) \?\? "—"\}/);
+  assert.match(POPUP, /data-testid="exp-travados-csv"/);
+  // EXPEDICAO-VENCE-AMANHA: o mesmo botao exporta a lista aberta (travados por padrao).
+  assert.match(POPUP, /baixarCsv\(csvDaLista\(linhas, canal, lista\), nomeDoCsv\(lista, canal, alvo\.marca, new Date\(\)\)\)/);
+  assert.match(POPUP, /URL\.revokeObjectURL\(url\)/);
+  // numero nunca vira link para o marketplace
+  assert.doesNotMatch(POPUP, /href=\{[^}]*numeroDoPedido/);
+});
+
+test("popup de travados largo e sem quebra nas colunas curtas (sem rolagem lateral)", () => {
+  const POPUP = fonte("src/components/expedicao/TravadosDialog.tsx");
+  const DIALOGO = fonte("src/components/KpiDrilldownDialog.tsx");
+  assert.match(POPUP, /title=\{alvo\?\.titulo \?\? "Travados"\} largura="larga">/);
+  assert.match(DIALOGO, /largura === "larga" \? "sm:max-w-4xl" : "sm:max-w-lg"/);
+  assert.match(DIALOGO, /largura = "padrao"/, "sem a prop, os outros popups nao mudam");
+  assert.match(POPUP, /\[&_th\]:whitespace-nowrap/);
+  assert.match(POPUP, /<td className="whitespace-nowrap font-medium text-ink">\{rotuloDaEtapa\(l\.etapa\)\}<\/td>/);
 });

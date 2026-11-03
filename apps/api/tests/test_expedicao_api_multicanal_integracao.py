@@ -20,7 +20,7 @@ import os
 import subprocess
 import sys
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -216,6 +216,108 @@ def test_prazo_indisponivel_e_do_ml_e_nao_contamina_a_shopee(sessao):
     assert ml["totals"]["deadline_unavailable_count"] == ml["totals"]["backlog_count"]
     assert all(l["dispatch_deadline"] is None for l in ml["queue"])
     assert all(l["dispatch_deadline"] is not None for l in sh["queue"])
+
+
+def test_proximo_vencimento_conta_o_dia_de_brasilia(sessao):
+    """EXPEDICAO-VENCE-AMANHA: o dia e' o de Brasilia, nao o de UTC.
+
+    AGORA = 22/09 16:04 BRT. 23/09 02:59 UTC ainda e' 22/09 23:59 BRT (mesmo
+    dia da fotografia: nao conta); 23/09 23:59 BRT e' o proximo vencimento.
+    Linhas num lote proprio, desfeitas no fim: a fotografia publicada fica
+    intacta.
+    """
+    from sqlalchemy import text
+
+    lote = str(uuid.uuid4())
+    hoje_2359 = datetime(2026, 9, 23, 2, 59, tzinfo=timezone.utc)
+    amanha_2359 = hoje_2359 + timedelta(days=1)
+    linhas = [("apice", hoje_2359), ("apice", amanha_2359),
+              ("barbours", amanha_2359), ("barbours", hoje_2359 + timedelta(days=2))]
+    try:
+        for i, (conta, prazo) in enumerate(linhas):
+            sessao.execute(text("""
+                INSERT INTO marts.expedicao_fila_atual (
+                    effective_at, refresh_batch_id, channel, shop_account,
+                    marketplace_order_id, brand, created_at, paid_at,
+                    dispatch_deadline, deadline_source, deadline_status,
+                    hours_overdue, hours_open, operational_age_status,
+                    is_slow_vs_baseline, is_source_zombie, is_stalled,
+                    timestamp_quality, source_freshness_status,
+                    source_ingested_at, logistic_type)
+                VALUES (:ef, :lote, 'shopee', :sa, :oid, :sa, :cr, :cr,
+                        :dl, 'marketplace_native', 'on_time', NULL, 10.0,
+                        'within_48h', false, false, false, 'verified',
+                        'fresh', :cr, NULL)"""), {
+                "ef": AGORA, "lote": lote, "sa": conta, "oid": f"VA-{i}",
+                "cr": AGORA - timedelta(hours=10), "dl": prazo,
+            })
+        perto = svc._perto_de_vencer(sessao, svc.CANAIS["shopee"], lote, AGORA)
+    finally:
+        sessao.rollback()
+    assert perto.hoje == date(2026, 9, 22)
+    assert perto.proximo == date(2026, 9, 23)
+    assert perto.proximo_por_conta == {"apice": 1, "barbours": 1}
+    # 22/09 23:59 BRT (23/09 02:59 UTC) e' HOJE em Brasilia
+    assert perto.hoje_por_conta == {"apice": 1}
+
+
+def _inserir_na_fila(sessao, lote, i, conta, prazo, status):
+    from sqlalchemy import text
+
+    sem_prazo = prazo is None
+    sessao.execute(text("""
+        INSERT INTO marts.expedicao_fila_atual (
+            effective_at, refresh_batch_id, channel, shop_account,
+            marketplace_order_id, brand, created_at, paid_at,
+            dispatch_deadline, deadline_source, deadline_status,
+            hours_overdue, hours_open, operational_age_status,
+            is_slow_vs_baseline, is_source_zombie, is_stalled,
+            timestamp_quality, source_freshness_status,
+            source_ingested_at, logistic_type)
+        VALUES (:ef, :lote, 'shopee', :sa, :oid, :sa, :cr, :cr,
+                :dl, :ds, :st, :ho, 10.0, 'within_48h', false, false, false,
+                'verified', 'fresh', :cr, NULL)"""), {
+        # CHECKs da 018: prazo nulo <=> 'unavailable' (status e origem);
+        # estouro existe exatamente em 'overdue'; Shopee sempre 'verified'.
+        "ef": AGORA, "lote": lote, "sa": conta, "oid": f"PV-{i}",
+        "cr": AGORA - timedelta(hours=10), "dl": prazo,
+        "ds": "unavailable" if sem_prazo else "marketplace_native",
+        "st": status, "ho": 3.0 if status == "overdue" else None,
+    })
+
+
+def test_perto_de_vencer_contagem_e_lista_classificam_as_mesmas_linhas(sessao):
+    """EXPEDICAO-PERTO-DE-VENCER: cartao, tabela e lista com o MESMO numero.
+
+    AGORA = 22/09 16:04 BRT. Contam: o nao vencido de hoje (23:59) e o
+    proximo dia de prazo. Nao contam: o vencido de hoje (10:00 BRT), o dia
+    depois do proximo e o pedido sem prazo.
+    """
+    lote = str(uuid.uuid4())
+    hoje_2359 = datetime(2026, 9, 23, 2, 59, tzinfo=timezone.utc)
+    linhas = [
+        ("apice", hoje_2359, "due_within_24h"),                      # conta (hoje)
+        ("apice", datetime(2026, 9, 22, 13, 0, tzinfo=timezone.utc), "overdue"),  # vencido
+        ("barbours", hoje_2359 + timedelta(days=1), "on_time"),      # conta (proximo)
+        ("barbours", hoje_2359 + timedelta(days=1), "on_time"),      # conta (proximo)
+        ("lescent", hoje_2359 + timedelta(days=2), "on_time"),       # depois: fora
+        ("rituaria", None, "unavailable"),                           # sem prazo: fora
+    ]
+    canal = svc.CANAIS["shopee"]
+    try:
+        for i, (conta, prazo, status) in enumerate(linhas):
+            _inserir_na_fila(sessao, lote, i, conta, prazo, status)
+        perto = svc._perto_de_vencer(sessao, canal, lote, AGORA)
+        lista, total = svc._pagina_da_fila(
+            sessao, canal, lote, brands=None, accounts=None, situacoes=["due_soon"],
+            order_by="deadline", limit=100, offset=0, perto=perto)
+    finally:
+        sessao.rollback()
+    assert perto.hoje_por_conta == {"apice": 1}
+    assert perto.proximo_por_conta == {"barbours": 2}
+    soma = sum(perto.hoje_por_conta.values()) + sum(perto.proximo_por_conta.values())
+    assert total == soma == 3
+    assert sorted(l["shop_account"] for l in lista) == ["apice", "barbours", "barbours"]
 
 
 def test_cobertura_usa_o_registry_do_canal(sessao):

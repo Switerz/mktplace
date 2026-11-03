@@ -96,10 +96,23 @@ class Settings(BaseSettings):
     #: flag geral para que ligar a Expedicao nao exponha o ML sem
     #: querer, e para que adiar o ML nao exija derrubar a Shopee.
     expedicao_ml_api_enabled: bool = Field(default=False)
-    #: LDR operacional da Shopee (EXPEDICAO-SHOPEE-LDR-1). Nasce DESLIGADA e
-    #: exige tambem a flag geral: com qualquer uma das duas off, a rota
-    #: `/expedicao/shopee/ldr` devolve `unavailable/disabled` sem consultar.
-    expedicao_shopee_ldr_api_enabled: bool = Field(default=False)
+    #: Prazo do Mercado Livre (SLA oficial) na Expedicao (EXPEDICAO-ML-PRAZO).
+    #: DESLIGADO por padrao: medido em 03/11/2026, o SLA do Mercado Coleta e'
+    #: o horario da coleta, e o envio segue `ready_to_ship` por horas depois de
+    #: coletado — 199 de 200 "vencidos pelo relogio" ja' estavam `picked_up` e
+    #: o proprio ML os dava como `on_time`. LIGADO por padrao desde 03/11/2026
+    #: 12:12: a publicacao saiu com o pipeline do #148 (coletado fora da fila,
+    #: vencido pelo veredito do ML; pin e706da7 em producao, #2309) — backlog
+    #: 217, 10 vencidos, nenhuma etapa 'entregue a transportadora'. Continua
+    #: sendo a chave para desligar: EXPEDICAO_ML_PRAZO_ENABLED=false no Render.
+    expedicao_ml_prazo_enabled: bool = Field(default=True)
+    #: LDR operacional da Shopee (EXPEDICAO-SHOPEE-LDR-1). Exige tambem a flag
+    #: geral: com qualquer uma das duas off, a rota `/expedicao/shopee/ldr`
+    #: devolve `unavailable/disabled` sem consultar. Nasceu desligada; LIGADA
+    #: por padrao desde 30/10/2026 (pedido do usuario: coorte da Shopee e
+    #: fila do vendedor x FBS na tela). `EXPEDICAO_SHOPEE_LDR_API_ENABLED=false`
+    #: no Render volta a desligar sem deploy de codigo.
+    expedicao_shopee_ldr_api_enabled: bool = Field(default=True)
 
     # Chave do identificador OPACO de pedido. Vazia por default, e vazia
     # significa NAO PUBLICAR: `order_ref` sai nulo.
@@ -111,6 +124,14 @@ class Settings(BaseSettings):
     # segredo configurado o valor vira HMAC-SHA256 truncado — estavel entre
     # execucoes e inutil para quem nao tem a chave.
     expedicao_order_ref_secret: str = ""
+
+    # EXPEDICAO-NUMERO-PEDIDO — numero do pedido (`marketplace_order_id`) na
+    # fila. Decisao de produto de 30/10/2026: a operacao precisa do numero
+    # para agir nos travados e mandar a lista adiante (CSV), ANTES de a Torre
+    # ter login. Risco aceito e conhecido: esta API e' publica, entao quem tem
+    # o link ve os numeros. `EXPEDICAO_NUMERO_PEDIDO_PUBLICO=false` no Render
+    # volta a reter o numero sem deploy de codigo. Sai quando houver login.
+    expedicao_numero_pedido_publico: bool = True
 
     # ------------------------------------------------------------------
     # Gate FULL-SH-1C — superficie de desempenho FBS da Shopee

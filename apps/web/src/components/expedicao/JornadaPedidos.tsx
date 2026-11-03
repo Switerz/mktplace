@@ -19,11 +19,13 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import Chip from "@/components/ui/Chip";
+import InfoDica from "@/components/ui/InfoDica";
 import Panel from "@/components/ui/Panel";
 import { buscarExpedicao } from "@/lib/expedicao-demo";
 import {
   avisoDeMarcaNaoAplicada,
   coorteDesatualizada,
+  descricaoDaEtapa,
   estadoDaJornada,
   explicarMotivo,
   motivoDaSecao,
@@ -43,10 +45,9 @@ import {
   type RespostaJornada,
   type SobreposicaoJornada,
 } from "@/lib/expedicao-jornada";
-import { formatarInteiro, formatarPercentualComBase } from "@/lib/expedicao-formato";
+import { formatarInteiro, partesDoPercentualComBase } from "@/lib/expedicao-formato";
 
 import AjudaMetrica from "./AjudaMetrica";
-import { ChipsFotografia } from "./CabecalhoExpedicao";
 import { EstadoSecao } from "./LayoutExpedicao";
 import { SecaoGerencial } from "./SecoesExpedicao";
 
@@ -59,6 +60,10 @@ function dataHoraCurta(iso: string): string {
 }
 
 const CARGA_INICIAL: CargaJornada = { carregando: true, http: null, erroDeRede: false, resultado: null };
+
+/** Pedido de 30/10/2026: nomes que dizem o que e', sem "fila aberta"/"coorte". */
+export const TITULO_FILA_ABERTA = "Pedidos aguardando expedição";
+export const TITULO_COORTE = "Pedidos dos últimos dias";
 
 /**
  * UMA requisicao a' rota da jornada por (canal, marca, janela, evento).
@@ -114,11 +119,14 @@ function ListaDeEtapas({
   base,
   evento,
   rotulo,
+  canal,
 }: {
   etapas: EtapaJornada[];
   base: number;
   evento: "coleta" | "despacho" | null;
   rotulo: string;
+  /** EXPEDICAO-VENCE-AMANHA: o "ⓘ" de cada etapa depende do canal. */
+  canal: CanalJornada;
 }) {
   if (base === 0) {
     return (
@@ -129,18 +137,26 @@ function ListaDeEtapas({
   }
   return (
     <ol aria-label={rotulo} className="flex flex-col gap-2">
-      {etapas.map((e) => (
-        <li key={e.key} className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 gap-y-1">
-          <span className="min-w-0 text-sm text-ink">{rotuloEtapa(e, evento)}</span>
-          <span className="text-right text-xs tabular-nums text-ink-muted">
-            <span className="text-sm font-semibold text-ink">{formatarInteiro(e.count)}</span>{" "}
-            · {formatarPercentualComBase(e.count, base)}
-          </span>
-          <span aria-hidden="true" className="col-span-2 block h-2 w-full overflow-hidden rounded bg-raised">
-            <span className="tc-barra block h-full rounded bg-accent/70" style={{ width: `${larguraDaEtapa(e.count, base)}%` }} />
-          </span>
-        </li>
-      ))}
+      {etapas.map((e) => {
+        const descricao = descricaoDaEtapa(e.key, canal);
+        return (
+          <li key={e.key} className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 gap-y-1">
+            <span className="flex min-w-0 items-center gap-1.5 text-sm text-ink">
+              <span>{rotuloEtapa(e, evento)}</span>
+              {descricao ? <InfoDica texto={descricao} /> : null}
+            </span>
+            {/* EXPEDICAO-PERTO-DE-VENCER (30/10/2026): "46 · 6,4%" — a base ja'
+                esta' no subtitulo; "46 de 722" repetia o numero. */}
+            <span className="text-right text-xs tabular-nums text-ink-muted">
+              <span className="text-sm font-semibold text-ink">{formatarInteiro(e.count)}</span>{" "}
+              · {partesDoPercentualComBase(e.count, base)?.percentual ?? "—"}
+            </span>
+            <span aria-hidden="true" className="col-span-2 block h-2 w-full overflow-hidden rounded bg-raised">
+              <span className="tc-barra block h-full rounded bg-accent/70" style={{ width: `${larguraDaEtapa(e.count, base)}%` }} />
+            </span>
+          </li>
+        );
+      })}
     </ol>
   );
 }
@@ -239,7 +255,9 @@ function linhaDaFilaSemEtapa(r: RespostaJornada): ReactNode {
       </p>
     ) : null;
   }
-  if (f.base === 0) return <ListaDeEtapas etapas={f.etapas} base={0} evento={null} rotulo="Etapas da fila aberta" />;
+  if (f.base === 0) {
+    return <ListaDeEtapas etapas={f.etapas} base={0} evento={null} rotulo="Etapas da fila aberta" canal={r.channel} />;
+  }
   return (
     <p role="status" className="text-sm text-ink-muted" data-testid="exp-jornada-fila-sem-etapa">
       Etapas da fila ainda não publicadas neste canal.
@@ -249,19 +267,21 @@ function linhaDaFilaSemEtapa(r: RespostaJornada): ReactNode {
 
 function BlocoFilaAberta({ r, compacta = false }: { r: RespostaJornada; compacta?: boolean }) {
   const f = r.fila_aberta;
-  if (!f) return <SecaoNula titulo="Agora — fila aberta" secao="fila_aberta" r={r} />;
+  if (!f) return <SecaoNula titulo={TITULO_FILA_ABERTA} secao="fila_aberta" r={r} />;
   return (
     <Panel
-      titulo="Agora — fila aberta"
-      descricao={`${formatarInteiro(f.base)} ${f.grain === "shipment" ? "envios" : "pedidos"} pagos aguardando expedição.`}
+      titulo={TITULO_FILA_ABERTA}
+      descricao={`${formatarInteiro(f.base)} ${f.grain === "shipment" ? "envios" : "pedidos"} agora, por etapa.`}
       // O "ⓘ" fica fora do h3: o nome do titulo continua so' o titulo.
+      // EXPEDICAO-ULTIMA-ATUALIZACAO: a hora fica so' no topo da tela; aqui,
+      // so' o aviso quando a leitura esta' velha.
       acao={
         <span className="flex flex-wrap items-center gap-1.5">
           <AjudaMetrica chave="jornada.fila_aberta" />
-          {f.snapshot_at ? (
-            <ChipsFotografia
-              fotografia={{ rotulo: "Fotografia", publicadaEm: f.snapshot_at, idade: null, desatualizada: filaDesatualizada(f) }}
-            />
+          {f.snapshot_at && filaDesatualizada(f) ? (
+            <Chip ponto tom="atencao" title="Os números descrevem o instante da publicação, não agora.">
+              Desatualizada
+            </Chip>
           ) : null}
         </span>
       }
@@ -271,7 +291,7 @@ function BlocoFilaAberta({ r, compacta = false }: { r: RespostaJornada; compacta
           <EstadoSecao tipo="parcial" titulo="as etapas não fecham com a base." />
         </div>
       ) : null}
-      <ListaDeEtapas etapas={f.etapas} base={f.base} evento={null} rotulo="Etapas da fila aberta" />
+      <ListaDeEtapas etapas={f.etapas} base={f.base} evento={null} rotulo="Etapas da fila aberta" canal={r.channel} />
       {/* Compacta (fila da Shopee/ML): vencidos, travados etc. ja' estao no
           "Risco atual" — repeti-los aqui seria o mesmo numero duas vezes. */}
       {compacta ? null : (
@@ -286,29 +306,30 @@ function BlocoFilaAberta({ r, compacta = false }: { r: RespostaJornada; compacta
 
 function BlocoCoorte({ r }: { r: RespostaJornada }) {
   const c = r.coorte;
-  if (!c) return <SecaoNula titulo="Coorte" secao="coorte" r={r} />;
+  if (!c) return <SecaoNula titulo={TITULO_COORTE} secao="coorte" r={r} />;
   const evento = c.evento;
   // R21: selo pelo booleano OU pelo `reason` da secao (fonte/publicacao velha).
   const velha = coorteDesatualizada(r);
+  // Pedido de 30/10/2026: nomes diretos. "Coorte", "dias fechados" e "evento"
+  // sairam do titulo; o evento ja' esta' na etapa ("Coletados"/"Despachados").
+  const rotulo = rotuloDaCoorte(c);
   return (
     <Panel
-      titulo={`Coorte — ${rotuloDaCoorte(c)}`}
-      descricao={`${formatarInteiro(c.base)} pedidos · dias fechados · evento: ${
-        evento === "despacho" ? "despacho" : "coleta"
-      }.`}
+      titulo={rotulo.charAt(0).toUpperCase() + rotulo.slice(1)}
+      descricao={`${formatarInteiro(c.base)} pedidos, pela etapa em que terminaram.`}
       acao={
-        // Mesmo padrao de frescor do cabecalho: instante + estado ESCRITO.
-        // O "ⓘ" fica fora do h3, como na fila aberta.
+        // EXPEDICAO-ULTIMA-ATUALIZACAO: sem "publicado em" nem "Atualizada" —
+        // a hora fica so' no topo da tela. O aviso ESCRITO so' quando velha
+        // (a publicacao vai no `title`). O "ⓘ" fica fora do h3.
         <span className="flex flex-wrap items-center gap-1.5">
           <AjudaMetrica chave="jornada.coorte" />
-          {c.publicado_em ? (
-            <Chip title="Última publicação dos dias desta coorte">
-              publicado em <time dateTime={c.publicado_em}>{dataHoraCurta(c.publicado_em)}</time>
-            </Chip>
-          ) : null}
-          {c.desatualizada !== null || velha ? (
-            <Chip ponto tom={velha ? "atencao" : "bom"}>
-              {velha ? "Desatualizada" : "Atualizada"}
+          {velha ? (
+            <Chip
+              ponto
+              tom="atencao"
+              title={c.publicado_em ? `Última publicação dos dias desta coorte: ${dataHoraCurta(c.publicado_em)}.` : undefined}
+            >
+              Desatualizada
             </Chip>
           ) : null}
         </span>
@@ -324,11 +345,11 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
           <EstadoSecao tipo="desatualizado" titulo="publicação ou fonte fora do prazo esperado." />
         </div>
       ) : null}
-      <ListaDeEtapas etapas={c.etapas} base={c.base} evento={evento} rotulo="Etapas da coorte" />
+      <ListaDeEtapas etapas={c.etapas} base={c.base} evento={evento} rotulo="Etapas da coorte" canal={r.channel} />
       <Sobreposicoes itens={c.sobreposicoes} etapas={c.etapas} base={c.base} evento={evento} />
       {c.fora_da_coorte.length ? (
         <p className="mt-2 text-xs text-ink-muted">
-          Fora da coorte:{" "}
+          Fora da contagem:{" "}
           {c.fora_da_coorte
             .map((f) =>
               f.count === null ? `${rotuloSobreposicao(f.key)}: indisponível` : `${formatarInteiro(f.count)} ${rotuloSobreposicao(f.key)}`,
@@ -399,7 +420,8 @@ function EstadosDaJornada({
   );
 }
 
-const DICA_COMPACTA = "Em que etapa estão os pedidos: agora (fila aberta) e nos dias fechados do período (coorte).";
+// Pedido de 30/10/2026 (main): sem "fila aberta"/"coorte" no texto.
+const DICA_COMPACTA = "Em que etapa estão os pedidos agora e como terminaram os dos últimos dias.";
 
 export default function JornadaPedidos({
   carga,
@@ -461,7 +483,7 @@ export default function JornadaPedidos({
   return (
     <SecaoGerencial
       titulo="Jornada"
-      dica="Quantos pedidos há em cada etapa. A fila aberta (agora) e a coorte (dias fechados) são leituras separadas."
+      dica="Quantos pedidos há em cada etapa: os que aguardam expedição agora e como terminaram os dos últimos dias."
     >
       <EstadosDaJornada estado={estado} carga={carga} resposta={resposta} aoTentarDeNovo={aoTentarDeNovo} />
       {estado === "pronta" && resposta ? (
