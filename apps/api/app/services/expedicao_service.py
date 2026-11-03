@@ -1325,7 +1325,10 @@ def _fila_aberta(db, channel: str,
         etapa_parcial = ETAPA_NAO_PUBLICADA in por_etapa
         if not etapa_parcial:
             limitacoes.remove(LIMITACAO_ETAPA_NAO_PUBLICADA[channel])
-        if channel == "mercadolivre":
+        # EXPEDICAO-ML-COLETADOS: o pipeline novo tira o envio coletado da fila.
+        # A ressalva so' vale enquanto a fotografia ainda tiver essa etapa
+        # (lote publicado pelo pipeline anterior).
+        if channel == "mercadolivre" and por_etapa.get("entregue_transportadora"):
             limitacoes.append(LIMITACAO_ML_ENTREGUE_NO_BACKLOG)
 
     # Prazo decidido pela FOTOGRAFIA inteira (todas as contas do lote), nao

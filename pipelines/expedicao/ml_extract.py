@@ -48,6 +48,7 @@ from datetime import datetime, timedelta
 
 from pipelines.expedicao.contract import (
     ML_ALLOWED_SOURCE_COLUMNS,
+    ML_COLLECTED_SUBSTATUSES,
     ML_BACKLOG_ORDER_STATUS,
     ML_BACKLOG_SHIPMENT_STATUS,
     ML_FULFILLMENT_LOGISTIC_TYPE,
@@ -84,6 +85,7 @@ ML_SELECT_COLUMNS = (
     "extracted_at",
     "sla_expected_date",
     "sla_extracted_at",
+    "sla_status",
 )
 
 #: Backlog seller-managed dentro da coorte confiavel.
@@ -121,7 +123,8 @@ SELECT
     s.tracking_method          AS tracking_method,
     s.extracted_at             AS extracted_at,
     to_jsonb(s) ->> 'sla_expected_date' AS sla_expected_date,
-    to_jsonb(s) ->> 'sla_extracted_at'  AS sla_extracted_at
+    to_jsonb(s) ->> 'sla_extracted_at'  AS sla_extracted_at,
+    to_jsonb(s) ->> 'sla_status'        AS sla_status
 FROM raw.ml_shipments s
 JOIN raw.ml_orders o
   ON o.brand = s.brand AND o.order_id = s.order_id
@@ -293,6 +296,7 @@ def classify_candidates(
     fila: list[dict] = []
     excluidos_full = 0
     excluidos_congelados = 0
+    excluidos_coletados = 0
 
     for linha in linhas:
         if linha.get("logistic_type") == ML_FULFILLMENT_LOGISTIC_TYPE:
@@ -308,6 +312,11 @@ def classify_candidates(
         if is_stale_source_record(linha.get("extracted_at"), effective_at, max_age):
             excluidos_congelados += 1
             continue
+        # EXPEDICAO-ML-COLETADOS: a transportadora ja' recolheu; o ML so' muda
+        # o status no hub. Para o vendedor o envio saiu: fora da fila, contado.
+        if linha.get("substatus") in ML_COLLECTED_SUBSTATUSES:
+            excluidos_coletados += 1
+            continue
         fila.append(linha)
 
     diagnostico = {
@@ -315,6 +324,7 @@ def classify_candidates(
         "seller_managed_count": len(linhas) - excluidos_full,
         "fulfillment_excluded_count": excluidos_full,
         "stale_source_record_count": excluidos_congelados,
+        "collected_excluded_count": excluidos_coletados,
         "unmapped_logistic_type_count": 0,
         "queue_count": len(fila),
     }

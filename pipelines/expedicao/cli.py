@@ -272,7 +272,9 @@ def diagnose_ml(conn, effective_at: datetime) -> dict:
             linha.get("sla_expected_date"), linha.get("sla_extracted_at"),
             effective_at,
         )
-        situacao = transform.classify_deadline(prazo, effective_at).value
+        situacao = transform.classificar_prazo_ml(
+            prazo, linha.get("sla_status"), effective_at
+        ).value
         if situacao == "unavailable":
             bucket["sem_prazo"] += 1
         elif situacao == "overdue":
@@ -310,6 +312,7 @@ def format_diagnose_ml(resultado: dict) -> str:
         f"    seller-managed (fora Full)               : {d['seller_managed_count']}",
         f"    excluidos por Full (armazem do ML)       : {d['fulfillment_excluded_count']}",
         f"    excluidos por registro congelado         : {d['stale_source_record_count']}",
+        f"    excluidos por ja' coletados (no hub)     : {d.get('collected_excluded_count', 0)}",
         f"    modalidade nao mapeada                   : {d['unmapped_logistic_type_count']}",
         f"    FILA                                     : {d['queue_count']}",
         "",
