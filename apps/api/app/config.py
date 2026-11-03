@@ -100,9 +100,12 @@ class Settings(BaseSettings):
     #: DESLIGADO por padrao: medido em 03/11/2026, o SLA do Mercado Coleta e'
     #: o horario da coleta, e o envio segue `ready_to_ship` por horas depois de
     #: coletado — 199 de 200 "vencidos pelo relogio" ja' estavam `picked_up` e
-    #: o proprio ML os dava como `on_time`. Ligar so' depois de a classificacao
-    #: do pipeline tratar coletado e o veredito do ML.
-    expedicao_ml_prazo_enabled: bool = Field(default=False)
+    #: o proprio ML os dava como `on_time`. LIGADO por padrao desde 03/11/2026
+    #: 12:12: a publicacao saiu com o pipeline do #148 (coletado fora da fila,
+    #: vencido pelo veredito do ML; pin e706da7 em producao, #2309) — backlog
+    #: 217, 10 vencidos, nenhuma etapa 'entregue a transportadora'. Continua
+    #: sendo a chave para desligar: EXPEDICAO_ML_PRAZO_ENABLED=false no Render.
+    expedicao_ml_prazo_enabled: bool = Field(default=True)
     #: LDR operacional da Shopee (EXPEDICAO-SHOPEE-LDR-1). Exige tambem a flag
     #: geral: com qualquer uma das duas off, a rota `/expedicao/shopee/ldr`
     #: devolve `unavailable/disabled` sem consultar. Nasceu desligada; LIGADA
