@@ -1670,3 +1670,54 @@ Configuracao do envio:
 
 Agendamento: uma task na DAG `marketplace_tower_expedicao_refresh`, logo
 depois de `publicar_shopee`, para o aviso sair minutos depois da fotografia.
+
+## Atraso de 7 dias (regra oficial da Shopee)
+
+O "% vencidos" da fila e' uma fotografia (`overdue_count / backlog_count`). A
+regra que a Shopee usa e' outra: **atrasados ÷ pedidos com prazo nos ultimos 7
+dias**. A publicacao horaria da fila (`python -m pipelines.expedicao.cli
+--channel shopee|mercadolivre --apply`) passa a gravar, por conta, no resumo
+`marts.expedicao_refresh_run` (migration 035), quatro colunas NULLABLE:
+
+| coluna | significado |
+|---|---|
+| `due_7d_count` | base: pedidos (Shopee) / envios (ML) com vencimento num dia (Brasilia) da janela |
+| `late_7d_count` | quantos da base atrasaram |
+| `late_7d_window_start` | primeiro dia de vencimento (Brasilia) efetivamente usado |
+| `late_7d_window_end` | ultimo dia de vencimento (Brasilia) efetivamente usado |
+
+- **Janela:** os 7 dias FECHADOS antes do dia da fotografia, `[hoje-7, hoje-1]`
+  em Brasilia, `hoje` = dia BRT de `effective_at` (nunca o relogio do
+  processo). A janela gravada e' a EFETIVAMENTE usada, por conta.
+- **NULL nas quatro = nao calculado** (canal/conta sem base na janela, linha
+  anterior a 035, export da Kokeshi). Nunca zero por ausencia: `late_7d_count
+  = 0` so' existe com `due_7d_count > 0`.
+- **Shopee:** a base e' a da LDR operacional (`shopee_ldr.classificar`): sem
+  FBS, sem cancelado sem coleta, sem "sem prazo" e sem pos-envio sem coleta; so'
+  vencimentos MADUROS (`shopee_ldr.madura`). Atrasado = coletado depois do prazo
+  + pendente vencido. Antes das 06:00 BRT o dia de ontem ainda nao amadureceu e
+  a janela da conta termina em `hoje-2`; conta com a fonte parada encolhe a
+  janela do mesmo jeito. Uma semana de `raw.shopee_orders` por publicacao, sem
+  coluna de comprador.
+- **Mercado Livre:** um SQL agregado (conta × contagens) sobre `raw.ml_shipments`
+  JOIN `raw.ml_orders`. Base = envio seller-managed, pedido `paid`,
+  `sla_expected_date` com dia BRT na janela e nao cancelado ANTES do prazo
+  (`date_cancelled` lido em -04:00). Atrasado = `sla_status = 'delayed'` OU
+  ainda `ready_to_ship` sem coleta (`substatus` fora de `picked_up`,
+  `dropped_off`, `in_hub`) com prazo de dia ja' fechado. Coleta × prazo NAO e'
+  comparada: a coleta e' escaneada ~28 min depois do horario e o ML da'
+  `on_time` (comparar marcaria 396 de 576 envios como atrasados a' toa). O SLA
+  so' existe desde 03/11/2026: `late_7d_window_start` = o maior entre `hoje-7` e
+  o primeiro dia BRT com SLA na fonte. SLA sem fuso falha fechado (NULL).
+- **Nunca segura a fila:** falha no calculo vira aviso no log do run e NULL no
+  resumo; a fila da hora publica normalmente. A LDR (`shopee_ldr_cli`) continua
+  falhando fechado com as mesmas regras.
+- **Publicador:** grava as quatro colunas (INSERT e `ON CONFLICT ... DO
+  UPDATE`) so' se as QUATRO existirem no resumo do destino; sem a 035 o INSERT
+  e' o de antes. `marts.expedicao_refresh_run_export` nao tem as colunas.
+- **Diagnostico:** `--diagnose` mostra, por conta, janela usada, base,
+  atrasados e taxa.
+- **Ordem de ativacao:** merge → imagem do Airflow → `alembic upgrade 035` no
+  Neon → a proxima publicacao de cada canal preenche. A taxa do canal e' a
+  soma de `late_7d_count` sobre a soma de `due_7d_count` das contas
+  preenchidas (as janelas podem diferir entre contas).

@@ -84,6 +84,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from pipelines.expedicao import atraso_7d
 from pipelines.expedicao import audit as audit_mod
 from pipelines.expedicao import ml_extract, shopee_extract, transform
 from pipelines.expedicao.contract import (
@@ -230,11 +231,15 @@ def diagnose(conn, effective_at: datetime) -> dict:
         if transform.is_source_zombie(horas):
             bucket["source_zombie"] += 1
 
+    carimbos = {w.external_seller_id: w.max_ingested_at for w in watermarks}
     return {
         "effective_at": effective_at,
         "por_conta": por_conta,
-        "watermarks": {w.external_seller_id: w.max_ingested_at for w in watermarks},
+        "watermarks": carimbos,
         "baselines": baselines,
+        "atraso_7d": _atraso_7d_diagnostico(
+            lambda: atraso_7d.calcular_shopee(conn, effective_at, carimbos)
+        ),
     }
 
 
@@ -297,7 +302,49 @@ def diagnose_ml(conn, effective_at: datetime) -> dict:
         "watermarks": {
             w.external_seller_id: w.max_ingested_at for w in watermarks
         },
+        "atraso_7d": _atraso_7d_diagnostico(
+            lambda: atraso_7d.calcular_ml(conn, effective_at)
+        ),
     }
+
+
+def _atraso_7d_diagnostico(calcular) -> dict:
+    """`{"contas": ...}` ou `{"erro": ...}`. O diagnostico nunca morre por isto."""
+    try:
+        return {"contas": calcular()}
+    except Exception as exc:  # noqa: BLE001 — diagnostico: mostra e segue
+        return {"erro": audit_mod.sanitize_error_message(exc)}
+
+
+def format_atraso_7d(resultado: dict) -> list[str]:
+    """Bloco do diagnostico: atraso de 7 dias por conta (regra oficial Shopee)."""
+    desde, ate = atraso_7d.janela(resultado["effective_at"])
+    linhas = [
+        "",
+        "  ATRASO DE 7 DIAS (atrasados / com prazo na janela; regra oficial "
+        "da Shopee)",
+        f"  janela nominal: {desde.isoformat()} a {ate.isoformat()} (Brasilia)",
+    ]
+    bloco = resultado.get("atraso_7d") or {}
+    if "erro" in bloco:
+        linhas.append(f"  NAO CALCULADO (publicaria NULL): {bloco['erro']}")
+        return linhas
+    contas = bloco.get("contas") or {}
+    if not contas:
+        linhas.append("  nenhuma conta com base na janela (publicaria NULL)")
+        return linhas
+    linhas.append("  conta            janela usada              base  atras   taxa")
+    for conta, v in sorted(contas.items()):
+        taxa = 100.0 * v["late_7d_count"] / v["due_7d_count"]
+        janela_usada = (
+            f"{v['late_7d_window_start'].isoformat()} a "
+            f"{v['late_7d_window_end'].isoformat()}"
+        )
+        linhas.append(
+            f"  {conta:<16} {janela_usada:<24} {v['due_7d_count']:>6} "
+            f"{v['late_7d_count']:>6} {taxa:>5.2f}%"
+        )
+    return linhas
 
 
 def format_diagnose_ml(resultado: dict) -> str:
@@ -327,6 +374,8 @@ def format_diagnose_ml(resultado: dict) -> str:
             f"{b['over_48h']:>5} {b['source_zombie']:>6} {b['vencidos']:>6} "
             f"{b['sem_prazo']:>8}"
         )
+    if "atraso_7d" in resultado:
+        linhas.extend(format_atraso_7d(resultado))
     linhas.append("")
     linhas.append("  watermark por conta (extracted_at, ja em UTC):")
     for conta, carimbo in sorted(resultado["watermarks"].items()):
@@ -374,6 +423,8 @@ def format_diagnose(resultado: dict) -> str:
     linhas.append(
         f"  >48h ({total['over_48h']}) e transversal: nao entra nessa soma."
     )
+    if "atraso_7d" in resultado:
+        linhas.extend(format_atraso_7d(resultado))
     linhas.append("")
     linhas.append("  watermark por conta (metadado de frescor, nao decide publicacao):")
     for conta, carimbo in sorted(resultado["watermarks"].items()):
@@ -542,6 +593,9 @@ class AdaptadorDeCanal:
     load_registry: Callable[..., tuple[dict[str, SellerAccount], list[str]]]
     extract: Callable[..., ExtractionResult]
     build_fila: Callable[..., list[dict]]
+    #: Atraso de 7 dias por conta (`external_seller_id -> 4 chaves`). `None` =
+    #: canal sem o calculo: o resumo grava NULL.
+    atraso_7d: Callable[..., dict[str, dict]] | None = None
 
 
 def _fila_shopee(source, extracao, registry, effective_at, batch_id) -> list[dict]:
@@ -564,6 +618,18 @@ def _fila_ml(source, extracao, registry, effective_at, batch_id) -> list[dict]:
     )
 
 
+def _atraso_7d_shopee(source, extracao, effective_at) -> dict[str, dict]:
+    """Maturidade pela MESMA leitura da fonte por conta que a fila ja' fez."""
+    return atraso_7d.calcular_shopee(
+        source, effective_at, extracao.account_watermarks
+    )
+
+
+def _atraso_7d_ml(source, extracao, effective_at) -> dict[str, dict]:
+    del extracao
+    return atraso_7d.calcular_ml(source, effective_at)
+
+
 #: ALLOWLIST de canais publicaveis. Canal ausente daqui nao publica, e a
 #: ausencia e' explicita — nao depende de ninguem lembrar de escrever um `if`.
 ADAPTADORES: dict[Channel, AdaptadorDeCanal] = {
@@ -571,11 +637,13 @@ ADAPTADORES: dict[Channel, AdaptadorDeCanal] = {
         load_registry=shopee_extract.load_registry,
         extract=shopee_extract.extract,
         build_fila=_fila_shopee,
+        atraso_7d=_atraso_7d_shopee,
     ),
     Channel.MERCADOLIVRE: AdaptadorDeCanal(
         load_registry=shopee_extract.load_registry,
         extract=ml_extract.extract,
         build_fila=_fila_ml,
+        atraso_7d=_atraso_7d_ml,
     ),
 }
 
@@ -1085,6 +1153,12 @@ def run_apply(
             }
             avancou = source_advanced(atuais, anteriores)
 
+            # Atraso de 7 dias: DEPOIS da fila, e sem poder derruba-la. Falha
+            # aqui vira aviso e NULL nas quatro colunas do resumo.
+            sete_dias = _atraso_7d_ou_nada(
+                adaptador, source, extracao, effective_at, channel, avisar
+            )
+
             resumos = transform.build_account_summaries(
                 fila,
                 effective_at,
@@ -1093,6 +1167,7 @@ def run_apply(
                 accounts=contas,
                 watermarks=extracao.account_watermarks,
                 source_advanced=avancou,
+                atraso_7d=sete_dias,
             )
 
             # T-0015: o publicador preenche depois do COMMIT a contagem por
@@ -1197,6 +1272,28 @@ def run_apply(
             if conn is not None:
                 with suppress(Exception):
                     conn.close()
+
+
+def _atraso_7d_ou_nada(
+    adaptador, source, extracao, effective_at, channel, avisar
+) -> dict[str, dict]:
+    """O atraso de 7 dias, ou `{}` (NULL no resumo) se o calculo falhar.
+
+    E' metrica AUXILIAR do resumo: um fluxo novo da Shopee
+    (`FluxoDesconhecido`), um SLA sem fuso no ML ou um erro de consulta nao
+    podem segurar a fila da hora. A LDR (`shopee_ldr_cli`) continua falhando
+    FECHADO com as mesmas regras; aqui a falha vira aviso no log do run.
+    """
+    if adaptador.atraso_7d is None:
+        return {}
+    try:
+        return adaptador.atraso_7d(source, extracao, effective_at)
+    except Exception as exc:  # noqa: BLE001 — auxiliar: nunca bloqueia a fila
+        avisar(
+            f"atraso de 7 dias de {channel.value} NAO calculado (resumo grava "
+            f"NULL): {audit_mod.sanitize_error_message(exc)}"
+        )
+        return {}
 
 
 def _falhar_auditoria(auditoria, run_id, exc, publicado, extraidas, log) -> None:
