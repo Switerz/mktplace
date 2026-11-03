@@ -412,11 +412,17 @@ const LIMITACAO_ML_ENTREGUE_NO_BACKLOG =
 /**
  * As limitacoes da fila como a API manda: com etapa real a primeira ("...
  * não publicada na fila") sai, no parcial ela fica; no ML entra a do
- * "entregue à transportadora" (T-0015 nao muda o backlog).
+ * "entregue à transportadora" SO' quando a fotografia ainda tem essa etapa
+ * (EXPEDICAO-ML-COLETADOS: o pipeline novo tira o envio coletado da fila).
  */
-function limitacoesDaFila(canal: "shopee" | "mercadolivre", etapa: "sem" | "reais" | "parcial"): string[] {
+function limitacoesDaFila(
+  canal: "shopee" | "mercadolivre",
+  etapa: "sem" | "reais" | "parcial",
+  etapas: { key: string; count: number }[] = [],
+): string[] {
   const lista = etapa === "reais" ? LIMITACOES_FILA[canal].slice(1) : [...LIMITACOES_FILA[canal]];
-  return canal === "mercadolivre" && etapa !== "sem" ? [...lista, LIMITACAO_ML_ENTREGUE_NO_BACKLOG] : lista;
+  const comEntregue = etapas.some((e) => e.key === "entregue_transportadora" && e.count > 0);
+  return canal === "mercadolivre" && etapa !== "sem" && comEntregue ? [...lista, LIMITACAO_ML_ENTREGUE_NO_BACKLOG] : lista;
 }
 
 type ModeloEtapa = { key: string; label: string; parte: number }[];
@@ -531,6 +537,7 @@ function jornada(canal: string, marca: string | null, c: CenarioDemo): { status:
     const modelo = base > 0 ? ETAPAS_DEMO.mercadolivre[c] : undefined;
     if (modelo) {
       const parcialEtapa = c === "jornadaEtapaParcial";
+      const etapas = etapasQueFecham(base, modelo);
       return {
         status: 200,
         corpo: {
@@ -539,8 +546,8 @@ function jornada(canal: string, marca: string | null, c: CenarioDemo): { status:
           status: parcialEtapa ? "partial" : "ok",
           reason: parcialEtapa ? "fila_aberta: etapa_parcial" : null,
           fila_aberta: {
-            ...filaAberta("shipment", base, sobreML, limitacoesDaFila("mercadolivre", parcialEtapa ? "parcial" : "reais")),
-            etapas: etapasQueFecham(base, modelo),
+            ...filaAberta("shipment", base, sobreML, limitacoesDaFila("mercadolivre", parcialEtapa ? "parcial" : "reais", etapas)),
+            etapas,
             etapas_fecham: true,
           },
           coorte: null,

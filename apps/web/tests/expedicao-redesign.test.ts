@@ -916,7 +916,12 @@ test("T-0029 fixtures: ML por etapa traz as limitacoes que a API manda, com o te
   ]);
   const parcial = filaDaFixture("mercadolivre", "jornadaEtapaParcial");
   assert.equal(parcial.fila_aberta.limitacoes[0], "substatus do shipment não publicado na fila");
-  assert.equal(parcial.fila_aberta.limitacoes.length, 3);
+  // EXPEDICAO-ML-COLETADOS (main): a do "entregue" so' vem quando a fotografia
+  // ainda tem essa etapa; o parcial e a etapa unica nao tem.
+  assert.equal(parcial.fila_aberta.limitacoes.length, 2);
+  assert.ok(!parcial.fila_aberta.limitacoes.some((l) => l.includes("entregue")));
+  const unica = filaDaFixture("mercadolivre", "jornadaEtapaUnica");
+  assert.deepEqual(unica.fila_aberta.limitacoes, ["Full (fulfillment) fora da fila por contrato"]);
   const semEtapa = filaDaFixture("mercadolivre", "ok");
   assert.deepEqual(semEtapa.fila_aberta.etapas.map((e) => e.key), ["aguardando_expedicao"]);
   assert.ok(!semEtapa.fila_aberta.limitacoes.some((l) => l.includes("entregue")), "sem etapa real, sem a do entregue");
