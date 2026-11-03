@@ -51,10 +51,14 @@ Linha com etapa `outro` (valor novo da fonte) NAO bloqueia: e' contada em
 ATRASO DE 7 DIAS NO RESUMO (migration 035)
 ------------------------------------------
 Mesmo padrao da etapa, no RESUMO: `due_7d_count`, `late_7d_count`,
-`late_7d_window_start` e `late_7d_window_end` (`ATRASO_7D_COLUMNS`) so' entram
-no INSERT e no `ON CONFLICT ... DO UPDATE` se as QUATRO existirem na tabela de
-resumo do destino. Sem a 035 — ou na tabela de resumo do export, que nao as
-tem —, o INSERT e o upsert sao byte a byte os de antes.
+`late_7d_window_start`, `late_7d_window_end`, `over_48h_7d_count` e
+`stalled_7d_count` (`ATRASO_7D_COLUMNS`) so' entram no INSERT e no `ON
+CONFLICT ... DO UPDATE` se as SEIS existirem na tabela de resumo do destino.
+Sem elas, o INSERT e o upsert sao byte a byte os de antes. Tudo ou nada, e nao
+"o subconjunto presente", de proposito: as seis existem no Neon nas duas
+tabelas de resumo (03/11/2026) e a 035 cria as seis em banco novo; gravar so'
+as quatro antigas num destino incompleto esconderia a falta das duas novas
+atras de uma tela que parece funcionar.
 """
 from __future__ import annotations
 
@@ -252,10 +256,10 @@ def colunas_de_etapa_no_destino(cur, tabela: str = FILA_TABLE) -> tuple[str, ...
 
 
 def colunas_de_atraso_7d_no_destino(cur, tabela: str = RUN_TABLE) -> tuple[str, ...]:
-    """`ATRASO_7D_COLUMNS` se as QUATRO existem no resumo do destino; senao vazio.
+    """`ATRASO_7D_COLUMNS` se as SEIS existem no resumo do destino; senao vazio.
 
-    Tudo ou nada: a API le as quatro juntas, e gravar parte delas publicaria
-    contagem sem janela (ou janela sem contagem).
+    Tudo ou nada: a API le as colunas juntas, e gravar parte delas publicaria
+    contagem sem janela (ou janela sem contagem). Ver o cabecalho do modulo.
     """
     esquema, nome = tabela.split(".")
     cur.execute(COLUNAS_ETAPA_SQL, (esquema, nome, list(ATRASO_7D_COLUMNS)))
@@ -271,23 +275,31 @@ def colunas_de_atraso_7d_no_destino(cur, tabela: str = RUN_TABLE) -> tuple[str, 
 def problemas_de_atraso_7d(summary_rows: list[dict]) -> list[str]:
     """Linhas de resumo com o atraso de 7 dias incoerente. Vazio = ok.
 
-    Quatro NULL (ou chaves ausentes) = nao calculado. Preenchido: as quatro
-    juntas, base > 0, 0 <= atrasados <= base e janela em ordem.
+    Todas NULL (ou chaves ausentes) = nao calculado. Preenchido: base,
+    atrasados e janela juntos, base > 0, 0 <= atrasados <= base e janela em
+    ordem. Acima de 48 h e travados podem ser NULL sozinhos (nao calculados:
+    ML sem baseline, conta sem amostra); preenchidos, ficam em [0, base].
     """
     problemas = []
     for r in summary_rows:
         v = [r.get(c) for c in ATRASO_7D_COLUMNS]
         if all(x is None for x in v):
             continue
-        due, late, inicio, fim = v
+        due, late, inicio, fim, acima_48h, travados = v
+        opcionais = [x for x in (acima_48h, travados) if x is not None]
         conta = r.get("shop_account")
-        if any(x is None for x in v):
+        if any(x is None for x in (due, late, inicio, fim)):
             problemas.append(f"conta {conta!r}: atraso de 7 dias parcial")
-        elif any(type(x) is not int for x in (due, late)):
+        elif any(type(x) is not int for x in (due, late, *opcionais)):
             problemas.append(f"conta {conta!r}: contagem de 7 dias nao inteira")
         elif due <= 0 or not 0 <= late <= due:
             problemas.append(
                 f"conta {conta!r}: atraso de 7 dias fora do dominio ({late}/{due})"
+            )
+        elif any(not 0 <= x <= due for x in opcionais):
+            problemas.append(
+                f"conta {conta!r}: 48 h/travados de 7 dias fora do dominio "
+                f"({acima_48h}, {travados} de {due})"
             )
         elif inicio > fim:
             problemas.append(f"conta {conta!r}: janela de 7 dias invertida")

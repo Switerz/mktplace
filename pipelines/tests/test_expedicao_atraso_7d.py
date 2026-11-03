@@ -11,10 +11,15 @@ O que se prova aqui:
 * Mercado Livre: o SQL agregado, contra PostgreSQL REAL (sem binarios, SKIP):
   `delayed`, nao coletado vencido, coletado no prazo fora do atraso, cancelado
   antes do prazo fora da base, fusos por coluna e janela "desde o 1o SLA";
-* publicador: grava as quatro colunas SO' com a 035 no destino; sem ela, o
-  INSERT e o upsert sao os de antes; o ON CONFLICT atualiza as quatro;
-* migration 035: cadeia, colunas NULLABLE e idempotencia (PG real);
-* CLI: o `--apply` grava as contagens e uma falha do calculo nao derruba a fila.
+* publicador: grava as seis colunas SO' com as seis no destino; sem elas, o
+  INSERT e o upsert sao os de antes; o ON CONFLICT atualiza as seis;
+* migration 035: cadeia, seis colunas NULLABLE nas duas tabelas de resumo,
+  head continua 035 e idempotencia (PG real);
+* CLI: o `--apply` grava as contagens e uma falha do calculo nao derruba a fila;
+* acima de 48 h e travados (aba "Ultimos 7 dias"): mesma base do atraso,
+  duracao = coleta (ou agora) - marco; Shopee pelo baseline da fila, ML sempre
+  NULL nos travados e 48 h pelo `substatus_history`/`date_shipped`, Kokeshi
+  pelo baseline do export.
 """
 from __future__ import annotations
 
@@ -127,9 +132,12 @@ def test_shopee_base_e_atraso_seguem_a_ldr():
         ped(date(2026, 11, 2), status="READY_TO_SHIP"),             # antes da janela: fora
     ]
     r = atraso_7d.apurar_shopee(pedidos, {"1": AGORA}, AGORA)
+    # Pagos em 01/11: os quatro da base passaram de 48 h; sem baseline,
+    # travados NULL.
     assert r == {"1": {
         "due_7d_count": 4, "late_7d_count": 3,
         "late_7d_window_start": DESDE, "late_7d_window_end": ATE,
+        "over_48h_7d_count": 4, "stalled_7d_count": None,
     }}
 
 
@@ -156,6 +164,7 @@ def test_shopee_conta_com_fonte_parada_encolhe_a_janela():
     assert r["1"] == {
         "due_7d_count": 1, "late_7d_count": 1,
         "late_7d_window_start": DESDE, "late_7d_window_end": date(2026, 11, 5),
+        "over_48h_7d_count": 1, "stalled_7d_count": None,
     }
 
 
@@ -266,15 +275,22 @@ def _inicio(primeiro, sem_fuso=0, amostra=None):
             "amostra_sem_fuso": amostra}
 
 
+def _agregado(seller, due, late, over_48h=0, historico_invalido=0):
+    """Uma linha do `ML_ATRASO_7D_SQL`, como o cursor de dicionario devolve."""
+    return {"seller_id": seller, "due": due, "late": late,
+            "over_48h": over_48h, "historico_invalido": historico_invalido}
+
+
 def test_ml_janela_comeca_no_primeiro_sla_desde_03_11():
     hoje = datetime(2026, 11, 6, 15, 0, tzinfo=UTC)  # janela nominal 30/10 a 05/11
     conn = _ConnML(_inicio(em(date(2026, 11, 3), 14)),
-                   [{"seller_id": 2532564723, "due": 10, "late": 2}])
+                   [_agregado(2532564723, 10, 2, 3)])
     r = atraso_7d.calcular_ml(conn, hoje)
     assert r == {"2532564723": {
         "due_7d_count": 10, "late_7d_count": 2,
         "late_7d_window_start": date(2026, 11, 3),
         "late_7d_window_end": date(2026, 11, 5),
+        "over_48h_7d_count": 3, "stalled_7d_count": None,
     }}
     params = conn.chamadas[1][1]
     assert params["desde"] == date(2026, 11, 3)
@@ -282,6 +298,9 @@ def test_ml_janela_comeca_no_primeiro_sla_desde_03_11():
     assert params["hoje"] == date(2026, 11, 6)
     assert params["sla_atrasado"] == "delayed"
     assert set(params["coletados"]) == {"picked_up", "dropped_off", "in_hub"}
+    assert set(params["enviados"]) == {"shipped", "delivered"}
+    assert params["agora"] == hoje
+    assert params["limite_idade"] == timedelta(hours=48)
 
 
 def test_ml_hoje_sem_dia_fechado_desde_a_primeira_leitura_fica_nulo():
@@ -290,7 +309,7 @@ def test_ml_hoje_sem_dia_fechado_desde_a_primeira_leitura_fica_nulo():
     comeca no dia da 1a LEITURA: no proprio dia ela esta' vazia -> nulo."""
     hoje = datetime(2026, 11, 3, 15, 0, tzinfo=UTC)
     conn = _ConnML(_inicio(datetime(2026, 11, 3, 14, 14, tzinfo=UTC)),
-                   [{"seller_id": "1", "due": 28, "late": 21}])
+                   [_agregado("1", 28, 21)])
     assert atraso_7d.calcular_ml(conn, hoje) == {}
     assert len(conn.chamadas) == 1, "sem janela, nem consulta o agregado"
     assert "sla_extracted_at" in atraso_7d.ML_SLA_INICIO_SQL
@@ -298,7 +317,7 @@ def test_ml_hoje_sem_dia_fechado_desde_a_primeira_leitura_fica_nulo():
 
 def test_ml_primeiro_sla_antigo_nao_estica_a_janela():
     conn = _ConnML(_inicio(em(date(2026, 10, 1), 14)),
-                   [{"seller_id": "1", "due": 3, "late": 0}])
+                   [_agregado("1", 3, 0)])
     r = atraso_7d.calcular_ml(conn, AGORA)
     assert r["1"]["late_7d_window_start"] == DESDE
 
@@ -357,13 +376,19 @@ DDL_FONTE_ML = (
     """CREATE TABLE raw.ml_shipments (
         brand TEXT, shipment_id BIGINT, order_id BIGINT, status TEXT,
         substatus TEXT, logistic_type TEXT, date_created TIMESTAMP,
-        date_cancelled TIMESTAMP, extracted_at TIMESTAMP {sla})""",
+        date_cancelled TIMESTAMP, extracted_at TIMESTAMP,
+        date_ready_to_ship TIMESTAMP, date_shipped TIMESTAMP {hist} {sla})""",
 )
-SLA_TZ = ", sla_expected_date TIMESTAMPTZ, sla_status TEXT"
-SLA_NAIVE = ", sla_expected_date TIMESTAMP, sla_status TEXT"
+#: `sla_extracted_at` faz parte da fonte desde a janela "desde a 1a leitura"
+#: (4a3de99): sem ela o 1o SQL nao acha leitura nenhuma e devolve vazio.
+SLA_TZ = (", sla_expected_date TIMESTAMPTZ, sla_extracted_at TIMESTAMPTZ,"
+          " sla_status TEXT")
+SLA_NAIVE = (", sla_expected_date TIMESTAMP, sla_extracted_at TIMESTAMPTZ,"
+             " sla_status TEXT")
+HIST_JSONB = ", substatus_history JSONB"
 
 
-def _banco(nome: str, sla: str) -> str:
+def _banco(nome: str, sla: str, hist: str = HIST_JSONB) -> str:
     import psycopg2
 
     with cluster_da_sessao() as base:
@@ -377,7 +402,7 @@ def _banco(nome: str, sla: str) -> str:
     conn = psycopg2.connect(url)
     with conn, conn.cursor() as cur:
         for stmt in DDL_FONTE_ML:
-            cur.execute(stmt.format(sla=sla))
+            cur.execute(stmt.format(sla=sla, hist=hist))
     conn.close()
     return url
 
@@ -387,19 +412,28 @@ _SEQ = iter(range(1, 10_000))
 
 def _envio(cur, *, seller=111, sla=None, sla_status="on_time", status="shipped",
            substatus=None, modalidade="cross_docking", pedido="paid",
-           cancelado=None, criado=datetime(2026, 11, 1, 10, 0)):
+           cancelado=None, criado=datetime(2026, 11, 1, 10, 0), pronto=None,
+           enviado=None, historico=None, com_historico=True):
+    import json
+
     n = next(_SEQ)
     cur.execute(
         "INSERT INTO raw.ml_orders VALUES ('kokeshi', %s, %s, %s, %s)",
         (n, seller, pedido, criado),
     )
+    colunas = ("brand, shipment_id, order_id, status, substatus, logistic_type,"
+               " date_created, date_cancelled, extracted_at, date_ready_to_ship,"
+               " date_shipped, sla_expected_date, sla_extracted_at, sla_status")
+    # A leitura do SLA no proprio horario do prazo: o 1o prazo e' a 1a leitura.
+    valores = [n, n, status, substatus, modalidade, criado, cancelado, criado,
+               pronto, enviado, sla, sla, sla_status]
+    if com_historico:
+        colunas += ", substatus_history"
+        valores.append(None if historico is None else json.dumps(historico))
     cur.execute(
-        "INSERT INTO raw.ml_shipments (brand, shipment_id, order_id, status,"
-        " substatus, logistic_type, date_created, date_cancelled, extracted_at,"
-        " sla_expected_date, sla_status)"
-        " VALUES ('kokeshi', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-        (n, n, status, substatus, modalidade, criado, cancelado, criado, sla,
-         sla_status),
+        f"INSERT INTO raw.ml_shipments ({colunas}) VALUES ('kokeshi', "
+        + ", ".join(["%s"] * len(valores)) + ")",
+        valores,
     )
 
 
@@ -460,10 +494,13 @@ def test_ml_sql_regras_contra_postgres_real():
         # Outra conta, so' com Full: nao aparece (NULL, nunca zero).
         dict(seller=222, sla=em(d6, 14), modalidade="fulfillment"),
     ])
+    # Sem `date_ready_to_ship`, coleta nem `date_shipped`: marco = criacao do
+    # pedido (01/11) e todos abertos ate' agora -> os sete passam de 48 h.
     assert _calcular(url) == {"111": {
         "due_7d_count": 7, "late_7d_count": 4,
         "late_7d_window_start": date(2026, 11, 5),
         "late_7d_window_end": ATE,
+        "over_48h_7d_count": 7, "stalled_7d_count": None,
     }}
 
 
@@ -579,7 +616,7 @@ def _insert_resumo(conn):
     return sql, linhas
 
 
-V = atraso_7d.valores(40, 3, DESDE, ATE)
+V = atraso_7d.valores(40, 3, DESDE, ATE, over_48h=5, stalled=2)
 
 
 def test_publicador_sem_a_035_escreve_byte_a_byte_como_antes():
@@ -601,7 +638,17 @@ def test_publicador_com_parte_das_colunas_nao_grava_nenhuma():
     assert "due_7d_count" not in sql
 
 
-def test_publicador_com_a_035_grava_e_atualiza_as_quatro():
+def test_publicador_so_com_as_quatro_antigas_nao_grava_nenhuma():
+    """Tudo ou nada: destino com a 035 antiga (sem as duas novas) publica o
+    resumo de antes, em vez de esconder a falta das duas colunas."""
+    conn = _ConnPub({RUN_TABLE: ATRASO_7D_COLUMNS[:4]})
+    _publicar(conn, {"1": V})
+    sql, linhas = _insert_resumo(conn)
+    assert "due_7d_count" not in sql and "over_48h_7d_count" not in sql
+    assert all(len(x) == len(publisher.SUMMARY_COLUMNS) for x in linhas)
+
+
+def test_publicador_com_a_035_grava_e_atualiza_as_seis():
     conn = _ConnPub({RUN_TABLE: ATRASO_7D_COLUMNS})
     relatorio: dict = {}
     publisher.publish_channel(
@@ -619,7 +666,8 @@ def test_publicador_com_a_035_grava_e_atualiza_as_quatro():
     colunas = publisher.SUMMARY_COLUMNS + ATRASO_7D_COLUMNS
     assert f"({', '.join(colunas)})" in sql
     assert dict(zip(colunas, linha))["due_7d_count"] == 40
-    assert linha[-4:] == (40, 3, DESDE, ATE)
+    assert linha[-6:] == (40, 3, DESDE, ATE, 5, 2)
+    assert ATRASO_7D_COLUMNS[-2:] == ("over_48h_7d_count", "stalled_7d_count")
     for c in ATRASO_7D_COLUMNS:
         assert f"{c} = EXCLUDED.{c}," in sql
     assert "WHERE EXCLUDED.observed_at >" in sql
@@ -630,7 +678,7 @@ def test_publicador_com_a_035_grava_null_quando_nao_calculado():
     conn = _ConnPub({RUN_TABLE: ATRASO_7D_COLUMNS})
     _publicar(conn, None)
     _sql, [linha] = _insert_resumo(conn)
-    assert linha[-4:] == (None, None, None, None)
+    assert linha[-6:] == (None,) * 6
 
 
 def test_publicador_detecta_no_resumo_do_destino_e_o_export_nao_tem_as_colunas():
@@ -665,6 +713,17 @@ def test_conflito_sem_extras_e_identico_ao_de_sempre():
      "late_7d_window_start": ATE, "late_7d_window_end": DESDE},
     {"due_7d_count": True, "late_7d_count": 0,
      "late_7d_window_start": DESDE, "late_7d_window_end": ATE},
+    # Acima de 48 h / travados: dentro da base, inteiros, nunca sem a base.
+    {"due_7d_count": 5, "late_7d_count": 1,
+     "late_7d_window_start": DESDE, "late_7d_window_end": ATE,
+     "over_48h_7d_count": 6},
+    {"due_7d_count": 5, "late_7d_count": 1,
+     "late_7d_window_start": DESDE, "late_7d_window_end": ATE,
+     "stalled_7d_count": -1},
+    {"due_7d_count": 5, "late_7d_count": 1,
+     "late_7d_window_start": DESDE, "late_7d_window_end": ATE,
+     "stalled_7d_count": True},
+    {"over_48h_7d_count": 3},
 ])
 def test_publicador_recusa_atraso_incoerente_antes_do_delete(ruim):
     conn = _ConnPub({RUN_TABLE: ATRASO_7D_COLUMNS})
@@ -711,10 +770,13 @@ def test_apply_shopee_grava_o_atraso_de_7_dias_por_conta():
         for x in c.enviadas["insert_resumo"]
     }
     hoje = AG.astimezone(BRT).date()
+    # Pagos 2 dias antes do prazo: o aberto e o coletado (49 h) passam de
+    # 48 h. O fake devolve baseline vazio: travados NULL.
     assert {k: por_conta["apice"][k] for k in ATRASO_7D_COLUMNS} == {
         "due_7d_count": 2, "late_7d_count": 1,
         "late_7d_window_start": hoje - timedelta(days=7),
         "late_7d_window_end": hoje - timedelta(days=1),
+        "over_48h_7d_count": 2, "stalled_7d_count": None,
     }
     # Conta sem vencimento na janela: NULL nas quatro, nunca zero.
     assert all(por_conta["barbours"][k] is None for k in ATRASO_7D_COLUMNS)
@@ -818,7 +880,11 @@ def test_035_tem_as_colunas_do_contrato_e_e_idempotente_no_texto():
     assert dict(consts["COLUNAS"]) == {
         "due_7d_count": "INTEGER", "late_7d_count": "INTEGER",
         "late_7d_window_start": "DATE", "late_7d_window_end": "DATE",
+        "over_48h_7d_count": "INTEGER", "stalled_7d_count": "INTEGER",
     }
+    # O upgrade itera as DUAS tabelas de resumo (Data Mart e export).
+    assert consts["RESUMO_Q"] == RUN_TABLE
+    assert consts["RESUMO_EXPORT_Q"] == RUN_EXPORT_TABLE
     fonte = ARQ_035.read_text(encoding="utf-8")
     assert "ADD COLUMN IF NOT EXISTS" in fonte
     assert "DROP COLUMN IF EXISTS" in fonte
@@ -877,7 +943,7 @@ def _rodar_035(url, funcao):
 
 
 @sem_postgres
-def test_035_upgrade_idempotente_cria_quatro_colunas_nullable(banco_034):
+def test_035_upgrade_idempotente_cria_seis_colunas_nullable(banco_034):
     assert not set(ATRASO_7D_COLUMNS) & set(_colunas(banco_034))
     _rodar_035(banco_034, "upgrade")
     _rodar_035(banco_034, "upgrade")  # reaplicar nao falha
@@ -887,6 +953,8 @@ def test_035_upgrade_idempotente_cria_quatro_colunas_nullable(banco_034):
         "late_7d_count": ("integer", "YES", None),
         "late_7d_window_start": ("date", "YES", None),
         "late_7d_window_end": ("date", "YES", None),
+        "over_48h_7d_count": ("integer", "YES", None),
+        "stalled_7d_count": ("integer", "YES", None),
     }
     # O resumo do export (034) recebe as MESMAS colunas (Kokeshi com %).
     export = _colunas(banco_034, "expedicao_refresh_run_export")
@@ -995,10 +1063,13 @@ def test_kokeshi_pelo_export_usa_a_regra_da_shopee():
         pedido("READY_TO_SHIP", prazo(3)),                                               # vence hoje: fora da janela
     ]
     r = C.atraso_7d_do_export(estado, conta, baixado, agora)
+    # Pagos em 28/10: os cinco da base passaram de 48 h. Sem `create_time` o
+    # baseline do export nao fecha: travados NULL, e o resto continua.
     assert r == {"kokeshi-sid": {
         "due_7d_count": 5, "late_7d_count": 2,
         "late_7d_window_start": date(2026, 10, 27),
         "late_7d_window_end": date(2026, 11, 2),
+        "over_48h_7d_count": 5, "stalled_7d_count": None,
     }}
 
 
@@ -1010,3 +1081,334 @@ def test_kokeshi_falha_no_calculo_nao_derruba_a_fila():
     conta = SellerAccount("k", 4, "kokeshi")
     agora = datetime(2026, 11, 3, 19, 0, tzinfo=UTC)
     assert C.atraso_7d_do_export(quebrado, conta, agora, agora) in ({}, {})
+
+
+# ===========================================================================
+# Acima de 48 h e travados (aba "Ultimos 7 dias") — MESMA base do atraso
+# ===========================================================================
+#: Pago em 04/11 10:00 BRT; prazo em 05/11 (dentro da janela 03/11 a 09/11).
+PAGO = em(date(2026, 11, 4), 10)
+
+
+def ped_pago(dia, pago, *, coleta=None, status="PROCESSED", shop="1"):
+    return shopee_ldr.Pedido(
+        shop_id=shop, shop_account=f"loja{shop}", order_status=status,
+        fulfillment_flag=shopee_ldr.FLUXO_VENDEDOR, pay_time=pago,
+        ship_by_date=prazo(dia), pickup_done_time=coleta,
+    )
+
+
+def _pedidos_de_duracao(shop="1"):
+    """Cinco pedidos da base, com duracoes conhecidas."""
+    return [
+        ped_pago(D, PAGO, coleta=PAGO + timedelta(hours=49), shop=shop),   # 49 h
+        ped_pago(D, PAGO, coleta=PAGO + timedelta(hours=47), shop=shop),   # 47 h
+        ped_pago(D, PAGO, coleta=PAGO + timedelta(hours=48), shop=shop),   # 48 h exatas
+        # Aberto, pago em 04/11: ate' agora (10/11 12:00 BRT) sao 146 h.
+        ped_pago(date(2026, 11, 6), PAGO, status="READY_TO_SHIP", shop=shop),
+        # Aberto, pago ontem 13:00 BRT: 23 h ate' agora.
+        ped_pago(date(2026, 11, 9), em(date(2026, 11, 9), 13),
+                 status="READY_TO_SHIP", shop=shop),
+    ]
+
+
+def test_shopee_48h_pela_coleta_e_pelo_relogio_estritamente_acima():
+    r = atraso_7d.apurar_shopee(_pedidos_de_duracao(), {"1": AGORA}, AGORA)["1"]
+    assert r["due_7d_count"] == 5
+    # 49 h coletado e 146 h aberto passam; 47 h e 48 h exatas nao (regra
+    # "mais de dois dias", como `transform.classify_age`); 23 h aberto nao.
+    assert r["over_48h_7d_count"] == 2
+
+
+def test_shopee_48h_fora_da_base_nao_conta():
+    """FBS, cancelado sem coleta e pos-envio sem coleta ficam fora da base do
+    atraso; as 48 h usam a MESMA base."""
+    velho = em(date(2026, 10, 25), 10)
+    pedidos = [
+        ped_pago(D, PAGO, coleta=PAGO + timedelta(hours=10)),
+        ped_pago(D, velho, status="CANCELLED"),
+        ped_pago(D, velho, status="SHIPPED"),
+        shopee_ldr.Pedido("1", "loja1", "PROCESSED", shopee_ldr.FLUXO_FBS, velho,
+                          prazo(D), None),
+        ped_pago(date(2026, 11, 10), velho, status="READY_TO_SHIP"),  # vence hoje
+    ]
+    r = atraso_7d.apurar_shopee(pedidos, {"1": AGORA}, AGORA)["1"]
+    assert (r["due_7d_count"], r["over_48h_7d_count"]) == (1, 0)
+
+
+def test_shopee_travados_com_baseline_usam_2x_p50_da_conta():
+    # p50 = 23,75 h -> limite 47,5 h: 49 h, 48 h e o aberto de 146 h travam;
+    # 47 h e o aberto de 23 h nao.
+    r = atraso_7d.apurar_shopee(
+        _pedidos_de_duracao(), {"1": AGORA}, AGORA, {"1": (150, 23.75)})["1"]
+    assert r["stalled_7d_count"] == 3
+    assert r["over_48h_7d_count"] == 2  # independente do baseline
+
+
+def test_shopee_travados_zero_medido_so_com_baseline_suficiente():
+    r = atraso_7d.apurar_shopee(
+        _pedidos_de_duracao(), {"1": AGORA}, AGORA, {"1": (100, 500.0)})["1"]
+    assert r["stalled_7d_count"] == 0
+
+
+@pytest.mark.parametrize("baselines", [
+    None,                    # CLI sem baseline
+    {},                      # conta sem linha de baseline
+    {"1": (99, 10.0)},       # amostra abaixo de MIN_BASELINE_SAMPLE
+    {"1": (500, None)},      # sem p50
+    {"1": (500, 0.0)},       # p50 nao positivo
+    {"2": (500, 10.0)},      # baseline de OUTRA conta
+])
+def test_shopee_travados_sem_baseline_suficiente_e_null(baselines):
+    r = atraso_7d.apurar_shopee(_pedidos_de_duracao(), {"1": AGORA}, AGORA, baselines)
+    assert r["1"]["stalled_7d_count"] is None
+    assert r["1"]["over_48h_7d_count"] == 2
+
+
+def test_shopee_baseline_por_conta():
+    pedidos = _pedidos_de_duracao("1") + _pedidos_de_duracao("2")
+    r = atraso_7d.apurar_shopee(pedidos, {"1": AGORA, "2": AGORA}, AGORA,
+                                {"1": (150, 23.75), "2": (20, 23.75)})
+    assert r["1"]["stalled_7d_count"] == 3
+    assert r["2"]["stalled_7d_count"] is None
+
+
+def test_calcular_shopee_repassa_o_baseline():
+    linha = {
+        "shop_id": "1", "shop_account": "loja1", "order_status": "READY_TO_SHIP",
+        "fulfillment_flag": shopee_ldr.FLUXO_VENDEDOR, "pay_time": em(D, 9),
+        "ship_by_date": prazo(D), "pickup_done_time": None, "cancel_reason": None,
+    }
+    r = atraso_7d.calcular_shopee(_ConnGravadora([linha]), AGORA, {"1": AGORA},
+                                  {"1": (200, 5.0)})
+    assert r["1"]["over_48h_7d_count"] == 1
+    assert r["1"]["stalled_7d_count"] == 1
+
+
+def test_valores_validam_48h_e_travados():
+    assert atraso_7d.valores(3, 1, DESDE, ATE)["over_48h_7d_count"] is None
+    assert atraso_7d.valores(3, 1, DESDE, ATE, 3, 0)["stalled_7d_count"] == 0
+    with pytest.raises(ValueError):
+        atraso_7d.valores(3, 1, DESDE, ATE, over_48h=4)
+    with pytest.raises(ValueError):
+        atraso_7d.valores(3, 1, DESDE, ATE, stalled=-1)
+    with pytest.raises(ValueError):
+        atraso_7d.valores(3, 1, DESDE, ATE, over_48h=True)
+    assert tuple(atraso_7d.vazio()) == ATRASO_7D_COLUMNS
+    assert len(ATRASO_7D_COLUMNS) == 6
+
+
+# ---------------------------------------------------------------------------
+# Mercado Livre — 48 h e travados
+# ---------------------------------------------------------------------------
+def test_ml_travados_sempre_null_e_48h_do_agregado():
+    conn = _ConnML(_inicio(em(date(2026, 11, 1), 14)),
+                   [_agregado("1", 10, 2, over_48h=4), _agregado("2", 3, 0)])
+    r = atraso_7d.calcular_ml(conn, AGORA)
+    assert r["1"]["over_48h_7d_count"] == 4
+    assert r["2"]["over_48h_7d_count"] == 0  # zero MEDIDO, base > 0
+    assert r["1"]["stalled_7d_count"] is None
+    assert r["2"]["stalled_7d_count"] is None
+
+
+def test_ml_historico_ilegivel_deixa_48h_null_sem_derrubar_o_atraso(caplog):
+    conn = _ConnML(_inicio(em(date(2026, 11, 1), 14)),
+                   [_agregado("1", 10, 2, over_48h=9, historico_invalido=1)])
+    r = atraso_7d.calcular_ml(conn, AGORA)
+    assert r["1"]["due_7d_count"] == 10 and r["1"]["late_7d_count"] == 2
+    assert r["1"]["over_48h_7d_count"] is None
+    assert "substatus_history" in caplog.text
+
+
+def test_ml_sql_48h_le_coleta_e_marco_com_os_fusos_por_coluna():
+    sql = atraso_7d.ML_ATRASO_7D_SQL
+    # Historico lido como jsonb, sem exigir a coluna (como o SLA).
+    assert "to_jsonb(s) -> 'substatus_history'" in sql
+    # Marco: prontidao, senao criacao do PEDIDO, ambos naive -04:00.
+    assert "(date_ready_to_ship - %(offset_negocio)s) AT TIME ZONE 'UTC'" in sql
+    assert "(pedido_criado - %(offset_negocio)s) AT TIME ZONE 'UTC'" in sql
+    assert "o.date_created" in sql
+    # Coleta: historico, senao `date_shipped` naive -04:00.
+    assert "(date_shipped - %(offset_negocio)s) AT TIME ZONE 'UTC'" in sql
+    assert "e ->> 'substatus' = ANY(%(coletados)s)" in sql
+    assert "e ->> 'status' = ANY(%(enviados)s)" in sql
+    # Nenhum cast de data do historico sem passar no formato com fuso.
+    assert "THEN (e ->> 'date')::timestamptz" in sql
+    assert "COALESCE(coleta, %(agora)s) - marco > %(limite_idade)s" in sql
+    # Base: o mesmo `FROM base` alimenta as quatro contagens.
+    assert sql.count("FROM raw.ml_shipments") == 1
+
+
+@sem_postgres
+def test_ml_sql_48h_contra_postgres_real():
+    url = _banco("atraso7d_ml_48h", SLA_TZ)
+    d6, d9 = date(2026, 11, 6), date(2026, 11, 9)
+    pronto = datetime(2026, 11, 4, 10, 0)  # naive -04:00 = 04/11 14:00 UTC
+
+    def hist(*entradas):
+        return [{"date": d, "status": st, "substatus": sub} for d, st, sub in entradas]
+
+    _popular(url, [
+        # a) coleta pelo historico (1a entrada `picked_up`) em 49 h: conta.
+        dict(sla=em(d6, 14), pronto=pronto, historico=hist(
+            ("2026-11-05T09:00:00.000-04:00", "ready_to_ship", "ready_for_pickup"),
+            ("2026-11-06T11:00:00.000-04:00", "ready_to_ship", "picked_up"),
+            ("2026-11-07T08:00:00.000-04:00", "shipped", None))),
+        # b) historico em 47 h vence o `date_shipped` (que daria 96 h): nao conta.
+        dict(sla=em(d6, 14), pronto=pronto, enviado=datetime(2026, 11, 8, 10, 0),
+             historico=hist(("2026-11-06T09:00:00.000-04:00", "ready_to_ship",
+                             "picked_up"))),
+        # c) `date_ready_to_ship` em -04:00: 12:30 naive = 16:30 UTC; coleta
+        #    16:00 UTC de 06/11 = 47,5 h. Lido como UTC dariam 51,5 h.
+        dict(sla=em(d6, 14), pronto=datetime(2026, 11, 4, 12, 30),
+             historico=hist(("2026-11-06T16:00:00+00:00", "ready_to_ship", "in_hub"))),
+        # d) sem historico: `date_shipped` naive -04:00 em 49 h: conta.
+        dict(sla=em(d6, 14), pronto=pronto, enviado=datetime(2026, 11, 6, 11, 0)),
+        # e) aberto, pronto ha' 27 h: nao conta (mas atrasa: dia fechado).
+        dict(sla=em(d9, 14), pronto=datetime(2026, 11, 9, 8, 0),
+             status="ready_to_ship", substatus="ready_for_pickup"),
+        # f) sem `date_ready_to_ship`: marco = criacao do pedido (01/11), aberto.
+        dict(sla=em(d6, 14)),
+        # g) status `delivered` no historico em 24 h: coletado, nao conta.
+        dict(sla=em(d6, 14), pronto=pronto, historico=hist(
+            ("2026-11-05T10:00:00-04:00", "delivered", None))),
+        # Conta 222: historico que nao e' array -> 48 h NULL, atraso segue.
+        dict(seller=222, sla=em(d6, 14), pronto=pronto, historico="texto"),
+        # Conta 333: entrada de coleta com data SEM fuso -> 48 h NULL.
+        dict(seller=333, sla=em(d6, 14), pronto=pronto, historico=hist(
+            ("2026-11-06T11:00:00", "ready_to_ship", "picked_up"))),
+    ])
+    janela = {"late_7d_window_start": d6, "late_7d_window_end": ATE}
+    assert _calcular(url) == {
+        "111": {"due_7d_count": 7, "late_7d_count": 1, **janela,
+                "over_48h_7d_count": 3, "stalled_7d_count": None},
+        "222": {"due_7d_count": 1, "late_7d_count": 0, **janela,
+                "over_48h_7d_count": None, "stalled_7d_count": None},
+        "333": {"due_7d_count": 1, "late_7d_count": 0, **janela,
+                "over_48h_7d_count": None, "stalled_7d_count": None},
+    }
+
+
+@sem_postgres
+def test_ml_sql_48h_roda_sem_a_coluna_de_historico():
+    url = _banco("atraso7d_ml_sem_hist", SLA_TZ, hist="")
+    _popular(url, [
+        dict(sla=em(date(2026, 11, 6), 14), pronto=datetime(2026, 11, 4, 10, 0),
+             enviado=datetime(2026, 11, 6, 11, 0), com_historico=False),
+    ])
+    r = _calcular(url)
+    assert r["111"]["over_48h_7d_count"] == 1
+    assert r["111"]["stalled_7d_count"] is None
+
+
+# ---------------------------------------------------------------------------
+# CLI: um baseline so' para a fila e para os travados
+# ---------------------------------------------------------------------------
+def test_apply_shopee_le_o_baseline_uma_vez_e_grava_travados():
+    from pipelines.tests.test_expedicao_apply_orquestracao import AGORA as AG
+
+    dia = AG.astimezone(BRT).date() - timedelta(days=3)
+    c = _cenario_shopee([
+        _vencimento("1609671923", "apice", dia),
+        _vencimento("1609671923", "apice", dia, pickup_done_time=em(dia, 11)),
+    ])
+    roteador = c.source._roteador
+
+    def com_baseline(conn, sql, params):
+        if "percentile_cont" in sql:
+            roteador(conn, sql, params)  # registra a etapa no roteiro
+            return [{"shop_id": "1609671923", "sample_size": 300, "p50_hours": 1.0}]
+        return roteador(conn, sql, params)
+
+    c.source._roteador = com_baseline
+    assert c.rodar() == cli.EXIT_OK
+    assert c.ordem.count("baseline") == 1
+    colunas = publisher.SUMMARY_COLUMNS + ATRASO_7D_COLUMNS
+    por_conta = {dict(zip(colunas, x))["shop_account"]: dict(zip(colunas, x))
+                 for x in c.enviadas["insert_resumo"]}
+    assert por_conta["apice"]["over_48h_7d_count"] == 2
+    assert por_conta["apice"]["stalled_7d_count"] == 2   # p50 1 h: ambos > 2 h
+    # Conta sem vencimento na janela: tudo NULL.
+    assert all(por_conta["barbours"][k] is None for k in ATRASO_7D_COLUMNS)
+
+
+def test_diagnostico_mostra_48h_e_travados_e_traco_quando_null():
+    resultado = {
+        "effective_at": AGORA,
+        "atraso_7d": {"contas": {
+            "1": atraso_7d.valores(200, 7, DESDE, ATE, over_48h=31, stalled=4),
+            "2": atraso_7d.valores(50, 1, DESDE, ATE, over_48h=9),
+        }},
+    }
+    texto = "\n".join(cli.format_atraso_7d(resultado))
+    assert ">48h" in texto and "travad" in texto
+    linha_1 = next(x for x in texto.splitlines() if x.strip().startswith("1 "))
+    linha_2 = next(x for x in texto.splitlines() if x.strip().startswith("2 "))
+    assert linha_1.split()[-2:] == ["31", "4"]
+    assert linha_2.split()[-2:] == ["9", "-"]
+
+
+# ---------------------------------------------------------------------------
+# Kokeshi pelo export: 48 h e travados pelo baseline do export
+# ---------------------------------------------------------------------------
+def test_kokeshi_48h_e_travados_pelo_export():
+    from pipelines.expedicao import shopee_export as E
+    from pipelines.expedicao import shopee_export_cli as C
+
+    conta = SellerAccount("kokeshi-sid", 4, "kokeshi")
+    agora = datetime(2026, 11, 3, 19, 0, tzinfo=UTC)
+    baixado = datetime(2026, 11, 3, 15, 0, tzinfo=UTC)
+
+    def utc(dia, hora, mes=10):
+        return datetime(2026, mes, dia, hora, 0, tzinfo=UTC)
+
+    def pedido(status, pago, vence=None, coleta=None):
+        return {"shop_id": "kokeshi-sid", "shop_account": "kokeshi",
+                "order_status": status, "fulfillment_flag": "fulfilled_by_local_seller",
+                "create_time": pago, "pay_time": pago, "ship_by_date": vence,
+                "pickup_done_time": coleta, "cancel_reason": None}
+
+    vence_31 = datetime(2026, 10, 31, 23, 59, tzinfo=BRT)
+    vence_01 = datetime(2026, 11, 1, 23, 59, tzinfo=BRT)
+    historico = [  # 120 pedidos sem prazo (fora da base), coletados em 10 h
+        pedido("COMPLETED", utc(20, 10), coleta=utc(20, 20)) for _ in range(120)
+    ]
+    janela = [
+        pedido("COMPLETED", utc(30, 12), vence_31, coleta=utc(31, 13)),  # 25 h: trava
+        pedido("COMPLETED", utc(30, 12), vence_31, coleta=utc(30, 20)),  # 8 h
+        pedido("READY_TO_SHIP", utc(28, 12), vence_01),                  # aberto: 48h+trava
+        pedido("COMPLETED", utc(29, 12), vence_31, coleta=utc(31, 13)),  # 49 h: 48h+trava
+    ]
+    estado = historico + janela
+    amostra, p50 = E.baseline(estado, agora)
+    assert amostra >= 100 and p50 == pytest.approx(10.0)
+
+    esperado = {
+        "due_7d_count": 4, "late_7d_count": 1,
+        "late_7d_window_start": date(2026, 10, 27),
+        "late_7d_window_end": date(2026, 11, 2),
+        "over_48h_7d_count": 2, "stalled_7d_count": 3,
+    }
+    # Baseline calculado aqui ou o mesmo da fila (`montar_fotografia`).
+    assert C.atraso_7d_do_export(estado, conta, baixado, agora) == {
+        "kokeshi-sid": esperado}
+    assert C.atraso_7d_do_export(estado, conta, baixado, agora, (amostra, p50)) == {
+        "kokeshi-sid": esperado}
+    # Baseline insuficiente: travados NULL, o resto igual.
+    r = C.atraso_7d_do_export(estado, conta, baixado, agora, (50, 10.0))
+    assert r["kokeshi-sid"] == {**esperado, "stalled_7d_count": None}
+
+
+# ---------------------------------------------------------------------------
+# 035: as seis colunas na PROPRIA 035, head continua 035
+# ---------------------------------------------------------------------------
+def test_035_continua_head_sem_036():
+    assert not list(VERSIONS.glob("036*.py"))
+    filhos = [
+        p.name for p in VERSIONS.glob("*.py")
+        if _meta(p).get("down_revision") == "035"
+    ]
+    assert filhos == []
+    fonte = ARQ_035.read_text(encoding="utf-8")
+    assert "over_48h_7d_count" in fonte.split('"""', 2)[1]  # no docstring
+    assert "stalled_7d_count" in fonte.split('"""', 2)[1]
