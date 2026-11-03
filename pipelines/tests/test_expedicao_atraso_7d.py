@@ -634,7 +634,8 @@ def test_publicador_com_a_035_grava_null_quando_nao_calculado():
 
 
 def test_publicador_detecta_no_resumo_do_destino_e_o_export_nao_tem_as_colunas():
-    """A 035 so' toca o resumo da 018; o resumo do export (034) fica sem elas."""
+    """A sonda e' no resumo DO DESTINO: sem as colunas no export (banco antes
+    da 035 nova), o INSERT do export e' o de antes."""
     conn = _ConnPub({RUN_TABLE: ATRASO_7D_COLUMNS})
     destino = publisher.Destino(
         fila="marts.expedicao_fila_export", resumo=RUN_EXPORT_TABLE,
@@ -887,8 +888,9 @@ def test_035_upgrade_idempotente_cria_quatro_colunas_nullable(banco_034):
         "late_7d_window_start": ("date", "YES", None),
         "late_7d_window_end": ("date", "YES", None),
     }
-    # O resumo do export (034) nao recebe as colunas.
-    assert not set(ATRASO_7D_COLUMNS) & set(_colunas(banco_034, "expedicao_refresh_run_export"))
+    # O resumo do export (034) recebe as MESMAS colunas (Kokeshi com %).
+    export = _colunas(banco_034, "expedicao_refresh_run_export")
+    assert {c: export[c] for c in ATRASO_7D_COLUMNS} == {c: cols[c] for c in ATRASO_7D_COLUMNS}
     _rodar_035(banco_034, "downgrade")
     _rodar_035(banco_034, "downgrade")  # idem
     assert not set(ATRASO_7D_COLUMNS) & set(_colunas(banco_034))
