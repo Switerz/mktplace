@@ -168,6 +168,18 @@ class ResumoConta(BaseModel):
     #: nao calculado (pipeline anterior, migration ausente, conta sem dado).
     due_7d_count: Optional[int] = None
     late_7d_count: Optional[int] = None
+    #: EXPEDICAO-ABA-7D — da MESMA base de `due_7d_count`: quantos levaram mais
+    #: de 48 h para sair (ou seguem abertos ha' mais) e quantos foram lentos
+    #: (> 2x a mediana da conta; nulo sem baseline, sempre nulo no ML).
+    over_48h_7d_count: Optional[int] = None
+    stalled_7d_count: Optional[int] = None
+    #: Pedidos feitos nos ultimos 7 dias, o numero do Gerencial (por marca;
+    #: nulo quando a marca tem mais de uma conta no lote).
+    orders_7d_count: Optional[int] = None
+    #: "agendada" (publicacao de hora em hora) ou "export" (carga do bot
+    #: pelo export do Seller Centre, a cada 2 h). A tendencia nao cobra
+    #: ponto horario da conta "export".
+    origem: Optional[str] = None
     run_status: str
     source_watermark_at: Optional[datetime] = None
     source_advanced: bool
@@ -203,6 +215,9 @@ class ResumoCanal(BaseModel):
     #: Somas das contas com o atraso de 7 dias calculado; nulos se nenhuma.
     due_7d_count: Optional[int] = None
     late_7d_count: Optional[int] = None
+    over_48h_7d_count: Optional[int] = None
+    stalled_7d_count: Optional[int] = None
+    orders_7d_count: Optional[int] = None
 
 
 class OrderRow(BaseModel):
@@ -281,6 +296,9 @@ class Snapshot(BaseModel):
     #: desde 03/11/2026 ("desde 03/11").
     late_7d_window_start: Optional[date] = None
     late_7d_window_end: Optional[date] = None
+    #: EXPEDICAO-ABA-7D — dias do total de pedidos do Gerencial.
+    orders_7d_window_start: Optional[date] = None
+    orders_7d_window_end: Optional[date] = None
 
 
 class Limitacoes(BaseModel):

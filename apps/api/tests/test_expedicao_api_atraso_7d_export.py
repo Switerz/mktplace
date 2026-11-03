@@ -78,9 +78,10 @@ WM = datetime(2026, 11, 3, 19, 20, tzinfo=UTC)
 
 
 def test_calcular_devolve_as_quatro_chaves():
-    db = _Db({"fluxo_desconhecido": 0, "due": 2133, "late": 40})
+    db = _Db({"fluxo_desconhecido": 0, "due": 2133, "late": 40, "over_48h": 2, "stalled": 55})
     r = K.calcular(db, "kokeshi", WM, AGORA)
     assert r == {"due_7d_count": 2133, "late_7d_count": 40,
+                 "over_48h_7d_count": 2, "stalled_7d_count": 55,
                  "late_7d_window_start": date(2026, 10, 27),
                  "late_7d_window_end": date(2026, 11, 2)}
     assert db.params["ate"] == date(2026, 11, 2)
@@ -118,3 +119,20 @@ def test_falha_no_calculo_nao_derruba_a_resposta(monkeypatch):
     snap = {"resumos": [], "effective_at": AGORA, "linhas": 0}
     svc._juntar_export(None, svc.CANAIS["shopee"], snap)
     assert snap["resumos"][0]["due_7d_count"] is None
+
+
+def test_sem_baseline_suficiente_travados_fica_nulo():
+    db = _Db({"fluxo_desconhecido": 0, "due": 10, "late": 1, "over_48h": 0, "stalled": None})
+    r = K.calcular(db, "kokeshi", WM, AGORA)
+    assert r["stalled_7d_count"] is None and r["over_48h_7d_count"] == 0
+
+
+def test_sql_de_48h_e_travados_espelha_o_pipeline():
+    sql = K.SQL
+    assert "percentile_cont(0.5)" in sql and "order_status <> 'CANCELLED'" in sql
+    assert f"horas > {K.LIMITE_48H_HORAS}" in sql
+    assert f">= {K.AMOSTRA_MINIMA}" in sql and f"{K.FATOR_LENTO} * (SELECT p50" in sql
+    from pipelines.expedicao import contract as C
+    assert K.LIMITE_48H_HORAS * 3600 == C.OPERATIONAL_AGE_LIMIT.total_seconds()
+    assert K.FATOR_LENTO == C.SLOW_BASELINE_FACTOR
+    assert K.AMOSTRA_MINIMA == C.MIN_BASELINE_SAMPLE
