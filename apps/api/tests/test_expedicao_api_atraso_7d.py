@@ -13,7 +13,7 @@ O que estes testes travam:
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -81,3 +81,32 @@ def test_normalizacao_aceita_texto_numero_e_vazio():
     assert r["late_7d_window_start"] == date(2026, 11, 3)
     assert r["late_7d_window_end"] is None
     assert svc._normalizar_atraso_7d({})["due_7d_count"] is None
+
+
+def test_pedidos_7d_do_gerencial_por_marca_e_no_total(ligada, monkeypatch):
+    """EXPEDICAO-ABA-7D: o total da aba e' o numero do Gerencial."""
+    (b1, n1), (b2, n2), (b3, n3), (b4, n4) = CONTAS
+    monkeypatch.setattr(svc, "_pedidos_7d", lambda db, canal, ef: {b1: 3015, b2: 3081, b4: 695})
+    r = svc.get_expedicao(SessaoFake())
+    por = {c["brand"]: c for c in r["accounts"]}
+    assert por[b1]["orders_7d_count"] == 3015
+    assert por[b3]["orders_7d_count"] is None, "marca sem total no Gerencial: nulo"
+    assert r["totals"]["orders_7d_count"] == 3015 + 3081 + 695
+    assert r["snapshot"]["orders_7d_window_end"] - r["snapshot"]["orders_7d_window_start"] == timedelta(days=6)
+    ExpedicaoResponse.model_validate(r)
+
+
+def test_pedidos_7d_falha_vira_sem_total(ligada, monkeypatch):
+    r = svc.get_expedicao(SessaoFake())
+    assert r["totals"]["orders_7d_count"] is None
+    assert all(c["orders_7d_count"] is None for c in r["accounts"])
+
+
+def test_soma_de_48h_e_travados_so_das_contas_com_calculo():
+    resumos = [
+        {"due_7d_count": 10, "late_7d_count": 1, "over_48h_7d_count": 2, "stalled_7d_count": None},
+        {"due_7d_count": 5, "late_7d_count": 0, "over_48h_7d_count": 1, "stalled_7d_count": 3},
+        {"due_7d_count": None, "late_7d_count": None},
+    ]
+    s = svc._somar_atraso_7d(resumos)
+    assert (s["over_48h_7d_count"], s["stalled_7d_count"]) == (3, 3)

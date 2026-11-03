@@ -145,6 +145,7 @@ export interface DivisaoDaFila {
 const MEDIDAS: Exclude<
   keyof Totais,
   "due_next_day_count" | "due_today_count" | "due_soon_count" | "due_7d_count" | "late_7d_count"
+  | "over_48h_7d_count" | "stalled_7d_count" | "orders_7d_count"
 >[] = [
   "backlog_count", "overdue_count", "due_within_24h_count", "on_time_count",
   "deadline_unavailable_count", "over_48h_count", "slow_count", "zombie_count", "stalled_count",

@@ -329,7 +329,10 @@ test("atraso 7 dias: % so' com o calculo publicado e base positiva", async () =>
   assert.equal(percentualAtraso7d(null, 1000), null);
   assert.equal(percentualAtraso7d(3, null), null);
   assert.equal(percentualAtraso7d(0, 0), null, "base zero: sem %");
-  assert.match(CLIENTE, /pctVencidos: temPrazo \? percentualAtraso7d\(a\.late_7d_count, a\.due_7d_count\) : null/);
+  // EXPEDICAO-ABA-7D: na aba "Agora" o % dos vencidos e' a fatia da fila; o
+  // destaque usa atrasados ÷ pedidos do Gerencial (7 dias).
+  assert.match(CLIENTE, /pctVencidos: temPrazo \? percentualDaFila\(a\.overdue_count, a\.backlog_count\) : null/);
+  assert.match(CLIENTE, /percentualAtraso7d\(recorte\.totais\?\.late_7d_count, recorte\.totais\?\.orders_7d_count\)/);
   assert.match(CLIENTE, /taxaAtraso7d=\{taxaAtraso7d\}/);
 });
 
@@ -463,4 +466,45 @@ test("tabela por marca: zero vencidos agora ainda mostra a taxa de 7 dias", () =
     }),
   );
   assert.match(html, /0,9%/);
+});
+
+
+test("aba Ultimos 7 dias: pedidos do Gerencial e % de cada medida sobre eles", async () => {
+  // EXPEDICAO-ABA-7D (03/11/2026).
+  const { default: TabelaSeteDias } = await import("../src/components/expedicao/TabelaSeteDias.tsx");
+  const html = renderToStaticMarkup(
+    h(TabelaSeteDias, {
+      linhas: [
+        { conta: "apice", titulo: "ÁPICE", pedidos: 3015, vencidos: 16, acima48h: 30, travados: 60 },
+        { conta: "x", titulo: "X", pedidos: null, vencidos: 2, acima48h: null, travados: null },
+      ],
+      total: { conta: "total", titulo: "Total do canal", pedidos: 3015, vencidos: 18, acima48h: 30, travados: 60 },
+      janela: "27/10 a 02/11",
+      comTravados: true,
+    }),
+  );
+  assert.match(html, /Pedidos feitos de 27\/10 a 02\/11/);
+  assert.match(html, /3\.015/);
+  assert.match(html, /0,5%/, "16 de 3.015");
+  assert.match(html, /1,0%/, "30 de 3.015");
+  assert.doesNotMatch(html, /Perto de vencer/i);
+  assert.match(html, /Total do canal/);
+  const semTravados = renderToStaticMarkup(
+    h(TabelaSeteDias, { linhas: [], total: null, janela: null, comTravados: false }),
+  );
+  assert.match(semTravados, /Travados não é medido neste canal/);
+  assert.match(CLIENTE, /\{ valor: "7d", texto: "Últimos 7 dias" \}/);
+});
+
+test("serie parcial ignora a conta do export (bot a cada 2 h)", async () => {
+  const { estadoDaTendencia } = await import("../src/lib/expedicao-contract.ts");
+  const serie = (conta: string, horas: string[]) => ({
+    shopAccount: conta, brand: conta, pontos: horas.map((hora) => ({ hora, backlog: 1, over48h: 0, stalled: 0 })),
+  });
+  const horas = ["10", "11", "12", "13"];
+  const series = [serie("a", horas), serie("b", horas), serie("kokeshi", ["10", "12"])];
+  assert.equal(estadoDaTendencia(false, false, series, 3), "parcial");
+  assert.equal(estadoDaTendencia(false, false, series, 3, new Set(["kokeshi"])), "ok");
+  const faltaRegular = [serie("a", horas), serie("b", ["10"]), serie("kokeshi", ["10"])];
+  assert.equal(estadoDaTendencia(false, false, faltaRegular, 3, new Set(["kokeshi"])), "parcial");
 });

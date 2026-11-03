@@ -50,6 +50,7 @@ import {
 import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/CabecalhoExpedicao";
 import CartaoDeRisco from "@/components/expedicao/CartaoDeRisco";
 import RiscoEmDestaque from "@/components/expedicao/RiscoEmDestaque";
+import TabelaSeteDias, { type LinhaSeteDias } from "@/components/expedicao/TabelaSeteDias";
 import TravadosDialog from "@/components/expedicao/TravadosDialog";
 import {
   SUFIXO_ATRASO_7D,
@@ -449,6 +450,9 @@ export default function ExpedicaoClient({
   const [erroHttp, setErroHttp] = useState<number | null>(null);
   const [erroTendencia, setErroTendencia] = useState(false);
   const [dadosDaTendencia, setDadosDaTendencia] = useState(false);
+  // EXPEDICAO-ABA-7D: "Backlog por marca" em duas abas — a fila de AGORA e os
+  // ULTIMOS 7 DIAS (pedidos do Gerencial, vencidos, +48 h e travados).
+  const [abaMarcas, setAbaMarcas] = useState<"agora" | "7d">("agora");
   // EXPEDICAO-TRAVADOS-1: quais pedidos estao travados (popup).
   const [alvoTravados, setAlvoTravados] = useState<AlvoTravados | null>(null);
 
@@ -666,6 +670,7 @@ export default function ExpedicaoClient({
     erroTendencia,
     series,
     dados?.coverage?.expected_accounts.length ?? 0,
+    new Set((dados?.accounts ?? []).filter((a) => a.origem === "export").map((a) => a.shop_account)),
   );
   // UMA condicao para o grafico, a tabela e o botao "Ver dados": se o bloco
   // nao e' renderizado, o controle que o revela nao pode existir.
@@ -678,8 +683,29 @@ export default function ExpedicaoClient({
   // ou da marca (recorte). Nao usa a divisao vendedor x FBS: o pipeline ja'
   // calcula a base do vendedor (sem FBS) na Shopee.
   const taxaAtraso7d = temPrazo
-    ? percentualAtraso7d(recorte.totais?.late_7d_count, recorte.totais?.due_7d_count)
+    ? percentualAtraso7d(recorte.totais?.late_7d_count, recorte.totais?.orders_7d_count)
     : null;
+  // EXPEDICAO-ABA-7D: linhas da aba "Ultimos 7 dias". O % de cada medida e'
+  // sobre os pedidos feitos (Gerencial), calculado na tabela.
+  const linhaSeteDias = (conta: string, titulo: string, t: Partial<Totais> | null | undefined): LinhaSeteDias => ({
+    conta,
+    titulo,
+    pedidos: t?.orders_7d_count ?? null,
+    vencidos: t?.late_7d_count ?? null,
+    acima48h: t?.over_48h_7d_count ?? null,
+    travados: t?.stalled_7d_count ?? null,
+  });
+  const linhasSeteDias = recorte.contas.map((a) => linhaSeteDias(a.shop_account, brandLabel(a.brand), a));
+  const totalSeteDias =
+    !recorte.marca && recorte.totais && recorte.contas.length > 1
+      ? linhaSeteDias("total", "Total do canal", recorte.totais)
+      : null;
+  const iniSete = dados?.snapshot?.orders_7d_window_start;
+  const fimSete = dados?.snapshot?.orders_7d_window_end;
+  const janelaSeteDias =
+    iniSete && fimSete
+      ? `${iniSete.slice(8, 10)}/${iniSete.slice(5, 7)} a ${fimSete.slice(8, 10)}/${fimSete.slice(5, 7)}`
+      : null;
 
   // QA T-0010 (M4): fila zerada nao esconde a pagina — como o TikTok com
   // base 0, o corpo aparece (zeros medidos, jornada, evolucao) sob o aviso.
@@ -790,9 +816,10 @@ export default function ExpedicaoClient({
       atualizadaEm: horaPropriaDaConta(a.observed_at, dados?.snapshot?.effective_at),
       backlog: a.backlog_count,
       vencidos: temPrazo ? a.overdue_count : null,
-      // EXPEDICAO-ATRASO-7D: regra oficial da Shopee (atrasados ÷ pedidos dos
-      // ultimos 7 dias), nunca a fila. Sem o calculo publicado, sem %.
-      pctVencidos: temPrazo ? percentualAtraso7d(a.late_7d_count, a.due_7d_count) : null,
+      // EXPEDICAO-ABA-7D: na aba "Agora" tudo e' a fila de agora — o % dos
+      // vencidos e' a fatia do backlog, como perto de vencer e travados. A
+      // regra dos 7 dias (atrasados ÷ pedidos do Gerencial) vive na aba propria.
+      pctVencidos: temPrazo ? percentualDaFila(a.overdue_count, a.backlog_count) : null,
       aoVerVencidos:
         temPrazo && a.overdue_count > 0
           ? () =>
@@ -1187,6 +1214,26 @@ export default function ExpedicaoClient({
           Série parcial: faltam contas em algumas horas.
         </Note>
       )}
+      <div className="mb-3">
+        <Segmented
+          rotulo="Período da tabela"
+          opcoes={[
+            { valor: "agora", texto: "Agora" },
+            { valor: "7d", texto: "Últimos 7 dias" },
+          ] as const}
+          valor={abaMarcas}
+          aoEscolher={setAbaMarcas}
+        />
+      </div>
+      {abaMarcas === "7d" ? (
+        <TabelaSeteDias
+          linhas={linhasSeteDias}
+          total={totalSeteDias}
+          janela={janelaSeteDias}
+          comTravados={filtros.channel === "shopee"}
+        />
+      ) : (
+      <>
       {/* A fotografia manda nas linhas: a tabela existe mesmo sem tendencia. */}
       <EvolucaoPorMarca
         resposta={temSerieNaTendencia ? tendencia : null}
@@ -1247,6 +1294,8 @@ export default function ExpedicaoClient({
             </div>
           )}
         </>
+      )}
+      </>
       )}
     </Panel>
   );

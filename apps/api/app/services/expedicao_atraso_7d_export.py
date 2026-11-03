@@ -45,6 +45,12 @@ DIAS_DA_JANELA = 7
 #: janela foi criado poucos dias antes dele.
 MARGEM_CRIACAO = timedelta(days=30)
 
+#: Limiar de idade e regra de lentidao, os mesmos de `pipelines.expedicao.contract`.
+LIMITE_48H_HORAS = 48
+FATOR_LENTO = 2.0
+AMOSTRA_MINIMA = 100
+JANELA_BASELINE = timedelta(days=30)
+
 FLUXO_VENDEDOR = "fulfilled_by_local_seller"
 FLUXO_FBS = "fulfilled_by_shopee"
 STATUS_CANCELADO = ("CANCELLED", "IN_CANCEL")
@@ -53,8 +59,22 @@ STATUS_POS_ENVIO = ("SHIPPED", "TO_CONFIRM_RECEIVE", "COMPLETED", "TO_RETURN")
 #: Contagem por conta, numa consulta. `dia` = dia do prazo em Brasilia, por
 #: offset FIXO (-03:00), como o pipeline.
 SQL = f"""
-WITH p AS (
-  SELECT pay_time, fulfillment_flag, order_status, ship_by_date, pickup_done_time,
+WITH baseline AS (
+  -- Espelho de `shopee_export.baseline`: 30 dias de criacao, com coleta e
+  -- marco, status conhecido e fora de CANCELLED; p50 em horas.
+  SELECT count(*) AS amostra,
+         percentile_cont(0.5) WITHIN GROUP (ORDER BY
+           EXTRACT(EPOCH FROM pickup_done_time - coalesce(pay_time, create_time)) / 3600.0
+         ) AS p50
+    FROM {PEDIDO_EXPORT}
+   WHERE shop_account = :conta
+     AND create_time >= :baseline_desde AND create_time < :agora
+     AND pickup_done_time IS NOT NULL
+     AND coalesce(pay_time, create_time) IS NOT NULL
+     AND order_status IS NOT NULL AND order_status <> 'CANCELLED'
+),
+p AS (
+  SELECT pay_time, create_time, fulfillment_flag, order_status, ship_by_date, pickup_done_time,
          (ship_by_date AT TIME ZONE INTERVAL '-03:00')::date AS dia
     FROM {PEDIDO_EXPORT}
    WHERE shop_account = :conta
@@ -69,6 +89,8 @@ na_janela AS (
 ),
 classe AS (
   SELECT fulfillment_flag,
+         EXTRACT(EPOCH FROM coalesce(pickup_done_time, :agora)
+                            - coalesce(pay_time, create_time)) / 3600.0 AS horas,
          NOT (order_status IN {STATUS_CANCELADO} AND pickup_done_time IS NULL)
          AND NOT (pickup_done_time IS NULL AND order_status IN {STATUS_POS_ENVIO})
            AS base,
@@ -80,7 +102,11 @@ classe AS (
 SELECT count(*) FILTER (WHERE fulfillment_flag IS DISTINCT FROM '{FLUXO_VENDEDOR}')
          AS fluxo_desconhecido,
        count(*) FILTER (WHERE base) AS due,
-       count(*) FILTER (WHERE base AND atraso) AS late
+       count(*) FILTER (WHERE base AND atraso) AS late,
+       count(*) FILTER (WHERE base AND horas > {LIMITE_48H_HORAS}) AS over_48h,
+       CASE WHEN (SELECT amostra FROM baseline) >= {AMOSTRA_MINIMA}
+            THEN count(*) FILTER (WHERE base AND horas > {FATOR_LENTO} * (SELECT p50 FROM baseline))
+       END AS stalled
   FROM classe
 """
 
@@ -118,11 +144,15 @@ def calcular(db, shop_account: str, watermark: Optional[datetime],
     linha = db.execute(text(SQL), {
         "conta": shop_account, "criado_desde": criado_desde,
         "desde": desde, "ate": fim, "agora": effective_at,
+        "baseline_desde": effective_at - JANELA_BASELINE,
     }).mappings().first()
     if not linha or int(linha["fluxo_desconhecido"] or 0) > 0:
         return None
     due = int(linha["due"] or 0)
     if due == 0:
         return None
+    stalled = linha.get("stalled")
     return {"due_7d_count": due, "late_7d_count": int(linha["late"] or 0),
+            "over_48h_7d_count": int(linha.get("over_48h") or 0),
+            "stalled_7d_count": None if stalled is None else int(stalled),
             "late_7d_window_start": desde, "late_7d_window_end": fim}
