@@ -296,14 +296,16 @@ each channel shows only what its source sustains.
 2. **Risco atual** — KPI strip plus "O que exige atenção agora". Shopee: seven
    tiles (backlog, vencidos, vence em 24 h, vence no próximo dia de prazo —
    "Vence amanhã", or "Vence ter 03/11" on a Friday —, acima de 48 h,
-   travados, marcas em alerta). ML: four — no deadline tiles at all. TikTok:
+   travados, marcas em alerta). ML: the Shopee tiles when the photo carries
+   the ML dispatch SLA (`snapshot.deadline_published`), labelled "prazo
+   Mercado Livre"; without it, four — no deadline tiles at all. TikTok:
    pendentes vencidos, vencem hoje/amanhã, pendentes no prazo, lojas acima da
    meta. Every tile with a count carries its ⓘ next to the label (never in the
    footer), its share of the queue ("0,7% da fila") and "ver quais", which
    opens the same order list (number, stage, CSV) filtered by that tile.
 3. **Prazo** — Shopee: backlog partitioned by deadline status (ship_by_date),
-   plus the sentence that LDR is not computed yet. ML: "Prazo indisponível
-   pelo canal" and queue ageing. TikTok: LDR, with collection and dispatch as
+   plus the sentence that LDR is not computed yet. ML with SLA: the same
+   partition; without it, "indisponível" and queue ageing. TikTok: LDR, with collection and dispatch as
    separate events.
 4. **Evolução** — queue: a compact table, one row per account titled by
    brand (Backlog atual · Variação · Acima de 48 h · Travados · Tendência).

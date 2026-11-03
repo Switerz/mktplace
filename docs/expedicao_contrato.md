@@ -546,8 +546,9 @@ o cartao, a coluna da tabela por marca e a lista tem de ser o MESMO numero.
   hoje + proximo dia. `totals` e' a soma das contas (o cartao e' a soma da
   coluna).
 - Nenhum dos tres entra na particao de prazo. Shopee: inteiros (0 quando nao
-  ha). Mercado Livre: `null` — o canal nao publica prazo e a consulta nem e'
-  feita.
+  ha). Mercado Livre: inteiros quando a fotografia traz o SLA
+  (`snapshot.deadline_published = true`, EXPEDICAO-ML-PRAZO); senao `null` e
+  a consulta nem e' feita.
 
 **Regras.**
 
@@ -566,8 +567,8 @@ o cartao, a coluna da tabela por marca e a lista tem de ser o MESMO numero.
   (`next_due_date`, ou hoje quando nao ha proximo dia). `situacao=due_next_day`
   lista o proximo dia: base `AND dia = :proximo_vencimento`. Os dois ficam FORA
   de `SITUACAO_SQL`, que a jornada usa em `count(*) FILTER` so' com predicados
-  fixos. No ML (ou sem data, no `due_next_day`), o filtro e' `FALSE`: lista
-  vazia, nunca a fila inteira.
+  fixos. No ML sem SLA na fotografia (ou sem data, no `due_next_day`), o
+  filtro e' `FALSE`: lista vazia, nunca a fila inteira.
 - A fila publicada inclui FBS (o extrator nao le `fulfillment_flag`): as
   contagens tambem.
 
@@ -577,10 +578,10 @@ o cartao, a coluna da tabela por marca e a lista tem de ser o MESMO numero.
 
 | | Shopee | Mercado Livre | TikTok |
 |---|---|---|---|
-| Prazo por pedido | `ship_by_date` (`marketplace_native`) em todas as linhas | ausente (`deadline_source = unavailable`) | reconstruido pela politica de dias uteis |
-| Situacao de prazo na fotografia | `overdue / due_within_24h / on_time / deadline_unavailable` | so' `deadline_unavailable` | — |
+| Prazo por pedido | `ship_by_date` (`marketplace_native`) em todas as linhas | SLA oficial do envio (`sla_expected_date`, `marketplace_native`) quando gravado; senao `unavailable` (EXPEDICAO-ML-PRAZO) | reconstruido pela politica de dias uteis |
+| Situacao de prazo na fotografia | `overdue / due_within_24h / on_time / deadline_unavailable` | a mesma particao com SLA; so' `deadline_unavailable` sem ele | — |
 | Idade da fila | `over_48h`, `stalled`, `oldest_row_age_hours` | idem | — |
-| Taxa de atraso (LDR) | **nao existe no contrato** | **impossivel** (sem prazo na fonte) | `ldr`, por vencimento, coleta e despacho |
+| Taxa de atraso (LDR) | **nao existe no contrato** | nao construida (o SLA so' e' relido com o envio aberto) | `ldr`, por vencimento, coleta e despacho |
 
 A tela mostra a MESMA hierarquia (Risco atual -> Prazo -> Evolucao ->
 Concentracao por marca) e, em cada secao, so' o que o canal sustenta. Nenhuma
@@ -612,10 +613,11 @@ estiverem desligadas, a secao "Prazo" da Shopee continua mostrando a particao
 do backlog por situacao de prazo e dizendo, por escrito, que a LDR ainda nao e'
 calculada.
 
-**Mercado Livre.** O canal nao publica prazo de envio (campos candidatos 0%
-preenchidos, medido no EXP-3A). Nao ha vencimento nem LDR a construir sem uma
-fonte nova de prazo; a secao "Prazo" diz isso e mostra o envelhecimento da
-fila (acima de 48 h, limiar interno, e o pedido mais antigo por marca).
+**Mercado Livre.** Ate' 03/11/2026 o canal nao tinha prazo de envio (campos
+candidatos 0% preenchidos, medido no EXP-3A). Com o SLA oficial na fotografia
+(secao "Prazo do Mercado Livre"), a secao "Prazo" e os cartoes ficam como
+os da Shopee; sem ele, a secao diz que nao ha prazo e mostra o envelhecimento
+da fila (acima de 48 h, limiar interno, e o pedido mais antigo por marca).
 
 **Evolucao em tabela.** Uma linha por conta, titulada pela marca: backlog
 atual, variacao, acima de 48 h, travados e sparkline. Sem escala escrita e sem
@@ -1078,10 +1080,83 @@ faixa de 48h (`operational_age_status`) e `is_stalled`.
 100, e a coorte de 7 dias nao a sustenta. `is_stalled` fica valendo so' pelo
 zumbi — declarado, nao silencioso.
 
-**Caminho para o prazo oficial:** reextrair
-`shipping_option.estimated_handling_limit` da API do Mercado Livre e
-materializar a coluna. E' gate proprio; enquanto nao existir, a tela do ML nao
-pode mostrar colunas de prazo.
+**Caminho para o prazo oficial — FEITO em 03/11/2026 (EXPEDICAO-ML-PRAZO).**
+O `estimated_handling_limit` foi descontinuado pelo ML em 13/05/2025; o prazo
+vem do SLA do envio. Ver a secao "Prazo do Mercado Livre". O que esta secao
+descreve continua valendo para todo envio SEM SLA valido.
+
+## Prazo do Mercado Livre — SLA oficial do envio (EXPEDICAO-ML-PRAZO, 03/11/2026)
+
+Pedido do usuario: "faca o mesmo para o Mercado Livre" — cartao, coluna e lista
+"Perto de vencer", vencidos em vermelho e ⓘ, como na Shopee.
+
+**Por que o ML nao tinha prazo.** O ML descontinuou
+`shipping_option.estimated_handling_limit` em 13/05/2025. Desde entao o prazo de
+despacho so' sai de `GET /shipments/{shipment_id}/sla`:
+
+```json
+{"status": "on_time", "service": "xd_same_day",
+ "expected_date": "2024-05-22T23:59:59-03:00", "last_updated": "2024-05-21T17:16:04Z"}
+```
+
+`expected_date` e' a "data e hora limite para despachar o produto", com o fuso
+do site. No Mercado Coleta (`cross_docking`, 100% dos 757 envios abertos em
+03/11/2026) e' o horario da coleta agendada. O ML pode muda-lo ate' a vespera e
+nao responde para envio cancelado nem Full. Fonte: developers.mercadolivre.com.br,
+"Gerenciamento de envios", secoes "Prazo maximo de despacho (SLA)" e "Prazos de
+entrega".
+
+**Extrator (goca-se/airflow, branch `feat/ml-shipments-sla`).** Migration
+`migrations/53_ml_shipments_sla.sql` acrescenta a `raw.ml_shipments`:
+`sla_expected_date timestamptz`, `sla_status`, `sla_service`,
+`sla_last_updated timestamptz` e `sla_extracted_at timestamptz` (quando o SLA
+foi buscado; gravado tambem quando o ML nao devolve SLA). A task nova
+`refresh_open_shipments` do `ml_orders_etl` (Fase 3, a cada 15 min, token sem
+renovar) rele os envios abertos dos ultimos 30 dias — a Fase 2 so' relia quando
+o PEDIDO mudava, e em 03/11/2026 240 dos 757 envios abertos estavam ha' mais de
+6 h sem releitura, o pior ha' 11 dias — e rebusca o SLA de hora em hora.
+
+**Pipeline (este repo).**
+
+- `ML_BACKLOG_SQL` le `to_jsonb(s) ->> 'sla_expected_date'` e
+  `->> 'sla_extracted_at'`: o MESMO SELECT roda antes e depois de a coluna
+  existir. Coluna ausente = NULL = envio sem prazo, como antes. A ordem dos
+  deploys (Airflow x mktplace) nao importa.
+- `transform.prazo_sla_ml`: o prazo vale se houver `expected_date` E leitura do
+  SLA com ate' `ML_SLA_MAX_AGE` (24 h). Senao `unavailable`. Nunca derivado de
+  outra coluna.
+- `transform.instante_iso_com_fuso`: o texto TEM de trazer fuso. Sem fuso
+  (coluna criada como `timestamp` naive) a publicacao falha FECHADA — ler o
+  prazo num fuso suposto erraria de 1 a 4 h justo na fronteira do vencido.
+  Terceira convencao por coluna: `ML_ZONED_TIMESTAMPS` (as outras duas seguem
+  intactas: ingestao em UTC, negocio em -04:00).
+- `build_fila_ml`: `dispatch_deadline` = SLA, `deadline_source =
+  marketplace_native`, `deadline_status` e `hours_overdue` pelas MESMAS funcoes
+  da Shopee. `timestamp_quality` continua `assumed` (as datas de negocio do ML
+  seguem inferidas).
+
+**API.** `prazo_publicado(canal, resumos)`: Shopee sempre; ML quando alguma
+conta do lote tem `deadline_unavailable_count < backlog_count`. Sai em
+`snapshot.deadline_published`. Com `true`, o ML ganha `due_today_count`,
+`due_next_day_count`, `due_soon_count`, `next_due_date`, as listas `due_soon`
+e `due_next_day` e as sobreposicoes `vencido`/`vence_24h` da jornada — tudo
+pela mesma base da Shopee (`NAO_VENCIDO_COM_PRAZO_SQL`). Com `false`, a
+resposta e' a de antes. Nenhuma flag nova.
+
+**Tela.** `canalTemPrazo(canal, fotografia)` le `deadline_published` da
+fotografia DO MESMO canal. ML com SLA: os cartoes, a barra empilhada, a coluna
+"Perto de vencer", a lista e o vermelho dos vencidos da Shopee, com "prazo
+Mercado Livre" no rotulo e textos proprios (nenhum cita a Shopee nem o
+`ship_by_date`). ML sem SLA: exatamente a tela anterior.
+
+**Fora deste gate.**
+
+- LDR do ML: o SLA so' e' relido enquanto o envio esta' aberto.
+- Envios `picked_up` / `dropped_off` / `in_hub` continuam no backlog (decisao
+  de negocio pendente, contrato etapa v1). Com a releitura a cada 15 min eles
+  passam a fechar logo; antes ficavam dias.
+- Rituaria deixou de ser "100% Full": 141 envios `cross_docking` abertos em
+  03/11/2026 (a tabela de cobertura abaixo e' de 17/09).
 
 ## Cobertura por marca e conta
 

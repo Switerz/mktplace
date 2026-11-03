@@ -675,7 +675,7 @@ test("secao sem fonte no canal: bloco curto 'indisponível neste canal' com o �
   );
   assert.match(html, /<h3[^>]*>Prazo<\/h3>/);
   assert.match(html, /Indisponível neste canal: o Mercado Livre não publica prazo de despacho\./);
-  assert.match(html, /role="img" aria-label="Não medido: o canal não publica prazo de despacho\./);
+  assert.match(html, /role="img" aria-label="Não medido: o canal não publica prazo de despacho nesta fotografia\./);
   assert.match(html, /role="status"/);
 });
 

@@ -141,8 +141,11 @@ test("exclusoes: os quatro contadores, na ordem da precedencia, com o nao-enviad
 test("flag desligada: a secao Prazo fica como antes, inclusive o aviso de LDR ausente", () => {
   assert.match(CLIENTE, /const LDR_SHOPEE_LIGADA = process\.env\.NEXT_PUBLIC_EXPEDICAO_SHOPEE_LDR_ENABLED === "true";/);
   // O aviso de LDR ausente e' o "ⓘ" do titulo da secao.
-  assert.match(CLIENTE, /<SecaoGerencial titulo="Prazo" dica=\{LDR_SHOPEE_LIGADA \? undefined : SEM_LDR_SHOPEE\}>/);
-  assert.match(CLIENTE, /\{LDR_SHOPEE_LIGADA \? <LdrShopeePanel ldr=\{ldr\} marca=\{marcaAtiva\} \/> : null\}/);
+  // EXPEDICAO-ML-PRAZO: a LDR (e o aviso dela) e' so' da Shopee; o ML com SLA
+  // tem o proprio aviso, escolhido por `dicaDaSecaoPrazo`.
+  assert.match(CLIENTE, /const ldrNaSecao = LDR_SHOPEE_LIGADA && filtros\.channel === "shopee";/);
+  assert.match(CLIENTE, /<SecaoGerencial titulo="Prazo" dica=\{ldrNaSecao \? undefined : dicaDaSecaoPrazo\(filtros\.channel\)\}>/);
+  assert.match(CLIENTE, /\{ldrNaSecao \? <LdrShopeePanel ldr=\{ldr\} marca=\{marcaAtiva\} \/> : null\}/);
   // Flag off = nenhuma requisicao: o hook so' liga com a flag E na Shopee.
   // UI-EXPEDICAO-1: a LDR le o periodo do topo da pagina.
   assert.match(CLIENTE, /useLdrShopee\(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros\.channel === "shopee", janela\)/);

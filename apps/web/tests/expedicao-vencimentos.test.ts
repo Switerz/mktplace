@@ -251,7 +251,13 @@ test("o ⓘ de 'Vence em 24 h' diz que, na pratica, sao os que vencem hoje", () 
 test("catalogo: proximo vencimento e as faixas da barra de prazo tem ⓘ", () => {
   assert.equal(chaveDoKpiDaFila("shopee", "due_next_day"), "shopee.due_next_day");
   assert.match(definicaoDe("shopee.due_next_day").definicao, /fim de semana|sexta/);
-  assert.equal(definicaoDe("mercadolivre.due_next_day").origem, "indisponivel");
+  // EXPEDICAO-ML-PRAZO: no ML a medida existe quando a fotografia traz o SLA.
+  assert.equal(definicaoDe("mercadolivre.due_next_day").origem, "torre");
+  assert.doesNotMatch(definicaoDe("mercadolivre.due_next_day").definicao, /Shopee|ship_by_date/);
+  for (const c of ["mercadolivre.due_soon", "mercadolivre.no_prazo", "mercadolivre.prazo_situacao"] as const) {
+    assert.ok(c in DEFINICOES, c);
+    assert.ok(METRICAS_POR_CANAL.mercadolivre.includes(c), c);
+  }
   for (const c of ["shopee.due_next_day", "shopee.no_prazo", "shopee.sem_prazo"] as const) {
     assert.ok(c in DEFINICOES, c);
     assert.ok(METRICAS_POR_CANAL.shopee.includes(c), c);
@@ -259,7 +265,9 @@ test("catalogo: proximo vencimento e as faixas da barra de prazo tem ⓘ", () =>
 });
 
 test("barra de prazo: cada faixa da legenda tem o seu ⓘ", () => {
-  assert.match(CLIENTE, /AJUDA_DA_FAIXA\[f\.chave\]/);
+  assert.match(CLIENTE, /AJUDA_DA_FAIXA\[filtros\.channel\]\[f\.chave\]/);
+  assert.match(CLIENTE, /overdue: "mercadolivre\.overdue"/);
+  assert.match(CLIENTE, /on_time: "mercadolivre\.no_prazo"/);
   assert.match(CLIENTE, /overdue: "shopee\.overdue"/);
   assert.match(CLIENTE, /on_time: "shopee\.no_prazo"/);
 });

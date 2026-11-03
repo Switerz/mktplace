@@ -84,7 +84,7 @@ test("tabela: o numero de travados abre a lista e mostra o %", () => {
 });
 
 test("menos texto: Prazo some sem LDR; jornada so' com coorte; convite curto", () => {
-  assert.match(CLIENTE, /const secaoPrazo = temPrazo && !LDR_SHOPEE_LIGADA && destaque && temBarraDePrazo \? null/);
+  assert.match(CLIENTE, /const secaoPrazo = temPrazo && !ldrNaSecao && destaque && temBarraDePrazo \? null/);
   assert.match(CLIENTE, /<JornadaPedidos [^>]*compacta \/>/);
   assert.match(CLIENTE, /conteudo="Lista de pedidos, mais críticos e fonte por conta\."/);
   assert.match(CLIENTE, /<SecaoGerencial titulo="Prazo" dica=\{SEM_PRAZO_CANAL_ML\}>/);
