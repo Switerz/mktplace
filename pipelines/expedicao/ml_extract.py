@@ -21,11 +21,17 @@ Nao existe prazo operacional de despacho materializado no armazem. Medido em
 de manuseio (media 0,30h APOS a criacao), nao prazo; `estimated_delivery_date`
 e' promessa de ENTREGA ao comprador, outra coisa.
 
-Entao `dispatch_deadline` sai NULO e `deadline_status` sai `unavailable`.
-Nenhum prazo e derivado de `date_ready_to_ship`, de `date_created` nem de SLA
-fixo: inventar prazo produziria "vencido" onde o marketplace nunca prometeu
-nada, e a Torre perderia o direito de ser acreditada. Idade, faixa de 48h e
-sinal de `stalled` continuam disponiveis porque dependem so' do relogio.
+Motivo achado em 03/11/2026: o ML descontinuou `estimated_handling_limit` em
+13/05/2025. O prazo oficial de despacho so' sai de `GET /shipments/{id}/sla`
+(`expected_date`), que o extrator do Airflow passou a gravar em
+`raw.ml_shipments.sla_expected_date` (EXPEDICAO-ML-PRAZO).
+
+Entao `dispatch_deadline` = esse SLA quando ele existe e foi lido ha' menos
+de `ML_SLA_MAX_AGE`; senao NULO e `deadline_status` = `unavailable`, como
+antes. Nenhum prazo e derivado de `date_ready_to_ship`, de `date_created` nem
+de SLA fixo: inventar prazo produziria "vencido" onde o marketplace nunca
+prometeu nada, e a Torre perderia o direito de ser acreditada. Idade, faixa de
+48h e sinal de `stalled` continuam disponiveis porque dependem so' do relogio.
 
 POR QUE HA UMA COORTE DE CONFIABILIDADE
 ---------------------------------------
@@ -76,6 +82,8 @@ ML_SELECT_COLUMNS = (
     "date_cancelled",
     "tracking_method",
     "extracted_at",
+    "sla_expected_date",
+    "sla_extracted_at",
 )
 
 #: Backlog seller-managed dentro da coorte confiavel.
@@ -87,6 +95,14 @@ ML_SELECT_COLUMNS = (
 #: `tracking_method` (a MODALIDADE de rastreio, ex. "Normal") entra;
 #: `tracking_number` NAO entra: e' identificador de remessa rastreavel
 #: publicamente e a API da Torre nao tem autenticacao.
+#:
+#: PRAZO (EXPEDICAO-ML-PRAZO): `sla_expected_date` e `sla_extracted_at` sao
+#: lidos por `to_jsonb(s) ->> '...'`, nao por `s.sla_...`. Assim o MESMO SELECT
+#: roda antes e depois de o Airflow criar as colunas: coluna ausente vira NULL
+#: (envio sem prazo, como sempre foi) em vez de derrubar a publicacao. O valor
+#: chega como TEXTO ISO 8601; `transform.prazo_sla_ml` exige o fuso explicito
+#: e falha FECHADO se a coluna vier naive. Nenhuma coluna de comprador sai: o
+#: `->>` projeta so' a chave pedida.
 ML_BACKLOG_SQL = """
 SELECT
     o.seller_id                AS seller_id,
@@ -103,7 +119,9 @@ SELECT
     s.date_shipped             AS date_shipped,
     s.date_cancelled           AS date_cancelled,
     s.tracking_method          AS tracking_method,
-    s.extracted_at             AS extracted_at
+    s.extracted_at             AS extracted_at,
+    to_jsonb(s) ->> 'sla_expected_date' AS sla_expected_date,
+    to_jsonb(s) ->> 'sla_extracted_at'  AS sla_extracted_at
 FROM raw.ml_shipments s
 JOIN raw.ml_orders o
   ON o.brand = s.brand AND o.order_id = s.order_id
