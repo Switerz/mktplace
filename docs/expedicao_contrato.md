@@ -1633,7 +1633,7 @@ O TikTok usa o modo completo e não muda.
 
 | Estado | Mostra |
 |---|---|
-| etapa real (inclusive UMA, = base) | painel "Agora — fila aberta" com as etapas (`x% · n de base`) e as `limitacoes`, sem sobreposições |
+| etapa real (inclusive UMA, = base) | painel "Pedidos aguardando expedição" com as etapas (`n · x%`) e as `limitacoes`, sem sobreposições |
 | parcial (`etapa_parcial`) | o mesmo painel com a linha "Etapa ainda não publicada" e o motivo traduzido **uma vez** (aviso "Parcial" do topo) |
 | sem etapa real, base > 0 (coluna ausente ou tudo `nao_publicada`) | linha discreta `role="status"`, sem número: "Etapas da fila ainda não publicadas neste canal." |
 | base 0 | "Nenhum pedido nesta leitura." (vazio prevalece sobre "não publicadas") |

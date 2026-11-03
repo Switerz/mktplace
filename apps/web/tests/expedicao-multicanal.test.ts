@@ -1101,14 +1101,14 @@ test("T-0029 compacta: coluna ausente -> linha 'não publicadas', SEM numero e s
   assert.ok(ml.includes(SEM_ETAPA), ml);
   assert.match(ml, /<p role="status"[^>]*data-testid="exp-jornada-fila-sem-etapa"/);
   assert.doesNotMatch(ml, /%/, "nem barra nem percentual");
-  assert.doesNotMatch(ml, /Aguardando expedição|10 de 10|Agora — fila aberta|tc-barra/);
+  assert.doesNotMatch(ml, /Aguardando expedição|10 de 10|Pedidos aguardando expedição|tc-barra/);
   assert.doesNotMatch(ml, /role="alert"/);
   // Shopee com coorte: a linha + a coorte; a fila nao repete o "Risco atual".
   const corpo = ficticiaT0021("/api/v1/expedicao/jornada?channel=shopee", "ok")!.corpo;
   const sh = renderCompacto({ http: 200, json: corpo }, "shopee");
   assert.ok(sh.includes(SEM_ETAPA), sh);
-  assert.match(sh, /Coorte — pedidos com vencimento/);
-  assert.doesNotMatch(sh, /Aguardando expedição|pedidos pagos aguardando expedição|Agora — fila aberta/);
+  assert.match(sh, /Pedidos com vencimento/);
+  assert.doesNotMatch(sh, /Aguardando expedição|Pedidos aguardando expedição|agora, por etapa/);
   assert.doesNotMatch(sh, /data-sobreposicao="vencido"/);
 });
 
@@ -1117,9 +1117,10 @@ test("T-0029 compacta: UMA etapa real (= base) aparece com 100%", () => {
     { http: 200, json: jornadaMlComEtapas([{ key: "aguardando_coleta", label: "Aguardando coleta", count: 120 }]) },
     "mercadolivre",
   );
-  assert.match(html, /Agora — fila aberta/);
+  assert.match(html, /Pedidos aguardando expedição/);
   assert.match(html, />Aguardando coleta<\/span>/);
-  assert.match(html, /100,0% · 120 de 120/);
+  // Formato da main (EXPEDICAO-PERTO-DE-VENCER): "120 · 100,0%", sem "de 120".
+  assert.match(html, />120<\/span> · 100,0%/);
   assert.doesNotMatch(html, /ainda não publicadas neste canal/);
   assert.doesNotMatch(html, /data-sobreposicao/, "compacta sem sobreposicoes");
 });
@@ -1191,7 +1192,7 @@ test("T-0029 compacta: fila nula com motivo + coorte -> linha de indisponivel ao
   );
   assert.match(html, /data-testid="exp-jornada-fila-indisponivel"/);
   assert.match(html, /Fila por etapa indisponível agora: nenhuma fotografia publicada ainda\./);
-  assert.match(html, /Coorte — pedidos com vencimento/);
+  assert.match(html, /Pedidos com vencimento/);
   assert.doesNotMatch(html, /no_snapshot_published|ainda não publicadas neste canal/);
   assert.doesNotMatch(html, /Fila por etapa[^<]*\b0\b/, "nunca zero");
 });
@@ -1202,6 +1203,6 @@ test("T-0029: o TikTok segue no modo completo (sem `compacta`)", () => {
   assert.ok(uso, "o painel do TikTok usa a Jornada");
   assert.doesNotMatch(uso, /compacta/);
   const html = render(200, jornadaTikTok(), "tiktok");
-  assert.match(html, /Agora — fila aberta<\/h3>[\s\S]*Indisponível neste canal: o TikTok não publica fila aberta/);
+  assert.match(html, /Pedidos aguardando expedição<\/h3>[\s\S]*Indisponível neste canal: o TikTok não publica fila aberta/);
   assert.doesNotMatch(html, /ainda não publicadas neste canal|Fila por etapa indisponível/);
 });
