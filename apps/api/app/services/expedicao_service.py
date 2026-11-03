@@ -280,6 +280,11 @@ def prazo_publicado(canal: Canal, resumos: list[dict]) -> bool:
     """
     if canal.publica_prazo:
         return True
+    # TRAVA (03/11/2026): a fotografia do ML pode ter SLA, mas a classificacao
+    # atual marca como vencido o envio ja' coletado. Sem a flag, o ML segue
+    # sem prazo na tela — a ausencia, nunca um vencido falso.
+    if not bool(getattr(settings, "expedicao_ml_prazo_enabled", False)):
+        return False
     return any(int(r.get("deadline_unavailable_count") or 0)
                < int(r.get("backlog_count") or 0) for r in resumos)
 

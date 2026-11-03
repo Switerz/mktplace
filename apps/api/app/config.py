@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     #: flag geral para que ligar a Expedicao nao exponha o ML sem
     #: querer, e para que adiar o ML nao exija derrubar a Shopee.
     expedicao_ml_api_enabled: bool = Field(default=False)
+    #: Prazo do Mercado Livre (SLA oficial) na Expedicao (EXPEDICAO-ML-PRAZO).
+    #: DESLIGADO por padrao: medido em 03/11/2026, o SLA do Mercado Coleta e'
+    #: o horario da coleta, e o envio segue `ready_to_ship` por horas depois de
+    #: coletado — 199 de 200 "vencidos pelo relogio" ja' estavam `picked_up` e
+    #: o proprio ML os dava como `on_time`. Ligar so' depois de a classificacao
+    #: do pipeline tratar coletado e o veredito do ML.
+    expedicao_ml_prazo_enabled: bool = Field(default=False)
     #: LDR operacional da Shopee (EXPEDICAO-SHOPEE-LDR-1). Exige tambem a flag
     #: geral: com qualquer uma das duas off, a rota `/expedicao/shopee/ldr`
     #: devolve `unavailable/disabled` sem consultar. Nasceu desligada; LIGADA
