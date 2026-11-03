@@ -197,6 +197,25 @@ export function coberturaDaEvolucao(r: RespostaTendencia | null): CoberturaEvolu
   };
 }
 
+/** Diferenca a partir da qual a hora da conta vira texto na tabela. */
+const FOLGA_HORA_DA_CONTA_MS = 5 * 60 * 1000;
+
+/**
+ * EXPEDICAO-KOKESHI-EXPORT — "03/11 11:20" quando a conta foi atualizada em
+ * outra hora que a do topo da tela (a carga do export do Seller Centre); `null`
+ * quando e' a mesma fotografia. O topo continua com uma "Ultima atualizacao" so'.
+ */
+export function horaPropriaDaConta(
+  observadaEm: string | null | undefined,
+  topoEm: string | null | undefined,
+): string | null {
+  if (!observadaEm || !topoEm) return null;
+  const a = new Date(observadaEm).getTime();
+  const b = new Date(topoEm).getTime();
+  if (Number.isNaN(a) || Number.isNaN(b) || Math.abs(a - b) < FOLGA_HORA_DA_CONTA_MS) return null;
+  return formatarHoraBrt(observadaEm, false);
+}
+
 /** Data e hora de Brasilia, sempre — o servidor e o navegador podem estar em outro fuso. */
 export function formatarHoraBrt(iso: string, comAno = true): string {
   const d = new Date(iso);

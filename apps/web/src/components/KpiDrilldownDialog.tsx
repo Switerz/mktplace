@@ -20,6 +20,12 @@ interface KpiDrilldownDialogProps {
    * passa a prop mantem exatamente o comportamento anterior.
    */
   focusResetKey?: string;
+  /**
+   * `larga` para conteudo tabular (ex.: lista de pedidos travados), que no
+   * padrao estreito so' caberia com rolagem lateral. Opcional: sem a prop,
+   * nada muda.
+   */
+  largura?: "padrao" | "larga";
 }
 
 /**
@@ -29,7 +35,7 @@ interface KpiDrilldownDialogProps {
  * de `#app-shell-root`, para que o `inert` aplicado ao shell enquanto aberto
  * nunca alcance o proprio dialogo (ver comentario em AppShell.tsx).
  */
-export default function KpiDrilldownDialog({ open, onClose, title, children, focusResetKey }: KpiDrilldownDialogProps) {
+export default function KpiDrilldownDialog({ open, onClose, title, children, focusResetKey, largura = "padrao" }: KpiDrilldownDialogProps) {
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -131,7 +137,7 @@ export default function KpiDrilldownDialog({ open, onClose, title, children, foc
           role="dialog"
           aria-modal="true"
           aria-labelledby={titleId}
-          className="relative bg-surface w-full sm:max-w-lg sm:rounded-2xl shadow-xl h-[92vh] sm:h-auto sm:max-h-[85vh] flex flex-col overflow-hidden animate-[tc-sobe_320ms_var(--mov-ease)]"
+          className={`relative bg-surface w-full ${largura === "larga" ? "sm:max-w-4xl" : "sm:max-w-lg"} sm:rounded-2xl shadow-xl h-[92vh] sm:h-auto sm:max-h-[85vh] flex flex-col overflow-hidden animate-[tc-sobe_320ms_var(--mov-ease)]`}
         >
           <div className="flex items-center justify-between gap-4 px-5 py-4 border-b border-line shrink-0">
             <h2 id={titleId} className="text-sm font-bold text-ink">{title}</h2>

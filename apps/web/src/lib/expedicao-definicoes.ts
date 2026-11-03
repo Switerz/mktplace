@@ -8,8 +8,9 @@
  * Regras que o texto respeita (e que os testes travam):
  *   - a LDR da Shopee e' indicador operacional INTERNO, nao o indice oficial
  *     de Account Health da Shopee;
- *   - o Mercado Livre nao publica prazo de despacho: nao ha SLA nem LDR, e o
- *     `?` diz isso em vez de inventar numero;
+ *   - o prazo do Mercado Livre e' o SLA oficial do envio (EXPEDICAO-ML-PRAZO);
+ *     sem ele na fotografia nao ha prazo nem LDR, e o `?` diz isso em vez de
+ *     inventar numero;
  *   - "acima de 48 h" e' limiar interno da Torre, nunca SLA do marketplace.
  *
  * Revisao T-0010: cada entrada declara tambem a ORIGEM do numero, em campo
@@ -70,14 +71,18 @@ const FOTO = "Fotografia atual: pedidos em aberto no instante da publicação.";
 const COB_SHOPEE = "Contas Shopee cadastradas; pedidos FBS incluídos quando a divisão não está publicada.";
 const COB_ML = "Contas do Mercado Livre cadastradas; envios Full (fulfillment) ficam fora.";
 const SEM_PRAZO_ML =
-  "O Mercado Livre não publica prazo de despacho: não há SLA nem LDR a medir. A tela não inventa esse número.";
+  "O Mercado Livre não publica prazo de despacho nesta fotografia: não há SLA nem LDR a medir. A tela não inventa esse número.";
+/** EXPEDICAO-ML-PRAZO: de onde vem o prazo do ML e quando ele existe. */
+const PRAZO_ML =
+  "Prazo oficial do Mercado Livre: o SLA de despacho do envio (na coleta, o horário agendado). Só aparece quando a fotografia traz o SLA; sem ele, fica indisponível.";
 /** O 4% e' da plataforma; a medicao comparada com ele e' da Torre. */
 const REF_META_TIKTOK =
   "Meta de 4% publicada pelo TikTok Shop: só a linha de comparação, não a fonte do número (a plataforma mede com o próprio relógio e denominador).";
 
 /** Os KPIs da fila (`montarKpis`), um `?` por canal. */
 export const KPIS_DA_FILA = [
-  "backlog", "overdue", "due24h", "sem_prazo", "over48h", "stalled", "slow", "zombie", "marcas_alerta",
+  "backlog", "overdue", "due_soon", "due24h", "due_next_day", "sem_prazo", "over48h", "stalled", "slow",
+  "zombie", "marcas_alerta",
 ] as const;
 type KpiDaFila = (typeof KPIS_DA_FILA)[number];
 
@@ -97,29 +102,26 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
           curto: "desde que o envio ficou pronto para despacho",
           regra: "envio pronto para despacho (date_ready_to_ship; a criação do pedido, se faltar)",
         };
-  const prazo = (nome: string, definicao: string, formula: string): DefinicaoMetrica =>
-    canal === "shopee"
-      ? {
-          nome,
-          // O prazo (ship_by_date) e' da Shopee; a contagem e' da Torre.
-          origem: "torre",
-          definicao,
-          formula,
-          fonte,
-          janela: FOTO,
-          cobertura,
-          limitacoes: "Prazo da Shopee (ship_by_date); pedido sem prazo publicado fica em “Sem prazo”.",
-        }
-      : {
-          nome,
-          origem: "indisponivel",
-          definicao: "Não medido neste canal.",
-          formula: "Não se aplica.",
-          fonte,
-          janela: FOTO,
-          cobertura,
-          limitacoes: SEM_PRAZO_ML,
-        };
+  // O prazo e' do marketplace; a contagem e' da Torre. Shopee: `ship_by_date`.
+  // Mercado Livre (EXPEDICAO-ML-PRAZO): o SLA oficial do envio, quando a
+  // fotografia o traz — cada canal com a SUA frase, nunca a da Shopee.
+  const prazo = (
+    nome: string,
+    shopee: readonly [definicao: string, formula: string],
+    ml: readonly [definicao: string, formula: string],
+  ): DefinicaoMetrica => {
+    const [definicao, formula] = canal === "shopee" ? shopee : ml;
+    return {
+      nome,
+      origem: "torre",
+      definicao,
+      formula,
+      fonte,
+      janela: FOTO,
+      cobertura,
+      limitacoes: canal === "shopee" ? "Prazo oficial da Shopee (ship_by_date)." : PRAZO_ML,
+    };
+  };
   return {
     [`${canal}.backlog`]: {
       nome: canal === "shopee" ? "Backlog total" : "Backlog total (envios)",
@@ -129,60 +131,111 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
       fonte,
       janela: FOTO,
       cobertura,
-      limitacoes:
-        canal === "shopee"
-          ? "Não separa a etapa interna (a preparar × envio organizado)."
-          : "Não publica o substatus do envio.",
+      // EXPEDICAO-DICA-LEGIVEL: a etapa ja' e' publicada (T-0015).
+      limitacoes: `A etapa de cada ${grao === "pedido" ? "pedido" : "envio"} está na Jornada.`,
     },
+    // EXPEDICAO-DICA-LEGIVEL: uma frase que responde "o que entra aqui"; a
+    // ressalva vai separada, embaixo, no balao.
     [`${canal}.overdue`]: prazo(
       "Vencidos",
-      "Pedidos em aberto que já passaram do prazo de envio da Shopee.",
-      "Contagem de pedidos com ship_by_date anterior ao instante da fotografia.",
+      [
+        "Pedidos que passaram do prazo de envio da Shopee e ainda não foram coletados.",
+        "Contagem de pedidos com ship_by_date anterior ao instante da fotografia.",
+      ],
+      [
+        "Envios que passaram do prazo de despacho do Mercado Livre e ainda não saíram.",
+        "Contagem de envios com prazo do SLA anterior ao instante da fotografia.",
+      ],
     ),
+    // EXPEDICAO-PERTO-DE-VENCER: a prioridade depois dos vencidos.
+    [`${canal}.due_soon`]: {
+      ...prazo(
+        "Perto de vencer",
+        [
+          "Vencem hoje até as 23:59 ou no próximo dia de prazo (amanhã; na sexta, o próximo dia útil).",
+          "Pedidos não vencidos com ship_by_date (dia de Brasília) entre hoje e o próximo dia de prazo.",
+        ],
+        [
+          "Vencem hoje (até 23:59) ou no próximo dia com prazo, e ainda não venceram.",
+          "Envios não vencidos com prazo do SLA (dia de Brasília) entre hoje e o próximo dia com prazo.",
+        ],
+      ),
+      ...(canal === "shopee" ? { limitacoes: "Não inclui os vencidos. Inclui pedidos FBS." } : {}),
+    },
+    // EXPEDICAO-VENCE-AMANHA: o prazo da Shopee vence sempre as 23:59, entao
+    // a janela de 24 h so' alcanca o dia de hoje — o "ⓘ" diz isso.
     [`${canal}.due24h`]: prazo(
       "Vence em 24 h",
-      "Pedidos em aberto cujo prazo de envio vence nas próximas 24 h.",
-      "Contagem de pedidos com ship_by_date entre agora e agora + 24 h.",
+      [
+        "Vencem nas próximas 24 h. Como todo prazo da Shopee é às 23:59, na prática são os que vencem hoje.",
+        "Contagem de pedidos com ship_by_date entre agora e agora + 24 h.",
+      ],
+      [
+        "Vencem nas próximas 24 h, pelo horário do SLA de cada envio.",
+        "Contagem de envios com prazo do SLA entre agora e agora + 24 h.",
+      ],
     ),
+    [`${canal}.due_next_day`]: {
+      ...prazo(
+        "Vence no próximo dia de prazo",
+        [
+          "Vencem no próximo dia de prazo: amanhã, ou o próximo dia útil na sexta e em véspera de feriado.",
+          "Contagem de pedidos com ship_by_date (dia de Brasília) no primeiro dia de prazo depois do dia da fotografia.",
+        ],
+        [
+          "Vencem no próximo dia com prazo depois de hoje.",
+          "Contagem de envios com prazo do SLA (dia de Brasília) no primeiro dia com prazo depois do dia da fotografia.",
+        ],
+      ),
+      ...(canal === "shopee" ? { limitacoes: "Já contados em “No prazo”. Inclui pedidos FBS." } : {}),
+    },
     [`${canal}.sem_prazo`]: {
       nome: "Sem prazo publicado",
       origem: "torre",
-      definicao: "Envios sem prazo de despacho na fonte.",
+      definicao:
+        canal === "shopee"
+          ? "Pedidos sem prazo de envio publicado pela Shopee."
+          : "Envios sem o SLA de despacho do Mercado Livre na fotografia.",
       formula: "Contagem de envios sem prazo publicado.",
       fonte,
       janela: FOTO,
       cobertura,
-      limitacoes: canal === "shopee" ? "Pedido sem ship_by_date na fonte." : SEM_PRAZO_ML,
+      limitacoes:
+        canal === "shopee"
+          ? "Ficam fora de vencidos e de no prazo."
+          : "Ficam fora de vencidos e de no prazo. Sem SLA em nenhum envio, é o backlog inteiro.",
     },
     [`${canal}.over48h`]: {
       nome: "Acima de 48 h",
       origem: "torre",
-      definicao: `Abertos há mais de 48 h ${marco.curto}.`,
+      definicao: `${grao === "pedido" ? "Pedidos" : "Envios"} em aberto há mais de 48 h ${marco.curto}${
+        grao === "pedido" ? ", vencidos ou não" : ""
+      }.`,
       formula: `Contagem com horas em aberto > 48, contadas a partir do ${marco.regra}.`,
       fonte,
       janela: FOTO,
       cobertura,
-      limitacoes: "Limiar interno da Torre, não é SLA do marketplace.",
+      limitacoes: "Mede a idade, não o prazo. Limite interno da Torre, não é SLA do marketplace.",
     },
     [`${canal}.stalled`]: {
       nome: "Travados",
       origem: "torre",
-      definicao: "Lentos ou zumbis, sem contar o mesmo pedido duas vezes.",
+      definicao: "Pedidos parados: mais lentos que o normal da conta ou abertos há mais de 30 dias.",
       formula: "União de lentos e zumbis (nunca a soma).",
       fonte,
       janela: FOTO,
       cobertura,
-      limitacoes: "Classificação do pipeline; a tela não recalcula.",
+      limitacoes: "Cada pedido conta uma vez, mesmo nos dois casos.",
     },
     [`${canal}.slow`]: {
       nome: "Lentos vs baseline",
       origem: "torre",
-      definicao: "Abertos há mais tempo que o histórico da própria conta.",
+      definicao: "Abertos há mais tempo que o normal da própria conta.",
       formula: "Horas em aberto acima da linha de base da conta.",
       fonte,
       janela: FOTO,
       cobertura,
-      limitacoes: "A linha de base é do pipeline; conta nova tem histórico curto.",
+      limitacoes: "Conta nova tem pouco histórico para comparar.",
     },
     [`${canal}.zombie`]: {
       nome: "Zumbis",
@@ -194,7 +247,7 @@ function fila<C extends "shopee" | "mercadolivre">(canal: C): Record<`${C}.${Kpi
       fonte,
       janela: FOTO,
       cobertura,
-      limitacoes: `Mede só a idade: não verifica se o ${grao} mudou na fonte. Pode ser item esquecido na operação ou status não atualizado na fonte; a tela não distingue.`,
+      limitacoes: `Mede só a idade: pode ser ${grao === "pedido" ? "pedido" : "envio"} esquecido ou status desatualizado na fonte.`,
     },
     [`${canal}.marcas_alerta`]: {
       nome: "Marcas com fonte em alerta",
@@ -222,6 +275,17 @@ export const DEFINICOES = {
     janela: FOTO,
     cobertura: COB_SHOPEE,
     limitacoes: "Não é LDR: a fotografia só tem pedidos em aberto, não os já enviados.",
+  },
+  "shopee.no_prazo": {
+    nome: "No prazo",
+    origem: "torre",
+    // EXPEDICAO-PERTO-DE-VENCER: "no prazo" e' o que sobra depois de "perto".
+    definicao: "Vencem depois do próximo dia de prazo.",
+    formula: "Backlog − vencidos − perto de vencer − sem prazo.",
+    fonte: FILA_SHOPEE,
+    janela: FOTO,
+    cobertura: COB_SHOPEE,
+    limitacoes: "Sem a medida de “perto de vencer”, vale a faixa do pipeline (depois de 24 h).",
   },
   "shopee.fbs": {
     nome: "Pedidos FBS",
@@ -273,10 +337,31 @@ export const DEFINICOES = {
     cobertura: "Pagos do vendedor, sem FBS.",
     limitacoes: "Ainda dá para tratar: não entra na taxa.",
   },
+  // EXPEDICAO-ML-PRAZO: as mesmas duas leituras da Shopee, com o SLA do ML.
+  "mercadolivre.prazo_situacao": {
+    nome: "Envios em fila por situação de prazo",
+    origem: "torre",
+    definicao: "Divide a fila aberta em vencidos, perto de vencer, no prazo e sem prazo.",
+    formula: "Partição da fila: as quatro faixas somam o backlog.",
+    fonte: FILA_ML,
+    janela: FOTO,
+    cobertura: COB_ML,
+    limitacoes: "Não é LDR: a fotografia só tem envios em aberto. " + PRAZO_ML,
+  },
+  "mercadolivre.no_prazo": {
+    nome: "No prazo",
+    origem: "torre",
+    definicao: "Vencem depois do próximo dia com prazo.",
+    formula: "Backlog − vencidos − perto de vencer − sem prazo.",
+    fonte: FILA_ML,
+    janela: FOTO,
+    cobertura: COB_ML,
+    limitacoes: PRAZO_ML,
+  },
   "mercadolivre.prazo": {
     nome: "Prazo e LDR no Mercado Livre",
     origem: "indisponivel",
-    definicao: "Não medido: o canal não publica prazo de despacho.",
+    definicao: "Não medido: o canal não publica prazo de despacho nesta fotografia.",
     formula: "Não se aplica.",
     fonte: FILA_ML,
     janela: FOTO,
@@ -377,7 +462,7 @@ export const DEFINICOES = {
     limitacoes: "Não é a LDR: o denominador é outro. Um feriado empurra vários dias de pagamento para o mesmo vencimento.",
   },
   "jornada.fila_aberta": {
-    nome: "Jornada — fila aberta",
+    nome: "Pedidos aguardando expedição",
     origem: "torre",
     definicao: "Pedidos pagos ainda não expedidos, divididos pela etapa em que estão agora.",
     formula: "Contagem por etapa ÷ total da fila aberta (as etapas somam o total).",
@@ -387,7 +472,7 @@ export const DEFINICOES = {
     limitacoes: "A etapa interna (a preparar × envio organizado; substatus no ML) ainda não é publicada. Sobreposições como vencidos são subconjuntos e não se somam.",
   },
   "jornada.coorte": {
-    nome: "Jornada — coorte",
+    nome: "Pedidos dos últimos dias",
     origem: "torre",
     definicao: "Pedidos de uma janela de dias fechados, pela etapa em que terminaram.",
     formula: "Contagem por etapa ÷ base da coorte (as etapas somam a base).",
@@ -428,13 +513,16 @@ export const AJUDA_CANAL_SEM_PRAZO = {
 /** As metricas exibidas em cada canal — o teste cobre o catalogo com isto. */
 export const METRICAS_POR_CANAL: Record<"shopee" | "mercadolivre" | "tiktokshop", readonly ChaveMetrica[]> = {
   shopee: [
-    "shopee.backlog", "shopee.overdue", "shopee.due24h", "shopee.over48h", "shopee.stalled",
+    "shopee.backlog", "shopee.overdue", "shopee.due_soon", "shopee.due24h", "shopee.due_next_day", "shopee.no_prazo",
+    "shopee.sem_prazo", "shopee.over48h", "shopee.stalled",
     "shopee.slow", "shopee.zombie", "shopee.marcas_alerta", "shopee.prazo_situacao",
     "shopee.fbs", "shopee.ldr", "shopee.ldr_base", "shopee.ldr_atrasados", "shopee.ldr_em_risco",
     "jornada.fila_aberta", "jornada.coorte",
   ],
   mercadolivre: [
-    "mercadolivre.backlog", "mercadolivre.overdue", "mercadolivre.due24h", "mercadolivre.sem_prazo",
+    "mercadolivre.backlog", "mercadolivre.overdue", "mercadolivre.due_soon", "mercadolivre.due24h",
+    "mercadolivre.due_next_day", "mercadolivre.no_prazo", "mercadolivre.sem_prazo",
+    "mercadolivre.prazo_situacao",
     "mercadolivre.over48h", "mercadolivre.stalled", "mercadolivre.slow", "mercadolivre.zombie",
     "mercadolivre.marcas_alerta", "mercadolivre.prazo", "mercadolivre.mais_antigo",
     "jornada.fila_aberta",

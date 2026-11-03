@@ -9,6 +9,9 @@
  *
  * A legenda diz qual referencia cada traco usa — misturar meta e periodo
  * anterior sem dizer seria ler um como o outro.
+ *
+ * Marca com meta (METAS-DIARIAS-1): a barra so' soma os canais que tem meta,
+ * para barra e traco medirem a mesma coisa (TikTok sem meta fica fora).
  */
 import Link from "next/link";
 
@@ -16,49 +19,69 @@ import type { BrandRow } from "@/lib/api-client";
 import type { Marketplace } from "@/lib/mock-data";
 import { CHANNEL_DOT as PONTO } from "@/lib/gerencial/channel-colors";
 import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
-import type { ProgressoMeta, StatusMeta } from "@/lib/gerencial/meta-progress";
+import { GMV_DO_CANAL, type StatusMeta } from "@/lib/gerencial/meta-progress";
+import type { StatusDia } from "@/lib/metas-curva";
 import { MARCAS, fmtCompacto } from "@/lib/metas";
 import { fmtPctBr } from "@/lib/formatters";
 import InfoDica from "@/components/ui/InfoDica";
 
-const CHIP: Record<StatusMeta, string> = {
+const CHIP: Record<StatusMeta | StatusDia, string> = {
   atingida: "bg-ok-soft text-ok-ink",
   no_caminho: "bg-ok-soft text-ok-ink",
   atencao: "bg-warn-soft text-warn-ink",
   abaixo: "bg-crit-soft text-crit-ink",
   nao_atingida: "bg-crit-soft text-crit-ink",
+  // Dia em andamento: o atingimento parcial ainda nao e' bom nem ruim.
+  em_andamento: "bg-raised text-ink-muted",
 };
 
-const GMV_DO_CANAL: Record<Marketplace, keyof BrandRow> = {
-  tiktok: "tiktok_gmv",
-  ml: "ml_gmv",
-  shopee: "shopee_gmv",
-};
+/** Meta de uma marca no recorte: do mes (com status projetado) ou do dia. */
+export interface MetaDaMarca {
+  meta: number;
+  realizado: number;
+  atingimento: number;
+  status: StatusMeta | StatusDia;
+  /** Canais que entram no realizado (os que tem meta). */
+  canais: Marketplace[];
+}
 
 interface Props {
   brands: BrandRow[];
   channels: Marketplace[];
-  /** Progresso por marca; ausente = marca sem meta no recorte. */
-  progressoPorMarca: Record<string, ProgressoMeta | null>;
+  /** Meta por marca; ausente = marca sem meta no recorte. */
+  progressoPorMarca: Record<string, MetaDaMarca | null>;
+  /** "da meta" ou "da meta do dia", depois do percentual. */
+  rotuloMeta?: string;
   compareActive: boolean;
   loading: boolean;
   error: boolean;
   brandHref: (brand: string) => string;
 }
 
-export default function MarcasMeta({ brands, channels, progressoPorMarca, compareActive, loading, error, brandHref }: Props) {
+export default function MarcasMeta({
+  brands,
+  channels,
+  progressoPorMarca,
+  rotuloMeta = "da meta",
+  compareActive,
+  loading,
+  error,
+  brandHref,
+}: Props) {
   // Marca com meta e sem linha em `/brands` (nada vendido no recorte) entra
   // com tudo zerado: mostrar 0% da meta e' o ponto, nao esconder a marca.
   const semVenda: BrandRow[] = Object.keys(progressoPorMarca)
     .filter((id) => progressoPorMarca[id] && !brands.some((b) => b.brand === id))
     .map((id) => linhaZerada(id));
+  const canaisDa = (b: BrandRow) => progressoPorMarca[b.brand]?.canais ?? channels;
+  const valor = (b: BrandRow) => progressoPorMarca[b.brand]?.realizado ?? b.total_gmv;
   const linhas = [...brands, ...semVenda]
     .filter((b) => b.total_gmv > 0 || progressoPorMarca[b.brand])
-    .sort((a, b) => b.total_gmv - a.total_gmv);
+    .sort((a, b) => valor(b) - valor(a));
   const algumaMeta = linhas.some((b) => progressoPorMarca[b.brand]);
   const referencia = (b: BrandRow) =>
     progressoPorMarca[b.brand]?.meta ?? (compareActive && b.total_gmv_prev > 0 ? b.total_gmv_prev : null);
-  const escala = Math.max(1, ...linhas.map((b) => Math.max(b.total_gmv, referencia(b) ?? 0)));
+  const escala = Math.max(1, ...linhas.map((b) => Math.max(valor(b), referencia(b) ?? 0)));
 
   return (
     <section aria-labelledby="marcas-meta-titulo" className="flex h-full flex-col rounded-xl border border-line bg-surface p-5">
@@ -69,7 +92,11 @@ export default function MarcasMeta({ brands, channels, progressoPorMarca, compar
               Marcas
             </h2>
             <InfoDica
-              texto={`GMV no período. Traço = ${algumaMeta ? "meta da marca (ou período anterior, sem meta)" : "período anterior"}.`}
+              texto={
+                algumaMeta
+                  ? "GMV no período; com meta, só os canais que têm meta. Traço = meta da marca (ou período anterior, sem meta)."
+                  : "GMV no período. Traço = período anterior."
+              }
             />
           </div>
         </div>
@@ -110,10 +137,10 @@ export default function MarcasMeta({ brands, channels, progressoPorMarca, compar
                   <span className="relative h-2.5 rounded-full bg-raised" aria-hidden="true">
                     <span
                       className="tc-barra absolute inset-y-0 left-0 flex overflow-hidden rounded-full"
-                      style={{ width: `${(b.total_gmv / escala) * 100}%` }}
+                      style={{ width: `${(valor(b) / escala) * 100}%` }}
                     >
-                      {channels.map((c) => {
-                        const v = (b[GMV_DO_CANAL[c]] as number | null) ?? 0;
+                      {channels.filter((c) => canaisDa(b).includes(c)).map((c) => {
+                        const v = b[GMV_DO_CANAL[c]] ?? 0;
                         return v > 0 ? <span key={c} className={PONTO[c]} style={{ flex: v }} /> : null;
                       })}
                     </span>
@@ -122,10 +149,10 @@ export default function MarcasMeta({ brands, channels, progressoPorMarca, compar
                     )}
                   </span>
                   <span className="flex flex-col items-end text-right tabular-nums">
-                    <span className="text-sm font-semibold text-ink">{fmtCompacto(b.total_gmv)}</span>
+                    <span className="text-sm font-semibold text-ink">{fmtCompacto(valor(b))}</span>
                     {p ? (
                       <span className={`rounded px-1.5 text-xs font-semibold ${CHIP[p.status]}`}>
-                        {Math.round(p.atingimento * 100)}% da meta
+                        {Math.round(p.atingimento * 100)}% {rotuloMeta}
                       </span>
                     ) : compareActive && b.mom_pct != null ? (
                       <span className={`text-xs font-semibold ${b.mom_pct >= 0 ? "text-ok-ink" : "text-crit-ink"}`}>

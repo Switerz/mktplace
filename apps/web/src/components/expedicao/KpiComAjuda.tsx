@@ -3,9 +3,9 @@
 /**
  * T-0010 — o `KpiTile` da Expedicao com o "ⓘ" da metrica.
  *
- * O `KpiTile` (ui) nao e' editado: o "ⓘ" entra no fim da linha de comparacao,
- * que e' `ReactNode`. Assim ele acompanha o texto (nao cobre rotulo nem o
- * ponto de severidade) e funciona igual com ou sem comparacao.
+ * EXPEDICAO-VENCE-AMANHA: o "ⓘ" sai do fim da linha de comparacao e vai para
+ * o lado do rotulo, como no destaque de vencidos. No rodape ele ficava solto
+ * (cartao sem comparacao) e longe do nome que explica.
  */
 import type { ComponentProps } from "react";
 
@@ -20,25 +20,9 @@ export { AjudaMetrica as Ajuda };
 
 export function KpiComAjuda({
   ajuda,
-  comparacao,
   ...props
-}: ComponentProps<typeof KpiTile> & { ajuda: ChaveMetrica | null }) {
-  return (
-    <KpiTile
-      {...props}
-      comparacao={
-        ajuda ? (
-          <>
-            {comparacao}
-            {comparacao ? " " : null}
-            <AjudaMetrica chave={ajuda} />
-          </>
-        ) : (
-          comparacao
-        )
-      }
-    />
-  );
+}: Omit<ComponentProps<typeof KpiTile>, "ajuda"> & { ajuda: ChaveMetrica | null }) {
+  return <KpiTile {...props} ajuda={ajuda ? <AjudaMetrica chave={ajuda} /> : undefined} />;
 }
 
 export default KpiComAjuda;

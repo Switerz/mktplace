@@ -26,7 +26,8 @@ e e apenas o OR das duas anomalias.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timedelta, timezone
 
 from pipelines.expedicao.contract import (
     DUE_SOON_WINDOW,
@@ -34,6 +35,8 @@ from pipelines.expedicao.contract import (
     FRESHNESS_STALE_LIMIT,
     MIN_BASELINE_SAMPLE,
     ML_BUSINESS_UTC_OFFSET,
+    ML_SLA_MAX_AGE,
+    ML_SLA_STATUS_ATRASADO,
     OPERATIONAL_AGE_LIMIT,
     SLOW_BASELINE_FACTOR,
     SOURCE_ZOMBIE_AGE,
@@ -340,6 +343,106 @@ def normalizar_negocio_ml(bruto: datetime | None) -> datetime | None:
     return (bruto - ML_BUSINESS_UTC_OFFSET).replace(tzinfo=timezone.utc)
 
 
+#: ISO 8601 COM fuso, como o Postgres serializa `timestamptz` em jsonb
+#: (`2026-11-03T14:00:00-03:00`, `2026-11-03T17:00:00.123+00:00`). Sem o
+#: grupo do fuso nao casa — de proposito.
+_ISO_COM_FUSO = re.compile(
+    r"^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?([+-]\d{2})(?::?(\d{2}))?$"
+)
+
+
+def instante_iso_com_fuso(texto: str | None, coluna: str) -> datetime | None:
+    """Texto ISO 8601 da fonte -> `datetime` aware em UTC. Nulo continua nulo.
+
+    Os `sla_*` chegam como texto (`to_jsonb(s) ->> ...`, ver `ML_BACKLOG_SQL`).
+    Texto SEM fuso falha FECHADO: significa que a coluna foi criada como
+    `timestamp without time zone`, e ler esse horario num fuso suposto e'
+    exatamente o erro de 1 a 4 h que a convencao por coluna existe para
+    impedir. Parser proprio porque `datetime.fromisoformat` so' aceita fracao
+    de segundo com 3 ou 6 digitos antes do Python 3.11.
+    """
+    if texto is None:
+        return None
+    m = _ISO_COM_FUSO.match(str(texto).strip())
+    if m is None:
+        raise ValueError(
+            f"{coluna} sem fuso explicito ({texto!r}). O contrato do SLA do "
+            "Mercado Livre exige `timestamptz`; um valor naive seria lido num "
+            "fuso suposto. A fila NAO e' publicada ate' a coluna ser corrigida."
+        )
+    dia, hora, fracao, off_h, off_m = m.groups()
+    micro = (fracao or "").ljust(6, "0")
+    base = datetime.fromisoformat(f"{dia}T{hora}.{micro}{off_h}:{off_m or '00'}")
+    return base.astimezone(timezone.utc)
+
+
+def prazo_sla_ml(
+    expected_date: str | None,
+    sla_extracted_at: str | None,
+    effective_at: datetime,
+    max_age=ML_SLA_MAX_AGE,
+) -> datetime | None:
+    """Prazo de despacho do envio (SLA oficial do ML) ou `None`.
+
+    So' vale com as duas coisas: o `expected_date` do ML e uma leitura do SLA
+    feita ha' no maximo `max_age`. Leitura ausente conta como velha — sem
+    evidencia de quando o prazo foi lido, ele nao sustenta um "vencido".
+    Nada aqui deriva prazo de outra coluna.
+    """
+    _require_aware(effective_at, "effective_at")
+    prazo = instante_iso_com_fuso(expected_date, "sla_expected_date")
+    if prazo is None:
+        return None
+    lido = instante_iso_com_fuso(sla_extracted_at, "sla_extracted_at")
+    if lido is None or (effective_at - lido) > max_age:
+        return None
+    return prazo
+
+
+#: Dia do prazo em Brasilia. Offset fixo: o Brasil nao tem horario de verao
+#: desde 2019, e `zoneinfo` exige a base de fusos, ausente em parte dos
+#: ambientes onde o pipeline roda.
+_BRT = timezone(timedelta(hours=-3))
+
+
+def classificar_prazo_ml(
+    prazo: datetime | None, sla_status: str | None, effective_at: datetime
+) -> DeadlineStatus:
+    """Situacao do prazo de um envio do ML AINDA COM O VENDEDOR.
+
+    O prazo do Mercado Coleta e' o HORARIO DA COLETA. Passado o horario, o
+    relogio sozinho nao sabe se a transportadora ja' veio; o ML sabe
+    (`sla_status`). Envio coletado nem chega aqui (sai da fila em
+    `ml_extract.classify_candidates`). Regras, nesta ordem:
+
+        sem prazo                                   -> UNAVAILABLE
+        ML diz `delayed`                            -> OVERDUE
+        prazo de DIA ANTERIOR (Brasilia), sem coleta -> OVERDUE
+        horario de HOJE passado, ML sem `delayed`   -> DUE_WITHIN_24H (vence hoje)
+        resto                                       -> `classify_deadline`
+    """
+    _require_aware(effective_at, "effective_at")
+    if prazo is None:
+        return DeadlineStatus.UNAVAILABLE
+    if sla_status == ML_SLA_STATUS_ATRASADO:
+        return DeadlineStatus.OVERDUE
+    if prazo < effective_at:
+        if prazo.astimezone(_BRT).date() < effective_at.astimezone(_BRT).date():
+            return DeadlineStatus.OVERDUE
+        return DeadlineStatus.DUE_WITHIN_24H
+    return classify_deadline(prazo, effective_at)
+
+
+def horas_de_atraso_ml(
+    prazo: datetime | None, situacao: DeadlineStatus, effective_at: datetime
+) -> float | None:
+    """Horas de estouro so' quando vencido; nunca negativo (o ML pode dizer
+    `delayed` antes do horario)."""
+    if situacao is not DeadlineStatus.OVERDUE or prazo is None:
+        return None
+    return max((effective_at - prazo).total_seconds() / 3600.0, 0.0)
+
+
 def build_fila_ml(
     linhas: list[dict],
     registry: dict[str, SellerAccount],
@@ -354,10 +457,11 @@ def build_fila_ml(
        nao `order_id`: 77 pedidos historicos tem mais de um shipment e usar o
        pedido colidiria neles. `(brand, shipment_id)` e UNIQUE na fonte.
 
-    2. NAO HA PRAZO. `dispatch_deadline` sai nulo e `deadline_status` sai
-       `unavailable`. Nada aqui deriva prazo de `date_ready_to_ship`, de
-       `date_created` nem de SLA fixo — o marketplace nao promete despacho no
-       dado que temos, e fabricar a promessa criaria "vencido" imaginario.
+    2. O PRAZO E' O SLA OFICIAL DO ML, OU NADA (EXPEDICAO-ML-PRAZO).
+       `dispatch_deadline` vem de `sla_expected_date` (`prazo_sla_ml`); sem
+       SLA valido sai nulo e `deadline_status` sai `unavailable`. Nada aqui
+       deriva prazo de `date_ready_to_ship`, de `date_created` nem de SLA fixo
+       — fabricar a promessa criaria "vencido" imaginario.
 
     3. O RELOGIO parte de `date_ready_to_ship` (100% preenchido na coorte), que
        e quando a responsabilidade do vendedor comeca. `date_created` inclui o
@@ -384,6 +488,13 @@ def build_fila_ml(
         criado = normalizar_negocio_ml(linha.get("order_created_at"))
         pronto = normalizar_negocio_ml(linha.get("date_ready_to_ship"))
         extraido = normalizar_ingestao_ml(linha.get("extracted_at"))
+        # SLA: `timestamptz` na fonte, texto ISO com fuso aqui. Sem offset
+        # inferido — e' a unica coluna do ML com fuso declarado.
+        prazo = prazo_sla_ml(
+            linha.get("sla_expected_date"), linha.get("sla_extracted_at"),
+            effective_at,
+        )
+        situacao = classificar_prazo_ml(prazo, linha.get("sla_status"), effective_at)
 
         # O marco do ML e' o `date_ready_to_ship`; a criacao do pedido so'
         # sustenta a idade quando o carimbo de prontidao falta.
@@ -409,17 +520,19 @@ def build_fila_ml(
                 # A fonte nao expoe carimbo de pagamento do pedido; `date_closed`
                 # e' fechamento, nao pagamento. Melhor nulo que um proxy errado.
                 "paid_at": None,
-                "dispatch_deadline": None,
-                "deadline_source": DEADLINE_SOURCE_UNAVAILABLE,
-                "deadline_status": DeadlineStatus.UNAVAILABLE.value,
+                "dispatch_deadline": prazo,
+                "deadline_source": (
+                    DEADLINE_SOURCE_NATIVE if prazo is not None
+                    else DEADLINE_SOURCE_UNAVAILABLE
+                ),
+                "deadline_status": situacao.value,
                 "operational_age_status": classify_age(marco, effective_at).value,
                 "is_slow_vs_baseline": False,
                 "is_source_zombie": zumbi,
                 "is_stalled": zumbi,
                 "hours_open": horas_aberto,
-                # Sem prazo nao ha atraso contra prazo. Zero aqui seria mentira
-                # aritmetica: diria "no prazo, sem atraso" onde nao ha prazo.
-                "hours_overdue": None,
+                # Sem prazo nao ha atraso contra prazo: `None`, nunca zero.
+                "hours_overdue": horas_de_atraso_ml(prazo, situacao, effective_at),
                 "logistic_type": linha.get("logistic_type"),
                 # MODALIDADE de rastreio, nao numero de rastreio: o numero e
                 # identificador publicamente rastreavel e a API nao tem auth.

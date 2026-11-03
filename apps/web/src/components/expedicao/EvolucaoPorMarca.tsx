@@ -56,9 +56,35 @@ export interface LinhaDaFila {
   pctTravados?: string | null;
   /** Abre a lista dos pedidos travados da conta. */
   aoVerTravados?: () => void;
+  /** EXPEDICAO-VENCE-AMANHA: "1,0%" dos vencidos sobre o backlog da conta. */
+  pctVencidos?: string | null;
+  /** Abre a lista dos pedidos vencidos da conta. */
+  aoVerVencidos?: () => void;
+  /**
+   * EXPEDICAO-PERTO-DE-VENCER: vencem hoje ate' as 23:59 + no proximo dia de
+   * prazo — o MESMO numero do cartao "Perto de vencer", por conta.
+   * `null`/ausente em todas as linhas (ML, API antiga): a coluna nem existe.
+   */
+  pertoDeVencer?: number | null;
+  pctPertoDeVencer?: string | null;
+  aoVerPertoDeVencer?: () => void;
+  /**
+   * EXPEDICAO-KOKESHI-EXPORT: "03/11 11:20" quando a conta foi atualizada em
+   * outra hora que a do topo (carga do export do Seller Centre).
+   */
+  atualizadaEm?: string | null;
   /** Barra de prazo (ou de distribuicao) desenhada pelo cliente do canal. */
   barra: ReactNode;
 }
+
+/** O "ⓘ" de cada classificacao no cabecalho da tabela, montado pelo canal. */
+export type AjudasDaTabela = Partial<Record<"vencidos" | "pertoDeVencer" | "acima48h" | "travados", ReactNode>>;
+
+/**
+ * EXPEDICAO-TABELA-AMANHA — vencido e' o numero mais importante da tabela:
+ * etiqueta vermelha (so' com valor; zero nao pinta).
+ */
+const ETIQUETA_VENCIDO = "rounded-md bg-crit-soft px-2 py-0.5 font-bold text-crit-ink ring-1 ring-crit/30";
 
 const L = 120;
 const A = 28;
@@ -174,12 +200,23 @@ export default function EvolucaoPorMarca({
   resposta,
   fila,
   rotuloBarra = "Prazo",
+  ajudas = {},
 }: {
   resposta: RespostaTendencia | null;
   fila?: LinhaDaFila[];
   rotuloBarra?: string;
+  ajudas?: AjudasDaTabela;
 }) {
-  if (fila) return <TabelaUnica resposta={resposta} fila={fila} rotuloBarra={rotuloBarra} />;
+  if (fila) {
+    return (
+      <TabelaUnica
+        resposta={resposta}
+        fila={fila}
+        rotuloBarra={rotuloBarra}
+        ajudas={ajudas}
+      />
+    );
+  }
   if (!resposta) return null;
   return <SoTendencia resposta={resposta} />;
 }
@@ -263,14 +300,21 @@ function SoTendencia({ resposta }: { resposta: RespostaTendencia }) {
   );
 }
 
+/** Nome da coluna e, colado nele, o "ⓘ" da classificacao (quando o canal manda). */
+function ComAjuda({ ajuda }: { ajuda?: ReactNode }) {
+  return ajuda ? <span className="ml-1 inline-flex align-middle normal-case">{ajuda}</span> : null;
+}
+
 function TabelaUnica({
   resposta,
   fila,
   rotuloBarra,
+  ajudas,
 }: {
   resposta: RespostaTendencia | null;
   fila: LinhaDaFila[];
   rotuloBarra: string;
+  ajudas: AjudasDaTabela;
 }) {
   const series = resposta ? montarEvolucaoPorMarca(resposta.points) : [];
   const dominioX = dominioHorizontal(series);
@@ -278,6 +322,7 @@ function TabelaUnica({
   const cobertura = cob ? descreverCobertura(cob) : null;
   const periodo = cob ? periodoDaVariacao(cob) : null;
   const comVencidos = fila.some((l) => l.vencidos !== null);
+  const comPerto = fila.some((l) => l.pertoDeVencer != null);
   const naFila = new Set(fila.map((l) => l.conta));
   // A fotografia manda nas linhas; conta so' com tendencia (fora da fila
   // agora) entra no fim, com os numeros do ultimo ponto e sem barra.
@@ -306,9 +351,22 @@ function TabelaUnica({
             <tr className="border-b border-line">
               <th scope="col">Marca</th>
               <th scope="col" className="text-right">Backlog</th>
-              {comVencidos ? <th scope="col" className="text-right">Vencidos</th> : null}
-              <th scope="col" className="text-right">Acima de 48 h</th>
-              <th scope="col" className="text-right">Travados</th>
+              {comVencidos ? (
+                <th scope="col" className="text-right text-crit-ink">
+                  Vencidos<ComAjuda ajuda={ajudas.vencidos} />
+                </th>
+              ) : null}
+              {comPerto ? (
+                <th scope="col" className="text-right">
+                  Perto de vencer<ComAjuda ajuda={ajudas.pertoDeVencer} />
+                </th>
+              ) : null}
+              <th scope="col" className="text-right">
+                Acima de 48 h<ComAjuda ajuda={ajudas.acima48h} />
+              </th>
+              <th scope="col" className="text-right">
+                Travados<ComAjuda ajuda={ajudas.travados} />
+              </th>
               <th scope="col" className="w-[22%]">{rotuloBarra}</th>
               {/* EXPEDICAO-TRAVADOS-1: variacao e linha falam do MESMO periodo,
                   por isso moram na mesma coluna, com o periodo no cabecalho. */}
@@ -339,13 +397,77 @@ function TabelaUnica({
                     {apelido ? (
                       <span className="ml-1.5 text-xs font-normal text-ink-faint">{apelido}</span>
                     ) : null}
+                    {f?.atualizadaEm ? (
+                      <span
+                        className="block text-xs font-normal text-ink-faint"
+                        data-testid="exp-hora-da-conta"
+                      >
+                        atualizada {f.atualizadaEm}
+                      </span>
+                    ) : null}
                   </th>
                   <td className="text-right tabular-nums font-semibold text-ink">
                     {inteiro(f ? f.backlog : (s?.atual ?? 0))}
                   </td>
                   {comVencidos ? (
-                    <td className={`text-right tabular-nums ${f?.vencidos ? "font-semibold text-crit-ink" : "text-ink"}`}>
-                      {f?.vencidos != null ? inteiro(f.vencidos) : "—"}
+                    <td className="whitespace-nowrap text-right tabular-nums text-ink">
+                      {f?.vencidos == null ? (
+                        "—"
+                      ) : f.vencidos === 0 ? (
+                        inteiro(0)
+                      ) : (
+                        // EXPEDICAO-TABELA-AMANHA: etiqueta vermelha; clicavel,
+                        // abre a lista. O % da conta, com o " · " so' para o
+                        // leitor de tela.
+                        <span className="relative">
+                          {f.aoVerVencidos ? (
+                            <button
+                              type="button"
+                              onClick={f.aoVerVencidos}
+                              aria-label={`Ver os ${inteiro(f.vencidos)} pedidos vencidos de ${titulo}`}
+                              className="-my-3 inline-flex min-h-[44px] items-center rounded-md hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-crit"
+                            >
+                              <span className={ETIQUETA_VENCIDO}>{inteiro(f.vencidos)}</span>
+                            </button>
+                          ) : (
+                            <span className={ETIQUETA_VENCIDO}>{inteiro(f.vencidos)}</span>
+                          )}
+                          {f.pctVencidos ? (
+                            <>
+                              <span className="sr-only"> · </span>
+                              <span className="ml-1.5 text-xs font-normal text-ink-faint">{f.pctVencidos}</span>
+                            </>
+                          ) : null}
+                        </span>
+                      )}
+                    </td>
+                  ) : null}
+                  {comPerto ? (
+                    <td className="whitespace-nowrap text-right tabular-nums text-ink">
+                      {f?.pertoDeVencer == null ? (
+                        "—"
+                      ) : (
+                        <span className="relative">
+                          {f.aoVerPertoDeVencer && f.pertoDeVencer > 0 ? (
+                            <button
+                              type="button"
+                              onClick={f.aoVerPertoDeVencer}
+                              aria-label={`Ver os ${inteiro(f.pertoDeVencer)} pedidos de ${titulo} perto de vencer`}
+                              className="-my-3 inline-flex min-h-[44px] items-center font-semibold underline decoration-dotted underline-offset-4 hover:text-accent"
+                            >
+                              {inteiro(f.pertoDeVencer)}
+                            </button>
+                          ) : (
+                            inteiro(f.pertoDeVencer)
+                          )}
+                          {f.pctPertoDeVencer && f.pertoDeVencer > 0 ? (
+                            <>
+                              <span className="sr-only"> · </span>
+                              <span className="ml-1 text-xs font-normal text-ink-faint">{f.pctPertoDeVencer}</span>
+                            </>
+                          ) : null}
+                        </span>
+                      )}
                     </td>
                   ) : null}
                   <td className="text-right tabular-nums text-ink">

@@ -10,6 +10,10 @@
  *
  * O aviso de dado que pode estar distorcendo o total aparece aqui, colado no
  * numero, e nao numa faixa separada no topo: e' aqui que ele muda a leitura.
+ *
+ * METAS-DIARIAS-1: com o periodo num dia so' ("Hoje"), o bloco compara com a
+ * META DO DIA (meta do mes distribuida pela curva). No mes com curva, a barra
+ * mensal ganha a marca de onde o plano esperava estar ate' o ultimo dia com dado.
  */
 import Link from "next/link";
 import { ArrowDownRight, ArrowUpRight, Target, TriangleAlert } from "lucide-react";
@@ -18,6 +22,7 @@ import type { Marketplace } from "@/lib/mock-data";
 import { CHANNEL_DOT as PONTO } from "@/lib/gerencial/channel-colors";
 import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
 import { ROTULO_STATUS, type ProgressoMeta, type StatusMeta } from "@/lib/gerencial/meta-progress";
+import { diaDaSemana, type ProgressoDia, type StatusDia } from "@/lib/metas-curva";
 import { fmtCompacto, rotuloMes } from "@/lib/metas";
 import { fmtPctBr } from "@/lib/formatters";
 import InfoDica from "@/components/ui/InfoDica";
@@ -31,7 +36,20 @@ const SELO: Record<StatusMeta, string> = {
   nao_atingida: "border-crit/40 bg-crit-soft text-crit-ink",
 };
 
+const SELO_DIA: Record<StatusDia, string> = {
+  em_andamento: "border-line-strong bg-raised text-ink-muted",
+  atingida: "border-ok/40 bg-ok-soft text-ok-ink",
+  nao_atingida: "border-crit/40 bg-crit-soft text-crit-ink",
+};
+
+const ROTULO_DIA: Record<StatusDia, string> = {
+  em_andamento: "Dia em andamento",
+  atingida: "Meta do dia batida",
+  nao_atingida: "Meta do dia não batida",
+};
+
 const pct0 = (f: number) => `${Math.round(f * 100)}%`;
+const ddmm = (dia: string) => `${dia.slice(8, 10)}/${dia.slice(5, 7)}`;
 
 interface Props {
   periodLabel: string;
@@ -45,10 +63,20 @@ interface Props {
   gmvByChannel: Record<Marketplace, number | null>;
   /** Mes comparavel com a meta; `null` = periodo nao e' um mes. */
   mesMeta: string | null;
+  /** Dia comparavel com a meta do dia; `null` = periodo nao e' um dia so'. */
+  diaMeta: string | null;
+  hoje: string;
   metasStatus: "loading" | "error" | "fresh";
   /** Nova tentativa de ler as metas (so' elas; os demais blocos tem a propria). */
   onRetryMetas: () => void;
   progresso: ProgressoMeta | null;
+  /** O escopo tem curva no mes: o plano ate' a data segue os pesos dos dias. */
+  comCurva: boolean;
+  progressoDia: ProgressoDia | null;
+  /** Marca x canal sem venda do dia ainda, em linhas curtas. */
+  semDado: string[];
+  /** Canais filtrados que nao tem meta (ficam fora do realizado comparado). */
+  canaisForaDaMeta: Marketplace[];
   /** Ate' onde o realizado tem dado, para o rotulo ("até 28/10"). */
   ultimoDia: string | null;
   aviso: { texto: string; onOpen: () => void } | null;
@@ -66,14 +94,20 @@ export default function MetaHero(props: Props) {
         <div className="min-w-0">
           {loading && gmv == null ? (
             <div className="h-20 animate-pulse rounded-lg bg-raised motion-reduce:animate-none" aria-hidden="true" />
-          ) : error ? null : props.progresso ? (
+          ) : error ? null : props.diaMeta && props.progressoDia ? (
+            <BarraDoDia {...props} progressoDia={props.progressoDia} />
+          ) : !props.diaMeta && props.progresso ? (
             <BarraDaMeta {...props} progresso={props.progresso} />
           ) : (
             <SemMeta {...props} />
           )}
           <Divisao channels={props.channels} gmvByChannel={props.gmvByChannel} total={gmv} />
         </div>
-        <Selo progresso={props.progresso} metasHref={props.metasHref} mesMeta={props.mesMeta} />
+        {props.diaMeta ? (
+          <SeloDoDia progressoDia={props.progressoDia} metasHref={props.metasHref} />
+        ) : (
+          <Selo progresso={props.progresso} metasHref={props.metasHref} mesMeta={props.mesMeta} />
+        )}
       </div>
     </section>
   );
@@ -134,12 +168,29 @@ function Resultado({ periodLabel, gmv, prevGmv, momPct, compareActive, loading, 
   );
 }
 
-function BarraDaMeta({ progresso: p, mesMeta }: Props & { progresso: ProgressoMeta }) {
+/** "TikTok Shop fora da meta": o GMV desses canais nao entra no atingimento. */
+function ForaDaMeta({ canais }: { canais: Marketplace[] }) {
+  if (!canais.length) return null;
+  const nomes = canais.map((c) => CHANNEL_LABEL[c]).join(" e ");
+  return (
+    <span
+      className="ml-1.5 inline-flex rounded-full border border-line px-2 py-0.5 text-xs font-medium normal-case tracking-normal text-ink-muted"
+      title={`${nomes} não tem meta: o GMV fica fora do atingimento.`}
+    >
+      {nomes} fora da meta
+    </span>
+  );
+}
+
+function BarraDaMeta({ progresso: p, mesMeta, comCurva, canaisForaDaMeta }: Props & { progresso: ProgressoMeta }) {
   // A escala vai ate' o maior entre meta, realizado e projecao: passar da meta
   // tem que aparecer como passar do traco, nao como barra cheia.
   const escala = Math.max(1, p.atingimento, p.projecaoSobreMeta ?? 0);
   const larg = (f: number) => `${(Math.min(f, escala) / escala) * 100}%`;
   const projecaoAlem = p.projecaoSobreMeta != null && p.projecaoSobreMeta > p.atingimento;
+  // Com curva, "onde o plano esperava estar" nao e' dias/n: vale marcar.
+  const mostraPlano = comCurva && !p.encerrado && p.diasComDado > 0 && mesMeta != null;
+  const diaDoPlano = mesMeta ? `${mesMeta}-${String(p.diasComDado).padStart(2, "0")}` : "";
 
   return (
     <div>
@@ -147,6 +198,7 @@ function BarraDaMeta({ progresso: p, mesMeta }: Props & { progresso: ProgressoMe
         <p className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
           Meta de {mesMeta ? rotuloMes(mesMeta) : "o mês"} ·{" "}
           <span className="tabular-nums text-ink-muted">{fmtCompacto(p.meta)}</span>
+          <ForaDaMeta canais={canaisForaDaMeta} />
         </p>
         <p className="text-2xl font-bold leading-none text-accent tabular-nums">
           {pct0(p.atingimento)}
@@ -171,6 +223,13 @@ function BarraDaMeta({ progresso: p, mesMeta }: Props & { progresso: ProgressoMe
           />
         )}
         <div className="tc-barra absolute inset-y-0 left-0 rounded-full bg-accent" style={{ width: larg(p.atingimento) }} />
+        {mostraPlano && (
+          <div
+            className="absolute -inset-y-0.5 w-1 rounded-full border border-surface bg-ink-muted"
+            style={{ left: larg(p.planoAteData / p.meta) }}
+            aria-hidden="true"
+          />
+        )}
         <div className="absolute -inset-y-1 w-0.5 bg-ink" style={{ left: larg(1) }} aria-hidden="true" />
       </div>
       <div className="mt-2 flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-ink-muted tabular-nums">
@@ -184,24 +243,95 @@ function BarraDaMeta({ progresso: p, mesMeta }: Props & { progresso: ProgressoMe
           </span>
         )}
       </div>
+      {mostraPlano && (
+        <p
+          className="mt-1.5 flex items-center gap-1.5 text-xs text-ink-muted tabular-nums"
+          title="Plano = meta acumulada pela curva de dias (dia da semana, 11/11, semana Black)."
+        >
+          <span aria-hidden="true" className="h-2.5 w-1 rounded-full bg-ink-muted" />
+          plano até {ddmm(diaDoPlano)} <b className="font-semibold text-ink">{fmtCompacto(p.planoAteData)}</b> ·{" "}
+          {pct0(p.atingimentoDoPlano)} do plano
+        </p>
+      )}
       {p.porDiaNecessario != null && (
         <p
           className="mt-1.5 text-xs text-ink-muted tabular-nums"
           title={`Faltam ${fmtCompacto(p.falta)} em ${p.diasRestantes} ${p.diasRestantes === 1 ? "dia" : "dias"}`}
         >
           faltam <b className="font-semibold text-ink">{fmtCompacto(p.falta)}</b> · {fmtCompacto(p.porDiaNecessario)}/dia
+          {comCurva ? " em média" : ""}
         </p>
       )}
     </div>
   );
 }
 
-function SemMeta({ mesMeta, metasStatus, metasHref, onRetryMetas }: Props) {
+function BarraDoDia({ progressoDia: p, hoje, semDado, canaisForaDaMeta }: Props & { progressoDia: ProgressoDia }) {
+  const titulo = p.dia === hoje ? "Meta de hoje" : "Meta do dia";
+  const escala = Math.max(1, p.atingimento ?? 0);
+  const larg = (f: number) => `${(Math.min(f, escala) / escala) * 100}%`;
+
+  return (
+    <div>
+      <div className="mb-2 flex items-end justify-between gap-3">
+        <p className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
+          {titulo} · {diaDaSemana(p.dia)}, {ddmm(p.dia)} ·{" "}
+          <span className="tabular-nums text-ink-muted">{fmtCompacto(p.metaDoDia)}</span>
+          {p.evento && (
+            <span className="ml-1.5 inline-flex rounded-full bg-accent-soft px-2 py-0.5 text-xs font-semibold normal-case tracking-normal text-accent-ink">
+              {p.evento}
+            </span>
+          )}
+          <ForaDaMeta canais={canaisForaDaMeta} />
+        </p>
+        {p.atingimento != null && (
+          <p className="text-2xl font-bold leading-none text-accent tabular-nums">
+            {pct0(p.atingimento)}
+            <span className="sr-only"> da meta do dia</span>
+          </p>
+        )}
+      </div>
+      {p.atingimento != null ? (
+        <>
+          <div className="relative h-3.5 rounded-full bg-raised" role="img" aria-label={`Realizado ${pct0(p.atingimento)} da meta do dia`}>
+            <div className="tc-barra absolute inset-y-0 left-0 rounded-full bg-accent" style={{ width: larg(p.atingimento) }} />
+            <div className="absolute -inset-y-1 w-0.5 bg-ink" style={{ left: larg(1) }} aria-hidden="true" />
+          </div>
+          <div className="mt-2 flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-ink-muted tabular-nums">
+            <span>
+              <b className="font-semibold text-ink">{fmtCompacto(p.realizado)}</b> de {fmtCompacto(p.metaComDado)}
+              {p.semDado.length > 0 ? " com venda" : ""}
+            </span>
+            {p.falta > 0 && (
+              <span>
+                faltam <b className="font-semibold text-ink">{fmtCompacto(p.falta)}</b>
+              </span>
+            )}
+          </div>
+        </>
+      ) : (
+        <p className="rounded-lg border border-dashed border-line-strong px-3 py-3 text-sm text-ink-muted">
+          Nenhuma venda {p.dia === hoje ? "de hoje" : "deste dia"} chegou ainda.
+        </p>
+      )}
+      {semDado.length > 0 && (
+        <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 text-xs text-ink-muted">
+          <span className="font-semibold text-ink-faint">Sem venda ainda:</span>
+          {semDado.join(" · ")}
+          <InfoDica texto="Cada canal chega num horário (o ML só no dia seguinte). O que não chegou fica fora da conta até chegar." />
+        </p>
+      )}
+    </div>
+  );
+}
+
+function SemMeta({ mesMeta, diaMeta, metasStatus, metasHref, onRetryMetas }: Props) {
+  const mes = mesMeta ?? diaMeta?.slice(0, 7) ?? null;
   let texto: string;
-  if (!mesMeta) texto = "A meta é mensal: escolha “Mês atual” ou um mês fechado no período para ver o atingimento.";
-  else if (metasStatus === "loading") texto = "Carregando a meta do mês…";
+  if (!mes) texto = "Escolha “Hoje”, “Mês atual” ou um mês fechado no período para ver a meta.";
+  else if (metasStatus === "loading") texto = diaMeta ? "Carregando a meta do dia…" : "Carregando a meta do mês…";
   else if (metasStatus === "error") texto = "Não foi possível ler as metas agora.";
-  else texto = `Nenhuma meta definida para ${rotuloMes(mesMeta)} neste recorte.`;
+  else texto = `Nenhuma meta definida para ${rotuloMes(mes)} neste recorte.`;
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-dashed border-line-strong px-3 py-3 text-sm text-ink-muted">
       <Target aria-hidden="true" className="h-4 w-4 shrink-0 text-ink-faint" />
@@ -215,7 +345,7 @@ function SemMeta({ mesMeta, metasStatus, metasHref, onRetryMetas }: Props) {
           Tentar novamente
         </button>
       )}
-      {mesMeta && metasStatus === "fresh" && (
+      {mes && metasStatus === "fresh" && (
         <Link
           href={metasHref}
           className="inline-flex min-h-11 items-center text-sm font-semibold text-accent-ink hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
@@ -223,6 +353,31 @@ function SemMeta({ mesMeta, metasStatus, metasHref, onRetryMetas }: Props) {
           Definir metas →
         </Link>
       )}
+    </div>
+  );
+}
+
+function SeloDoDia({ progressoDia, metasHref }: { progressoDia: ProgressoDia | null; metasHref: string }) {
+  return (
+    <div className="flex flex-row items-center justify-between gap-3 border-t border-line pt-4 lg:flex-col lg:border-l lg:border-t-0 lg:pl-6 lg:pt-0">
+      <div className="text-left lg:text-center">
+        <p className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Dia</p>
+        {progressoDia && progressoDia.atingimento != null ? (
+          <p
+            className={`mt-1.5 inline-flex rounded-full border px-3 py-1.5 text-xs font-bold uppercase tracking-wide ${SELO_DIA[progressoDia.status]}`}
+          >
+            {ROTULO_DIA[progressoDia.status]}
+          </p>
+        ) : (
+          <p className="mt-1.5 text-xs text-ink-faint">{progressoDia ? "sem venda ainda" : "sem meta"}</p>
+        )}
+      </div>
+      <Link
+        href={metasHref}
+        className="inline-flex min-h-11 items-center text-xs font-semibold text-accent-ink hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        Meta por dia →
+      </Link>
     </div>
   );
 }

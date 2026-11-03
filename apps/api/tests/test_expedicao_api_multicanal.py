@@ -10,7 +10,7 @@ junto com a mudanca, tenderia a responder exatamente o que a mudanca espera.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -123,11 +123,20 @@ def test_shopee_mantem_kokeshi_fora_da_cobertura(ligada):
     assert r["coverage"]["brands_not_covered"] == ["kokeshi"]
 
 
-def test_shopee_continua_com_as_quatro_notas_originais(ligada):
+def test_shopee_continua_com_as_quatro_notas_originais(ligada, monkeypatch):
+    monkeypatch.setattr(svc.settings, "expedicao_numero_pedido_publico", False, raising=False)
     r = svc.get_expedicao(SessaoFake())
     notas = r["limitations"]["notes"]
     assert len(notas) == 4
     assert "raw.shopee_orders" in notas[1]
+
+
+def test_com_numero_publico_a_nota_de_identificador_retido_sai(ligada, monkeypatch):
+    """EXPEDICAO-NUMERO-PEDIDO: a nota "nao e' servido" mentiria."""
+    monkeypatch.setattr(svc.settings, "expedicao_numero_pedido_publico", True, raising=False)
+    notas = svc.get_expedicao(SessaoFake())["limitations"]["notes"]
+    assert svc.NOTA_SEM_IDENTIFICADOR not in notas
+    assert len(notas) == 3
 
 
 # ===========================================================================
@@ -179,9 +188,154 @@ def test_ml_declara_que_nao_ha_prazo(ml_ligado):
     r = svc.get_expedicao(sessao_ml(), channel="mercadolivre")
     assert r["totals"]["deadline_unavailable_count"] == r["totals"]["backlog_count"]
     assert r["totals"]["overdue_count"] == 0
+    # Fotografia sem SLA: a tela recebe "nao ha prazo" explicito.
+    assert r["snapshot"]["deadline_published"] is False
     junto = " ".join(r["limitations"]["notes"])
-    assert "nao publica prazo de despacho" in junto
+    assert "SLA oficial de despacho" in junto
+    assert "a ausencia nao indica atraso" in junto
     assert "SHIPMENT" in junto
+
+
+# ---------------------------------------------------------------------------
+# EXPEDICAO-ML-PRAZO: o SLA oficial liga o prazo do ML pela FOTOGRAFIA
+# ---------------------------------------------------------------------------
+def _resumos_ml_com_sla(vencidos=3, sem_sla=10):
+    """Kokeshi com SLA em parte do backlog; as outras contas ainda sem SLA."""
+    out = []
+    for sa, b, n in CONTAS_ML:
+        if b == "kokeshi":
+            out.append(resumo_ml(sa, b, n, overdue_count=vencidos,
+                                 due_within_24h_count=5,
+                                 on_time_count=n - vencidos - 5 - sem_sla,
+                                 deadline_unavailable_count=sem_sla))
+        else:
+            out.append(resumo_ml(sa, b, n))
+    return out
+
+
+@pytest.fixture
+def prazo_ml_ligado(monkeypatch):
+    monkeypatch.setattr(svc.settings, "expedicao_ml_prazo_enabled", True, raising=False)
+
+
+def test_trava_desligada_esconde_o_prazo_do_ml_mesmo_com_sla(ml_ligado, monkeypatch):
+    """03/11/2026: o envio coletado seguia `ready_to_ship` e virava vencido
+    falso. Sem a flag, a fotografia com SLA continua SEM prazo na tela."""
+    monkeypatch.setattr(svc.settings, "expedicao_ml_prazo_enabled", False, raising=False)
+    resumos = [resumo_ml("1", "x", 7, deadline_unavailable_count=0, overdue_count=5)]
+    assert svc.prazo_publicado(svc.CANAIS["mercadolivre"], resumos) is False
+    assert svc.prazo_publicado(svc.CANAIS["shopee"], []) is True, "Shopee nao depende da trava"
+    s = sessao_ml(resumos=_resumos_ml_com_sla(vencidos=3))
+    r = svc.get_expedicao(s, channel="mercadolivre")
+    assert r["snapshot"]["deadline_published"] is False
+    assert r["totals"]["due_soon_count"] is None
+    assert not any("AS vencem" in q for q, _ in s.consultas)
+
+
+def test_prazo_publicado_decide_pela_fotografia(prazo_ml_ligado):
+    ml, shopee = svc.CANAIS["mercadolivre"], svc.CANAIS["shopee"]
+    assert svc.prazo_publicado(shopee, []) is True
+    assert svc.prazo_publicado(ml, []) is False
+    assert svc.prazo_publicado(ml, [resumo_ml("1", "x", 7)]) is False
+    assert svc.prazo_publicado(ml, [resumo_ml("1", "x", 0)]) is False
+    assert svc.prazo_publicado(
+        ml, [resumo_ml("1", "x", 7), resumo_ml("2", "y", 7, deadline_unavailable_count=6)]
+    ) is True
+
+
+def test_ml_com_sla_publica_vencidos_e_perto_de_vencer(ml_ligado, prazo_ml_ligado):
+    hoje = date(2026, 9, 16)  # dia de Brasilia do `AGORA` dos testes
+    s = sessao_ml(
+        resumos=_resumos_ml_com_sla(vencidos=3),
+        proximo=[{"dia": hoje, "shop_account": "2227056661", "vencem": 4},
+                 {"dia": hoje + timedelta(days=1), "shop_account": "2227056661",
+                  "vencem": 6}],
+    )
+    r = svc.get_expedicao(s, channel="mercadolivre")
+    assert r["snapshot"]["deadline_published"] is True
+    assert r["totals"]["overdue_count"] == 3
+    assert (r["totals"]["due_today_count"], r["totals"]["due_next_day_count"],
+            r["totals"]["due_soon_count"]) == (4, 6, 10)
+    assert r["snapshot"]["next_due_date"] == hoje + timedelta(days=1)
+    kokeshi = next(c for c in r["accounts"] if c["brand"] == "kokeshi")
+    assert kokeshi["due_soon_count"] == 10
+    # Conta ainda sem SLA: zero do perto de vencer, nao nulo — o lote tem prazo.
+    rituaria = next(c for c in r["accounts"] if c["brand"] == "rituaria")
+    assert rituaria["due_soon_count"] == 0
+    assert any("AS vencem" in q for q, _ in s.consultas)
+
+
+def test_jornada_do_ml_troca_o_motivo_da_coorte_quando_ha_prazo():
+    sem = {"sobreposicoes": [{"key": "vencido", "count": None, "reason": "x"},
+                             {"key": "vence_24h", "count": None, "reason": "x"},
+                             {"key": "sem_prazo", "count": 10}]}
+    com = {"sobreposicoes": [{"key": "vencido", "count": 3},
+                             {"key": "vence_24h", "count": 0},
+                             {"key": "sem_prazo", "count": 7}]}
+    assert svc._limitacao_coorte_ml(None) == svc.LIMITACAO_ML_SEM_PRAZO
+    assert svc._limitacao_coorte_ml(sem) == svc.LIMITACAO_ML_SEM_PRAZO
+    assert svc._limitacao_coorte_ml(com) == svc.LIMITACAO_ML_SEM_COORTE
+
+
+def test_ml_com_sla_filtra_a_lista_perto_de_vencer_de_verdade(ml_ligado, prazo_ml_ligado):
+    s = sessao_ml(resumos=_resumos_ml_com_sla(),
+                  proximo=[{"dia": date(2026, 9, 16), "shop_account": "2227056661",
+                            "vencem": 2}])
+    svc.get_expedicao(s, channel="mercadolivre", situacoes=["due_soon"])
+    sql = next(q for q, _ in s.consultas if "LIMIT :limit OFFSET :offset" in q)
+    assert ":limite_perto" in sql
+    assert "dispatch_deadline IS NOT NULL" in sql
+
+
+def test_ml_nao_tem_proximo_vencimento_nem_consulta(ml_ligado):
+    """EXPEDICAO-VENCE-AMANHA: sem prazo na fonte, a medida nao existe — nulo,
+    nunca zero — e a consulta nem sai."""
+    s = sessao_ml()
+    r = svc.get_expedicao(s, channel="mercadolivre")
+    assert r["snapshot"]["next_due_date"] is None
+    # EXPEDICAO-PERTO-DE-VENCER: as tres medidas sao nulas no canal sem prazo
+    for campo in ("due_today_count", "due_next_day_count", "due_soon_count"):
+        assert r["totals"][campo] is None, campo
+        assert all(c[campo] is None for c in r["accounts"]), campo
+    assert not any("AS vencem" in q for q, _ in s.consultas)
+
+
+def test_ml_com_due_next_day_devolve_lista_vazia(ml_ligado):
+    s = sessao_ml()
+    svc.get_expedicao(s, channel="mercadolivre", situacoes=["due_next_day"])
+    sql = next(q for q, _ in s.consultas if "LIMIT :limit OFFSET :offset" in q)
+    assert "FALSE" in sql
+
+
+def test_ml_com_due_soon_devolve_lista_vazia(ml_ligado):
+    s = sessao_ml()
+    svc.get_expedicao(s, channel="mercadolivre", situacoes=["due_soon"])
+    sql = next(q for q, _ in s.consultas if "LIMIT :limit OFFSET :offset" in q)
+    assert "FALSE" in sql
+    assert ":limite_perto" not in sql
+
+
+def test_so_a_shopee_declara_que_publica_prazo():
+    """Em TODA fotografia, so' a Shopee. O ML decide por lote
+    (`prazo_publicado`), nunca por esta constante."""
+    assert svc.CANAIS["shopee"].publica_prazo is True
+    assert svc.CANAIS["mercadolivre"].publica_prazo is False
+
+
+def test_rota_aceita_situacao_due_next_day(ligada):
+    s = SessaoFake(proximo=[{"dia": date(2026, 9, 17),
+                             "shop_account": "apice", "vencem": 3}])
+    cliente, app = _cliente(s)
+    try:
+        r = cliente.get("/api/v1/expedicao?situacao=due_next_day")
+    finally:
+        app.dependency_overrides.clear()
+    assert r.status_code == 200
+    corpo = r.json()
+    assert corpo["snapshot"]["next_due_date"] == "2026-09-17"
+    assert corpo["totals"]["due_next_day_count"] == 3
+    pagina = next(p for q, p in s.consultas if "LIMIT :limit OFFSET :offset" in q)
+    assert pagina["proximo_vencimento"] == date(2026, 9, 17)
 
 
 def test_kokeshi_e_coberta_no_ml(ml_ligado):
@@ -330,8 +484,14 @@ def test_toda_consulta_de_fila_ou_resumo_filtra_por_canal():
     clausula inline quanto a montada em `onde`.
     """
     fonte = (RAIZ_API / "app/services/expedicao_service.py").read_text(encoding="utf-8")
-    trechos = re.findall(r"FROM \{(FILA|RUN)\}(.*?)(?=\"\"\"|\n\n)", fonte, re.S)
+    # EXPEDICAO-KOKESHI-EXPORT: `origem`/`resumo` sao a tabela agendada OU a
+    # uniao dela com a do export; as tabelas do export tambem entram.
+    trechos = re.findall(
+        r"FROM \{(FILA|RUN|FILA_EXPORT|RUN_EXPORT|origem|resumo)\}(.*?)(?=\"\"\"|\n\n)",
+        fonte, re.S)
     assert trechos, "o scanner nao achou consulta nenhuma - regra virou decoracao"
+    assert {t for t, _ in trechos} >= {"FILA", "RUN", "FILA_EXPORT", "RUN_EXPORT",
+                                       "origem", "resumo"}
     sem_canal = [t for _tab, t in trechos
                  if "channel = :canal" not in t and "{filtro}" not in t
                  and '" AND ".join(onde)' not in t]

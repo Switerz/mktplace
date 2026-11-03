@@ -256,3 +256,13 @@ test("o detalhe do card recebe o valor exato", () => {
   const page = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /return k\?\.exactValue \?\? k\?\.value \?\? "—";/);
 });
+
+test("T-0032: o scroller do TableScrollHint e' o ancestral posicionado do conteudo", () => {
+  const hint = readFileSync(new URL("../src/components/TableScrollHint.tsx", import.meta.url), "utf8");
+  // `relative` NO PROPRIO overflow-x-auto: um `absolute` interno (sr-only das
+  // celulas da matriz) fica preso a area que o scroller corta e nao rola a pagina.
+  assert.match(hint, /ref=\{ref\} className=\{`relative overflow-x-auto /, "scroller sem relative vaza absolute para a pagina");
+  // o externo continua posicionado: e' a referencia das sombras irmas
+  assert.match(hint, /<div className="relative min-w-0">/);
+  assert.equal((hint.match(/pointer-events-none absolute inset-y-0/g) ?? []).length, 2, "as duas sombras seguem absolutas");
+});

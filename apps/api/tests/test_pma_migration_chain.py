@@ -54,7 +54,9 @@ DDL_PATH = REPO / "db" / "sql" / "marts" / "pma_listing_price_serving_ddl.sql"
 #: encadeada SOBRE a 031 do TikTok Ads (nasceu 031 no PR #116 e foi renumerada).
 #: Avancado para 033 pela T-0015 (etapa da fila de Expedicao), encadeada
 #: SOBRE a 032 da Metas (nasceu 032 e foi renumerada).
-HEAD_ESPERADO = "033"
+#: Avancado para 034 pelo EXPEDICAO-KOKESHI-EXPORT (tabelas proprias da fila
+#: alimentada pelo export do Seller Centre), encadeada SOBRE a 033.
+HEAD_ESPERADO = "034"
 
 #: Mapa OFICIAL de propriedade das revisoes. Existe para que uma frente nao
 #: ocupe o numero de outra: 016 e' do Full, 017 e' do PMA e a 018 esta

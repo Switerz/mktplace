@@ -125,3 +125,49 @@ atual"). Nesse caso o bloco principal mostra:
 Fora disso (um período que não é um mês, ou um mês sem meta) o bloco mostra o GMV
 contra o período anterior e aponta para a aba Metas. Ele nunca inventa uma meta.
 As regras estão em `apps/web/src/lib/gerencial/meta-progress.ts`.
+
+## Meta do dia e curva (METAS-DIARIAS-1)
+
+Origem: planilha "Meta diária Marketplace — nov/26 (validação)" (abas Resumo,
+Curva, Meta diária, Realizado e Acompanhamento).
+
+- **A meta do dia não é digitada.** Ela sai da meta mensal da aba Metas:
+  `meta do dia = meta do mês × peso do dia ÷ soma dos pesos do mês`. Mudou a
+  mensal, a diária muda junto.
+- **Curva** = um peso por dia, por canal (ML e Shopee), igual para todas as marcas
+  do canal. Peso 1,00 = dia normal médio; 11/11 e Black Friday pesam 2,45 (ML) e
+  3,5 (Shopee). Fica fixa no código, em `apps/web/src/lib/metas-curva.ts`
+  (`CURVAS`), copiada da aba Curva. **Só novembro/26 tem curva.** Mês ou canal sem
+  curva (TikTok, dezembro em diante) divide a meta igualmente pelos dias, que é a
+  conta linear de antes. Editar a curva pelo app ficou para depois.
+- **Aba Metas:** abaixo da grade, a tabela "Meta por dia" abre a meta do mês dia a
+  dia (total, acumulado, % do mês, por canal e por marca). Ela acompanha o que
+  está na grade, inclusive alteração ainda não salva ("prévia, não salva").
+- **Gerencial em "Hoje"** (ou qualquer período de um dia só): o bloco principal
+  compara com a **meta do dia**. Cada canal chega num horário (em 30/10/26 só a
+  Shopee da Kokeshi entrava durante o dia; o resto chegava no dia seguinte), então:
+  - dia em andamento: marca × canal sem venda fica **fora da conta** e aparece em
+    "Sem venda ainda"; o selo é `Dia em andamento`, sem cor de status;
+  - dia fechado: se o canal chegou para alguma marca, marca sem venda conta zero;
+    se não chegou para nenhuma, as células dele ficam fora. Selo `Meta do dia
+    batida` ou `Meta do dia não batida`.
+  - Exceção: o dia 1 sozinho também é o "Mês atual" do dia 2 (o preset termina em
+    D-1); aí a meta continua mensal.
+- **Gerencial em "Mês atual"** com curva: a projeção passa a ser
+  `realizado ÷ fatia do mês esperada pela curva até o último dia com dado`, e a
+  barra ganha a marca "plano até DD/MM" (meta acumulada pela curva, como a aba
+  Acompanhamento). Sem curva, a fatia é `dias com dado ÷ dias do mês` e nada muda.
+- **Realizado comparado = só marca × canal com meta.** Antes, a Gerencial somava o
+  GMV de todos os canais filtrados contra a meta. Em outubro/26 o TikTok (sem meta)
+  entrava na soma e "Mês atual" mostrava "Meta atingida" com o mês abaixo do
+  ritmo. O GMV do
+  período (à esquerda) continua com todos os canais; o chip "TikTok Shop fora da
+  meta" avisa quando um canal filtrado não tem meta. Em "Marcas", a barra de uma
+  marca com meta soma só os canais que têm meta.
+
+Diferença de base conhecida: a planilha usa "receita sem brindes" (base do dash de
+mix) e a Kokeshi Shopee pelos relatórios do Seller Center; o app usa o GMV do Data
+Mart, com a Kokeshi Shopee pela API. Os números podem não bater ao centavo.
+
+Testes: `apps/web/tests/metas-curva.test.ts` (valores da planilha) e
+`apps/web/tests/gerencial-metas.test.ts`.

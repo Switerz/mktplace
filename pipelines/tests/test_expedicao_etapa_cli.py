@@ -161,7 +161,9 @@ def _reconciliar(alvo, linhas):
 def _cenario_ml():
     linhas = [
         linha(700001, substatus="ready_for_pickup"),
-        linha(700002, substatus="picked_up"),
+        # EXPEDICAO-ML-COLETADOS: `picked_up` sai da fila; o cenario de etapa
+        # usa um substatus que continua com o vendedor.
+        linha(700002, substatus="invoice_pending"),
         linha(700003, substatus="ready_to_print"),
     ]
     fila = transform.build_fila_ml(linhas, REGISTRY_ML, AGORA_ML, BATCH_ML)
