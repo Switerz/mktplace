@@ -136,3 +136,23 @@ def test_sql_de_48h_e_travados_espelha_o_pipeline():
     assert K.LIMITE_48H_HORAS * 3600 == C.OPERATIONAL_AGE_LIMIT.total_seconds()
     assert K.FATOR_LENTO == C.SLOW_BASELINE_FACTOR
     assert K.AMOSTRA_MINIMA == C.MIN_BASELINE_SAMPLE
+
+
+def test_resumo_parcial_do_bot_e_completado_sem_sobrescrever(monkeypatch):
+    """03/11/2026: o bot gravou o atraso (2133/40) com codigo antigo, sem +48 h
+    e travados. A API completa so' os vazios; o que veio prevalece."""
+    extra = [{"shop_account": "kokeshi", "brand": "kokeshi", "backlog_count": 1,
+              "observed_at": AGORA, "refresh_batch_id": "b", "source_watermark_at": WM,
+              "due_7d_count": "2133", "late_7d_count": "40",
+              "over_48h_7d_count": None, "stalled_7d_count": None,
+              "late_7d_window_start": "2026-10-27", "late_7d_window_end": "2026-11-02"}]
+    monkeypatch.setattr(svc, "_fotografia_export", lambda db, canal, contas: [dict(x) for x in extra])
+    monkeypatch.setattr(K, "calcular", lambda db, conta, wm, ef: {
+        "due_7d_count": 9999, "late_7d_count": 9999, "over_48h_7d_count": 2,
+        "stalled_7d_count": 55, "late_7d_window_start": date(2026, 10, 27),
+        "late_7d_window_end": date(2026, 11, 2)})
+    snap = {"resumos": [], "effective_at": AGORA, "linhas": 0}
+    svc._juntar_export(None, svc.CANAIS["shopee"], snap)
+    (k,) = snap["resumos"]
+    assert (k["due_7d_count"], k["late_7d_count"]) == (2133, 40), "o gravado prevalece"
+    assert (k["over_48h_7d_count"], k["stalled_7d_count"]) == (2, 55)
