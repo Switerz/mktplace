@@ -1149,12 +1149,27 @@ fotografia DO MESMO canal. ML com SLA: os cartoes, a barra empilhada, a coluna
 Mercado Livre" no rotulo e textos proprios (nenhum cita a Shopee nem o
 `ship_by_date`). ML sem SLA: exatamente a tela anterior.
 
+**Coletados e veredito do ML (EXPEDICAO-ML-COLETADOS, 03/11/2026).** Com o SLA
+gravado em producao (11:14), o prazo do Mercado Coleta se mostrou o HORARIO DA
+COLETA, e o envio segue `ready_to_ship` por horas depois de coletado: 199 de
+200 envios com o horario de hoje passado estavam `picked_up`, e o ML os dava
+como `on_time`. A regra so' pelo relogio publicaria ~228 vencidos falsos.
+Decisao do usuario: **coletado = expedido**.
+
+- `picked_up`, `dropped_off` e `in_hub` (`ML_COLLECTED_SUBSTATUSES`) SAEM da
+  fila em `classify_candidates`, contados em `collected_excluded_count` (274 de
+  768 as 11:20). A etapa `entregue_transportadora` deixa de aparecer no ML.
+- `classificar_prazo_ml` (envio ainda com o vendedor): ML `delayed` = vencido;
+  prazo de dia anterior (Brasilia) = vencido; horario de hoje passado sem
+  `delayed` = vence hoje (a coleta pode ainda passar); resto pelo relogio.
+- `sla_status` entra no SELECT pelo mesmo `to_jsonb(s) ->> ...`.
+- Simulacao no Data Mart as 11:25: 10 vencidos, 85 vencem hoje, 52 amanha.
+- **Trava:** `expedicao_ml_prazo_enabled` (Render, default `false`, #147) mantem
+  o ML sem prazo na tela ate' este pipeline estar no pin do Airflow.
+
 **Fora deste gate.**
 
 - LDR do ML: o SLA so' e' relido enquanto o envio esta' aberto.
-- Envios `picked_up` / `dropped_off` / `in_hub` continuam no backlog (decisao
-  de negocio pendente, contrato etapa v1). Com a releitura a cada 15 min eles
-  passam a fechar logo; antes ficavam dias.
 - Rituaria deixou de ser "100% Full": 141 envios `cross_docking` abertos em
   03/11/2026 (a tabela de cobertura abaixo e' de 17/09).
 

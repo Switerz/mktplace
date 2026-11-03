@@ -146,6 +146,7 @@ def test_exclusoes_aparecem_todas_no_diagnostico():
         "seller_managed_count": 2,
         "fulfillment_excluded_count": 1,
         "stale_source_record_count": 1,
+        "collected_excluded_count": 0,
         "unmapped_logistic_type_count": 0,
         "queue_count": 1,
     }
@@ -882,11 +883,52 @@ def test_sla_de_hoje_ainda_nao_vencido_e_vence_em_24h():
 
 
 def test_sla_estourado_vira_vencido_com_horas_de_atraso():
-    # Coleta agendada as 14:00 de Brasilia = 17:00Z; AGORA e' 18:00Z.
+    # Coleta agendada as 14:00 de Brasilia = 17:00Z; AGORA e' 18:00Z; o ML
+    # diz `delayed`.
     x = transform.build_fila_ml(
-        [_com_sla("2026-09-17T14:00:00-03:00")], REGISTRY, AGORA, "lote-1")[0]
+        [_com_sla("2026-09-17T14:00:00-03:00", sla_status="delayed")],
+        REGISTRY, AGORA, "lote-1")[0]
     assert x["deadline_status"] == DeadlineStatus.OVERDUE.value
     assert x["hours_overdue"] == pytest.approx(1.0)
+
+
+def test_horario_de_hoje_passado_sem_delayed_vence_hoje_nao_venceu():
+    """EXPEDICAO-ML-COLETADOS (medido 03/11/2026): passado o horario da
+    coleta, so' o ML sabe se a transportadora ja' veio. Sem `delayed`, o envio
+    vence HOJE — 199 de 200 envios nessa situacao ja' estavam coletados."""
+    for status in (None, "on_time", "early"):
+        x = transform.build_fila_ml(
+            [_com_sla("2026-09-17T14:00:00-03:00", sla_status=status)],
+            REGISTRY, AGORA, "lote-1")[0]
+        assert x["deadline_status"] == DeadlineStatus.DUE_WITHIN_24H.value, status
+        assert x["hours_overdue"] is None
+
+
+def test_prazo_de_dia_anterior_sem_coleta_venceu_mesmo_com_o_ml_calado():
+    # 16/09 14:00 BRT; AGORA e' 17/09 15:00 BRT.
+    x = transform.build_fila_ml(
+        [_com_sla("2026-09-16T14:00:00-03:00", sla_status="on_time")],
+        REGISTRY, AGORA, "lote-1")[0]
+    assert x["deadline_status"] == DeadlineStatus.OVERDUE.value
+    assert x["hours_overdue"] == pytest.approx(25.0)
+
+
+def test_delayed_antes_do_horario_e_vencido_sem_horas_negativas():
+    x = transform.build_fila_ml(
+        [_com_sla("2026-09-17T23:59:59-03:00", sla_status="delayed")],
+        REGISTRY, AGORA, "lote-1")[0]
+    assert x["deadline_status"] == DeadlineStatus.OVERDUE.value
+    assert x["hours_overdue"] == 0.0
+
+
+def test_virada_do_dia_usa_brasilia_e_nao_utc():
+    # Prazo 17/09 23:00 BRT = 18/09 02:00Z; AGORA 18/09 02:30Z = 17/09 23:30 BRT:
+    # mesmo dia em Brasilia -> vence hoje, nao vencido.
+    agora = datetime(2026, 9, 18, 2, 30, tzinfo=timezone.utc)
+    x = transform.build_fila_ml(
+        [_com_sla("2026-09-17T23:00:00-03:00", lido="2026-09-18T02:00:00+00:00")],
+        REGISTRY, agora, "lote-1")[0]
+    assert x["deadline_status"] == DeadlineStatus.DUE_WITHIN_24H.value
 
 
 def test_sla_distante_fica_no_prazo():
@@ -916,9 +958,11 @@ def test_sla_lido_ha_mais_de_24h_nao_sustenta_vencido():
     limite = (AGORA - ML_SLA_MAX_AGE).isoformat()
     velho = (AGORA - ML_SLA_MAX_AGE - timedelta(seconds=1)).isoformat()
     no_limite = transform.build_fila_ml(
-        [_com_sla("2026-09-17T14:00:00-03:00", lido=limite)], REGISTRY, AGORA, "l")[0]
+        [_com_sla("2026-09-17T14:00:00-03:00", lido=limite, sla_status="delayed")],
+        REGISTRY, AGORA, "l")[0]
     passou = transform.build_fila_ml(
-        [_com_sla("2026-09-17T14:00:00-03:00", lido=velho)], REGISTRY, AGORA, "l")[0]
+        [_com_sla("2026-09-17T14:00:00-03:00", lido=velho, sla_status="delayed")],
+        REGISTRY, AGORA, "l")[0]
     assert no_limite["deadline_status"] == DeadlineStatus.OVERDUE.value
     assert passou["deadline_status"] == DeadlineStatus.UNAVAILABLE.value
     assert passou["hours_overdue"] is None
@@ -960,7 +1004,7 @@ def test_diagnostico_conta_vencidos_e_sem_prazo_pelo_sla():
 
     conn = FakeConn(_fonte(
         [
-            _com_sla("2026-09-17T14:00:00-03:00", shipment_id=1),
+            _com_sla("2026-09-17T14:00:00-03:00", shipment_id=1, sla_status="delayed"),
             _com_sla("2026-09-17T23:59:59-03:00", shipment_id=2),
             linha(shipment_id=3),
         ],
@@ -970,6 +1014,24 @@ def test_diagnostico_conta_vencidos_e_sem_prazo_pelo_sla():
     b = r["por_conta"]["2227056661"]
     assert (b["aguardando"], b["vencidos"], b["sem_prazo"]) == (3, 1, 1)
     assert "vencid" in cli.format_diagnose_ml(r)
+
+
+def test_envio_coletado_sai_da_fila_e_e_contado():
+    """EXPEDICAO-ML-COLETADOS (decisao do usuario, 03/11/2026): coletado =
+    expedido. Sai da fila, como o Full, e o diagnostico conta."""
+    from pipelines.expedicao.contract import ML_COLLECTED_SUBSTATUSES
+
+    assert ML_COLLECTED_SUBSTATUSES == {"picked_up", "dropped_off", "in_hub"}
+    linhas = [linha(shipment_id=i, substatus=s) for i, s in enumerate(
+        ["picked_up", "dropped_off", "in_hub", "ready_for_pickup", "ready_to_print"])]
+    fila, diag = ml_extract.classify_candidates(linhas, AGORA)
+    assert [x["substatus"] for x in fila] == ["ready_for_pickup", "ready_to_print"]
+    assert diag["collected_excluded_count"] == 3
+    assert diag["queue_count"] == 2
+
+
+def test_sql_le_o_veredito_do_ml_sem_depender_da_coluna():
+    assert "to_jsonb(s) ->> 'sla_status'        AS sla_status" in ml_extract.ML_BACKLOG_SQL
 
 
 def test_shopee_nao_muda_com_a_correcao():
@@ -1097,7 +1159,7 @@ def test_a_convencao_cobre_todas_as_colunas_temporais_do_select():
 
     temporais = {
         c for c in ml_extract.ML_SELECT_COLUMNS
-        if c.startswith("date_") or c.endswith("_at") or c.startswith("sla_")
+        if c.startswith("date_") or c.endswith("_at") or c in ML_ZONED_TIMESTAMPS
     }
     declaradas = ML_INGESTION_TIMESTAMPS | ML_BUSINESS_TIMESTAMPS | ML_ZONED_TIMESTAMPS
     # `date_shipped` e `date_cancelled` sao predicados do SQL, nunca

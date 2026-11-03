@@ -262,17 +262,19 @@ def test_full_do_ml_continua_fora_e_a_soma_por_etapa_fecha():
     ]
     fila_bruta, diag = ml_extract.classify_candidates(candidatos, AGORA)
     assert diag["fulfillment_excluded_count"] == 3
+    # EXPEDICAO-ML-COLETADOS: `in_hub` ja' saiu da mao do vendedor -> fora.
+    assert diag["collected_excluded_count"] == 1
     fila = transform.build_fila_ml(fila_bruta, REGISTRY_ML, AGORA, "lote")
 
     ids = {r["marketplace_order_id"] for r in fila}
-    assert ids == {"s1", "s2", "s3", "s4", "s5"}
+    assert ids == {"s2", "s3", "s4", "s5"}
     assert all(r["logistic_type"] != "fulfillment" for r in fila)
     assert "in_warehouse" not in {r["etapa_fonte"] for r in fila}
 
     por_etapa = Counter(r["etapa"] for r in fila)
     assert sum(por_etapa.values()) == len(fila) == diag["queue_count"]
     assert por_etapa == Counter({
-        "entregue_transportadora": 1, "a_imprimir": 1, "em_separacao": 1,
+        "a_imprimir": 1, "em_separacao": 1,
         "a_faturar": 1, "outro": 1,
     })
 

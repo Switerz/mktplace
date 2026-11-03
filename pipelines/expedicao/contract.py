@@ -557,8 +557,28 @@ ML_ALLOWED_SOURCE_COLUMNS = frozenset(
         # Viajam como TEXTO ISO 8601 com fuso: ver `ML_BACKLOG_SQL`.
         "sla_expected_date",
         "sla_extracted_at",
+        # Veredito do proprio ML sobre o prazo (`on_time`, `delayed`...).
+        "sla_status",
     }
 )
+
+#: ENVIO JA' COLETADO (EXPEDICAO-ML-COLETADOS, decisao do usuario 03/11/2026).
+#:
+#: No Mercado Coleta o envio segue `ready_to_ship` por horas depois que a
+#: transportadora o recolhe, ate' ser escaneado no hub. Medido em 03/11/2026
+#: as 11:20: 274 dos 768 envios da fila (36%) ja' estavam coletados, e 199
+#: deles viravam "vencido" pelo relogio com o ML dando `on_time`. Para o
+#: vendedor o envio ja' saiu — o mesmo que o pedido enviado da Shopee, que
+#: deixa a fila. Entao SAEM da fila e sao contados em
+#: `collected_excluded_count`, como o Full.
+ML_COLLECTED_SUBSTATUSES = frozenset({"picked_up", "dropped_off", "in_hub"})
+
+#: Veredito de atraso do ML no SLA. O prazo do Mercado Coleta e' o horario da
+#: coleta: passado o horario, so' o ML sabe se a coleta falhou por culpa do
+#: vendedor. `delayed` = vencido; horario de hoje passado sem `delayed` = vence
+#: hoje (a coleta pode ainda passar); prazo de dia anterior sem coleta =
+#: vencido mesmo com o ML calado.
+ML_SLA_STATUS_ATRASADO = "delayed"
 
 #: PRAZO DE DESPACHO DO MERCADO LIVRE (EXPEDICAO-ML-PRAZO, 03/11/2026).
 #:

@@ -27,7 +27,7 @@ e e apenas o OR das duas anomalias.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from pipelines.expedicao.contract import (
     DUE_SOON_WINDOW,
@@ -36,6 +36,7 @@ from pipelines.expedicao.contract import (
     MIN_BASELINE_SAMPLE,
     ML_BUSINESS_UTC_OFFSET,
     ML_SLA_MAX_AGE,
+    ML_SLA_STATUS_ATRASADO,
     OPERATIONAL_AGE_LIMIT,
     SLOW_BASELINE_FACTOR,
     SOURCE_ZOMBIE_AGE,
@@ -398,6 +399,50 @@ def prazo_sla_ml(
     return prazo
 
 
+#: Dia do prazo em Brasilia. Offset fixo: o Brasil nao tem horario de verao
+#: desde 2019, e `zoneinfo` exige a base de fusos, ausente em parte dos
+#: ambientes onde o pipeline roda.
+_BRT = timezone(timedelta(hours=-3))
+
+
+def classificar_prazo_ml(
+    prazo: datetime | None, sla_status: str | None, effective_at: datetime
+) -> DeadlineStatus:
+    """Situacao do prazo de um envio do ML AINDA COM O VENDEDOR.
+
+    O prazo do Mercado Coleta e' o HORARIO DA COLETA. Passado o horario, o
+    relogio sozinho nao sabe se a transportadora ja' veio; o ML sabe
+    (`sla_status`). Envio coletado nem chega aqui (sai da fila em
+    `ml_extract.classify_candidates`). Regras, nesta ordem:
+
+        sem prazo                                   -> UNAVAILABLE
+        ML diz `delayed`                            -> OVERDUE
+        prazo de DIA ANTERIOR (Brasilia), sem coleta -> OVERDUE
+        horario de HOJE passado, ML sem `delayed`   -> DUE_WITHIN_24H (vence hoje)
+        resto                                       -> `classify_deadline`
+    """
+    _require_aware(effective_at, "effective_at")
+    if prazo is None:
+        return DeadlineStatus.UNAVAILABLE
+    if sla_status == ML_SLA_STATUS_ATRASADO:
+        return DeadlineStatus.OVERDUE
+    if prazo < effective_at:
+        if prazo.astimezone(_BRT).date() < effective_at.astimezone(_BRT).date():
+            return DeadlineStatus.OVERDUE
+        return DeadlineStatus.DUE_WITHIN_24H
+    return classify_deadline(prazo, effective_at)
+
+
+def horas_de_atraso_ml(
+    prazo: datetime | None, situacao: DeadlineStatus, effective_at: datetime
+) -> float | None:
+    """Horas de estouro so' quando vencido; nunca negativo (o ML pode dizer
+    `delayed` antes do horario)."""
+    if situacao is not DeadlineStatus.OVERDUE or prazo is None:
+        return None
+    return max((effective_at - prazo).total_seconds() / 3600.0, 0.0)
+
+
 def build_fila_ml(
     linhas: list[dict],
     registry: dict[str, SellerAccount],
@@ -449,6 +494,7 @@ def build_fila_ml(
             linha.get("sla_expected_date"), linha.get("sla_extracted_at"),
             effective_at,
         )
+        situacao = classificar_prazo_ml(prazo, linha.get("sla_status"), effective_at)
 
         # O marco do ML e' o `date_ready_to_ship`; a criacao do pedido so'
         # sustenta a idade quando o carimbo de prontidao falta.
@@ -479,14 +525,14 @@ def build_fila_ml(
                     DEADLINE_SOURCE_NATIVE if prazo is not None
                     else DEADLINE_SOURCE_UNAVAILABLE
                 ),
-                "deadline_status": classify_deadline(prazo, effective_at).value,
+                "deadline_status": situacao.value,
                 "operational_age_status": classify_age(marco, effective_at).value,
                 "is_slow_vs_baseline": False,
                 "is_source_zombie": zumbi,
                 "is_stalled": zumbi,
                 "hours_open": horas_aberto,
                 # Sem prazo nao ha atraso contra prazo: `None`, nunca zero.
-                "hours_overdue": hours_overdue(prazo, effective_at),
+                "hours_overdue": horas_de_atraso_ml(prazo, situacao, effective_at),
                 "logistic_type": linha.get("logistic_type"),
                 # MODALIDADE de rastreio, nao numero de rastreio: o numero e
                 # identificador publicamente rastreavel e a API nao tem auth.
