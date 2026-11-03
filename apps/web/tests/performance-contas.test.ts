@@ -7,7 +7,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  MOTIVO_TIMEOUT,
   PERFORMANCE_CONTAS_FLAG,
+  TIMEOUT_API_MS,
   carregarPerformanceContas,
   estadoEfetivo,
   estadoParaStateBlock,
@@ -482,4 +484,79 @@ test("carregarPerformanceContas: 200 valido devolve os dados e usa no-store", as
   assert.deepEqual(r.ok && r.dados, corpo);
   assert.equal(pedido!.url, "http://x/api/v1/performance-contas?brands=barbours");
   assert.equal(pedido!.init?.cache, "no-store");
+});
+
+// T-0039 D2 — sem teto, uma API travada deixava a pagina pendurada.
+
+/** fetch falso que NUNCA responde, mas rejeita quando o `signal` aborta (como o fetch nativo). */
+function fetchPendurado(visto: { signal?: AbortSignal | null }) {
+  return ((_url: string, init?: RequestInit) => {
+    visto.signal = init?.signal;
+    return new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), {
+        once: true,
+      });
+    });
+  }) as unknown as typeof fetch;
+}
+
+test("carregarPerformanceContas: teto padrao e' uma constante nomeada de 15 s", () => {
+  assert.equal(TIMEOUT_API_MS, 15_000);
+});
+
+test("carregarPerformanceContas: API que nunca responde vira erro de timeout, nunca dado", async () => {
+  const visto: { signal?: AbortSignal | null } = {};
+  const t0 = Date.now();
+  const r = await carregarPerformanceContas({ marca: null }, fetchPendurado(visto), "http://x", 30);
+  assert.deepEqual(r, { ok: false, motivo: MOTIVO_TIMEOUT });
+  assert.ok(Date.now() - t0 < 2000, "desistiu perto do teto injetado");
+  assert.equal(visto.signal?.aborted, true);
+});
+
+test("carregarPerformanceContas: corpo que nunca chega tambem cai no timeout", async () => {
+  const fake = ((_url: string, init?: RequestInit) =>
+    Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), {
+            once: true,
+          });
+        }),
+    })) as unknown as typeof fetch;
+  const r = await carregarPerformanceContas({ marca: null }, fake, "http://x", 30);
+  assert.deepEqual(r, { ok: false, motivo: MOTIVO_TIMEOUT });
+});
+
+test("carregarPerformanceContas: o signal e' repassado ao fetch e o timer nao fica pendurado", async () => {
+  let sinal: AbortSignal | null | undefined;
+  const fake = (async (_url: string, init?: RequestInit) => {
+    sinal = init?.signal;
+    return Response.json({ gerado_em: "2026-10-29T10:00:00Z", canais: [] });
+  }) as unknown as typeof fetch;
+  const r = await carregarPerformanceContas({ marca: null }, fake, "http://x", 20);
+  assert.equal(r.ok, true);
+  assert.ok(sinal instanceof AbortSignal, "signal repassado ao fetchImpl");
+  // Se o timer nao fosse limpo, ele abortaria o signal depois de 20 ms.
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(sinal!.aborted, false);
+});
+
+test("carregarPerformanceContas: erros de antes mantem o motivo (rede, nao-2xx, JSON, forma)", async () => {
+  const motivo = async (f: typeof fetch) => {
+    const r = await carregarPerformanceContas({ marca: null }, f, "http://x", 1000);
+    assert.equal(r.ok, false);
+    return r.ok ? "" : r.motivo;
+  };
+  const rede = (async () => {
+    throw new TypeError("fetch failed");
+  }) as unknown as typeof fetch;
+  assert.equal(await motivo(rede), "Não foi possível contatar a API.");
+  assert.equal(await motivo((async () => new Response("x", { status: 503 })) as typeof fetch), "A API respondeu 503.");
+  assert.equal(
+    await motivo((async () => new Response("<html>", { status: 200 })) as typeof fetch),
+    "Resposta inválida da API (o corpo não é JSON).",
+  );
+  assert.match(await motivo((async () => Response.json({ canais: "x" })) as typeof fetch), /^Resposta inválida da API \(/);
 });

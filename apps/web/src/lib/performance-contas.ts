@@ -502,31 +502,56 @@ export type ResultadoPerformanceContas =
   | { ok: false; motivo: string };
 
 /**
- * Fetch no SERVIDOR. Nunca lanca: falha de rede, status nao-2xx, JSON
- * quebrado ou forma invalida voltam como `{ ok: false }` e a tela inteira
- * mostra erro — nenhum numero.
+ * Teto da espera pela API, em ms (T-0039 D2). A busca roda no servidor antes
+ * do render: sem teto, uma API travada deixa a pagina pendurada (medido: o
+ * fetch so' desistia no timeout interno do Node, ~300 s). 15 s cobre a API
+ * lenta medida (~4 s) com folga. Vale para cabecalho E corpo da resposta.
+ */
+export const TIMEOUT_API_MS = 15_000;
+
+export const MOTIVO_TIMEOUT = "A API não respondeu a tempo.";
+
+/**
+ * Fetch no SERVIDOR. Nunca lanca: falha de rede, timeout, status nao-2xx,
+ * JSON quebrado ou forma invalida voltam como `{ ok: false }` e a tela
+ * inteira mostra erro — nenhum numero.
+ *
+ * `timeoutMs` so' existe para o teste nao esperar 15 s.
  */
 export async function carregarPerformanceContas(
   filtros: Pick<FiltrosPerformanceContas, "marca">,
   fetchImpl: typeof fetch = fetch,
   base: string = API_URL,
+  timeoutMs: number = TIMEOUT_API_MS,
 ): Promise<ResultadoPerformanceContas> {
-  let res: Response;
+  const controle = new AbortController();
+  const timer = setTimeout(() => controle.abort(), timeoutMs);
   try {
-    res = await fetchImpl(urlPerformanceContas(base, filtros), { cache: "no-store" });
-  } catch {
-    return { ok: false, motivo: "Não foi possível contatar a API." };
+    let res: Response;
+    try {
+      res = await fetchImpl(urlPerformanceContas(base, filtros), {
+        cache: "no-store",
+        signal: controle.signal,
+      });
+    } catch {
+      if (controle.signal.aborted) return { ok: false, motivo: MOTIVO_TIMEOUT };
+      return { ok: false, motivo: "Não foi possível contatar a API." };
+    }
+    if (!res.ok) {
+      return { ok: false, motivo: `A API respondeu ${res.status}.` };
+    }
+    let json: unknown;
+    try {
+      json = await res.json();
+    } catch {
+      if (controle.signal.aborted) return { ok: false, motivo: MOTIVO_TIMEOUT };
+      return { ok: false, motivo: "Resposta inválida da API (o corpo não é JSON)." };
+    }
+    const problema = problemaNoPayload(json);
+    if (problema) return { ok: false, motivo: `Resposta inválida da API (${problema}).` };
+    return { ok: true, dados: json as PerformanceContasResponse };
+  } finally {
+    // Respondeu (ou falhou) antes do teto: o timer nao fica pendurado.
+    clearTimeout(timer);
   }
-  if (!res.ok) {
-    return { ok: false, motivo: `A API respondeu ${res.status}.` };
-  }
-  let json: unknown;
-  try {
-    json = await res.json();
-  } catch {
-    return { ok: false, motivo: "Resposta inválida da API (o corpo não é JSON)." };
-  }
-  const problema = problemaNoPayload(json);
-  if (problema) return { ok: false, motivo: `Resposta inválida da API (${problema}).` };
-  return { ok: true, dados: json as PerformanceContasResponse };
 }
