@@ -234,6 +234,9 @@ export interface Snapshot {
    * Mercado Livre: so' com o SLA oficial no lote. Ausente na API antiga.
    */
   deadline_published?: boolean | null;
+  /** EXPEDICAO-ATRASO-7D — dias de vencimento (Brasilia), "AAAA-MM-DD". */
+  late_7d_window_start?: string | null;
+  late_7d_window_end?: string | null;
 }
 
 export interface Totais {
@@ -259,6 +262,14 @@ export interface Totais {
    */
   due_today_count?: number | null;
   due_soon_count?: number | null;
+  /**
+   * EXPEDICAO-ATRASO-7D — regra oficial da Shopee (taxa de envio atrasado):
+   * dos pedidos (envios, no ML) com vencimento nos ultimos 7 dias fechados,
+   * quantos atrasaram. O % de vencidos da tela e' `late_7d / due_7d`.
+   * Nulo = nao calculado (nunca zero); ausente na API antiga.
+   */
+  due_7d_count?: number | null;
+  late_7d_count?: number | null;
 }
 
 export interface ResumoConta extends Totais {
@@ -1576,6 +1587,8 @@ const MEDIDAS: readonly (keyof Totais)[] = [
   "due_next_day_count",
   "due_today_count",
   "due_soon_count",
+  "due_7d_count",
+  "late_7d_count",
 ];
 
 export interface RecorteMarca {

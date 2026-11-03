@@ -22,7 +22,7 @@ import type { ReactNode } from "react";
 
 import type { Kpi } from "@/lib/expedicao-contract";
 import { formatarInteiro } from "@/lib/expedicao-formato";
-import { percentualDaFila } from "@/lib/expedicao-travados";
+import { SUFIXO_ATRASO_7D, percentualDaFila } from "@/lib/expedicao-travados";
 import type { ItemAtencao } from "@/lib/expedicao-ux";
 
 import { CoberturaClicavel, DicaVerPedidos } from "./CartaoDeRisco";
@@ -36,6 +36,7 @@ export default function RiscoEmDestaque({
   secundarios,
   prazo,
   ondeAgir,
+  taxaAtraso7d,
 }: {
   /** A medida em destaque, com valor medido (o cliente garante). */
   principal: Kpi;
@@ -50,11 +51,25 @@ export default function RiscoEmDestaque({
   /** Opcional: uma barra de prazo dentro do destaque. */
   prazo?: ReactNode;
   ondeAgir?: ItemAtencao | null;
+  /**
+   * EXPEDICAO-ATRASO-7D — % de VENCIDOS pela regra oficial da Shopee
+   * (atrasados ÷ pedidos dos ultimos 7 dias), ja' formatado. Para vencidos
+   * ele substitui o "% da fila"; sem ele, nenhum % (a fila nao e' a regra).
+   */
+  taxaAtraso7d?: string | null;
 }) {
   const valor = principal.valor ?? 0;
   // EXPEDICAO-VENCE-AMANHA: o % sobre a MESMA fila do "de N em fila", com a
   // regra dos travados ("3,7% da fila").
   const pct = backlog?.valor != null ? percentualDaFila(valor, backlog.valor) : null;
+  const textoPct =
+    principal.chave === "overdue"
+      ? taxaAtraso7d
+        ? ` · ${taxaAtraso7d} ${SUFIXO_ATRASO_7D}`
+        : ""
+      : pct
+        ? ` · ${pct} da fila`
+        : "";
   // Vencido e' prazo do marketplace (vermelho); +48 h e' limiar interno (ambar).
   // Zero nao pinta: cor e' para risco, nao para decorar.
   const critico = principal.chave === "overdue";
@@ -95,7 +110,7 @@ export default function RiscoEmDestaque({
           </span>
           {backlog?.valor != null ? (
             <span className="text-sm text-ink-muted">
-              de {formatarInteiro(backlog.valor)} em fila{pct ? ` · ${pct} da fila` : ""}
+              de {formatarInteiro(backlog.valor)} em fila{textoPct}
             </span>
           ) : null}
         </p>

@@ -14,6 +14,7 @@ from pipelines.expedicao import audit as audit_mod
 from pipelines.expedicao import publisher, shopee_extract, transform
 from pipelines.expedicao.cli import source_advanced
 from pipelines.expedicao.contract import (
+    ATRASO_7D_COLUMNS,
     Channel,
     DeadlineStatus,
     ExtractionResult,
@@ -658,7 +659,10 @@ def test_quatro_categorias_somam_backlog():
 def test_contagens_nunca_negativas():
     for s in resumos([]):
         for k, v in s.items():
-            if k.endswith("_count"):
+            if k in ATRASO_7D_COLUMNS:
+                # Atraso de 7 dias (035): NULL = nao calculado, nunca zero.
+                assert v is None
+            elif k.endswith("_count"):
                 assert v >= 0
 
 
