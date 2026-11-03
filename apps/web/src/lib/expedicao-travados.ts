@@ -67,7 +67,13 @@ export const LIMITE_TRAVADOS = 200;
  * "Risco atual". `travados` e' o de sempre; os outros sao recortes da MESMA
  * rota da fila por outra situacao.
  */
-export type TipoLista = "travados" | "vencidos" | "vence_24h" | "vence_proximo" | "acima_48h";
+export type TipoLista =
+  | "travados"
+  | "vencidos"
+  | "perto_de_vencer"
+  | "vence_24h"
+  | "vence_proximo"
+  | "acima_48h";
 
 export interface ConfigLista {
   situacao: Situacao;
@@ -80,6 +86,8 @@ export interface ConfigLista {
   arquivo: string;
   /** Cor do numero: vencido e' prazo do marketplace; o resto, atencao. */
   tom: "critico" | "atencao";
+  /** Como a lista vem ordenada, em lingua de gestor ("mais antigos"). */
+  ordemTexto?: string;
 }
 
 export const LISTAS: Record<TipoLista, ConfigLista> = {
@@ -91,6 +99,13 @@ export const LISTAS: Record<TipoLista, ConfigLista> = {
   vencidos: {
     situacao: "overdue", ordem: "deadline", limite: LIMIT_MAX, nome: "vencidos",
     vazio: "Nenhum pedido vencido nesta fotografia.", arquivo: "vencidos", tom: "critico",
+    ordemTexto: "mais atrasados",
+  },
+  // EXPEDICAO-PERTO-DE-VENCER: hoje primeiro, depois o proximo dia de prazo.
+  perto_de_vencer: {
+    situacao: "due_soon", ordem: "deadline", limite: LIMIT_MAX, nome: "perto de vencer",
+    vazio: "Nenhum pedido vence hoje nem no próximo dia de prazo.", arquivo: "perto-de-vencer",
+    tom: "atencao", ordemTexto: "mais urgentes",
   },
   // Mesmo prazo para todos (23:59): pago ha' mais tempo vem antes.
   vence_24h: {

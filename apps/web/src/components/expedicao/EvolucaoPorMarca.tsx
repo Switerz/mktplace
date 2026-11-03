@@ -61,18 +61,19 @@ export interface LinhaDaFila {
   /** Abre a lista dos pedidos vencidos da conta. */
   aoVerVencidos?: () => void;
   /**
-   * EXPEDICAO-TABELA-AMANHA: pedidos que vencem no proximo dia de prazo.
+   * EXPEDICAO-PERTO-DE-VENCER: vencem hoje ate' as 23:59 + no proximo dia de
+   * prazo — o MESMO numero do cartao "Perto de vencer", por conta.
    * `null`/ausente em todas as linhas (ML, API antiga): a coluna nem existe.
    */
-  venceProximo?: number | null;
-  pctVenceProximo?: string | null;
-  aoVerVenceProximo?: () => void;
+  pertoDeVencer?: number | null;
+  pctPertoDeVencer?: string | null;
+  aoVerPertoDeVencer?: () => void;
   /** Barra de prazo (ou de distribuicao) desenhada pelo cliente do canal. */
   barra: ReactNode;
 }
 
 /** O "ⓘ" de cada classificacao no cabecalho da tabela, montado pelo canal. */
-export type AjudasDaTabela = Partial<Record<"vencidos" | "venceProximo" | "acima48h" | "travados", ReactNode>>;
+export type AjudasDaTabela = Partial<Record<"vencidos" | "pertoDeVencer" | "acima48h" | "travados", ReactNode>>;
 
 /**
  * EXPEDICAO-TABELA-AMANHA — vencido e' o numero mais importante da tabela:
@@ -194,14 +195,11 @@ export default function EvolucaoPorMarca({
   resposta,
   fila,
   rotuloBarra = "Prazo",
-  rotuloProximo = "Vencem amanhã",
   ajudas = {},
 }: {
   resposta: RespostaTendencia | null;
   fila?: LinhaDaFila[];
   rotuloBarra?: string;
-  /** Cabecalho da coluna do proximo dia de prazo ("Vencem ter 03/11" na sexta). */
-  rotuloProximo?: string;
   ajudas?: AjudasDaTabela;
 }) {
   if (fila) {
@@ -210,7 +208,6 @@ export default function EvolucaoPorMarca({
         resposta={resposta}
         fila={fila}
         rotuloBarra={rotuloBarra}
-        rotuloProximo={rotuloProximo}
         ajudas={ajudas}
       />
     );
@@ -307,13 +304,11 @@ function TabelaUnica({
   resposta,
   fila,
   rotuloBarra,
-  rotuloProximo,
   ajudas,
 }: {
   resposta: RespostaTendencia | null;
   fila: LinhaDaFila[];
   rotuloBarra: string;
-  rotuloProximo: string;
   ajudas: AjudasDaTabela;
 }) {
   const series = resposta ? montarEvolucaoPorMarca(resposta.points) : [];
@@ -322,7 +317,7 @@ function TabelaUnica({
   const cobertura = cob ? descreverCobertura(cob) : null;
   const periodo = cob ? periodoDaVariacao(cob) : null;
   const comVencidos = fila.some((l) => l.vencidos !== null);
-  const comProximo = fila.some((l) => l.venceProximo != null);
+  const comPerto = fila.some((l) => l.pertoDeVencer != null);
   const naFila = new Set(fila.map((l) => l.conta));
   // A fotografia manda nas linhas; conta so' com tendencia (fora da fila
   // agora) entra no fim, com os numeros do ultimo ponto e sem barra.
@@ -356,9 +351,9 @@ function TabelaUnica({
                   Vencidos<ComAjuda ajuda={ajudas.vencidos} />
                 </th>
               ) : null}
-              {comProximo ? (
+              {comPerto ? (
                 <th scope="col" className="text-right">
-                  {rotuloProximo}<ComAjuda ajuda={ajudas.venceProximo} />
+                  Perto de vencer<ComAjuda ajuda={ajudas.pertoDeVencer} />
                 </th>
               ) : null}
               <th scope="col" className="text-right">
@@ -434,28 +429,28 @@ function TabelaUnica({
                       )}
                     </td>
                   ) : null}
-                  {comProximo ? (
+                  {comPerto ? (
                     <td className="whitespace-nowrap text-right tabular-nums text-ink">
-                      {f?.venceProximo == null ? (
+                      {f?.pertoDeVencer == null ? (
                         "—"
                       ) : (
                         <span className="relative">
-                          {f.aoVerVenceProximo && f.venceProximo > 0 ? (
+                          {f.aoVerPertoDeVencer && f.pertoDeVencer > 0 ? (
                             <button
                               type="button"
-                              onClick={f.aoVerVenceProximo}
-                              aria-label={`Ver os ${inteiro(f.venceProximo)} pedidos de ${titulo} que ${rotuloProximo.toLowerCase()}`}
+                              onClick={f.aoVerPertoDeVencer}
+                              aria-label={`Ver os ${inteiro(f.pertoDeVencer)} pedidos de ${titulo} perto de vencer`}
                               className="-my-3 inline-flex min-h-[44px] items-center font-semibold underline decoration-dotted underline-offset-4 hover:text-accent"
                             >
-                              {inteiro(f.venceProximo)}
+                              {inteiro(f.pertoDeVencer)}
                             </button>
                           ) : (
-                            inteiro(f.venceProximo)
+                            inteiro(f.pertoDeVencer)
                           )}
-                          {f.pctVenceProximo && f.venceProximo > 0 ? (
+                          {f.pctPertoDeVencer && f.pertoDeVencer > 0 ? (
                             <>
                               <span className="sr-only"> · </span>
-                              <span className="ml-1 text-xs font-normal text-ink-faint">{f.pctVenceProximo}</span>
+                              <span className="ml-1 text-xs font-normal text-ink-faint">{f.pctPertoDeVencer}</span>
                             </>
                           ) : null}
                         </span>

@@ -44,7 +44,7 @@ import {
   type RespostaJornada,
   type SobreposicaoJornada,
 } from "@/lib/expedicao-jornada";
-import { formatarInteiro, formatarPercentualComBase } from "@/lib/expedicao-formato";
+import { formatarInteiro, partesDoPercentualComBase } from "@/lib/expedicao-formato";
 
 import AjudaMetrica from "./AjudaMetrica";
 import { EstadoSecao } from "./LayoutExpedicao";
@@ -59,6 +59,10 @@ function dataHoraCurta(iso: string): string {
 }
 
 const CARGA_INICIAL: CargaJornada = { carregando: true, http: null, erroDeRede: false, resultado: null };
+
+/** Pedido de 30/10/2026: nomes que dizem o que e', sem "fila aberta"/"coorte". */
+export const TITULO_FILA_ABERTA = "Pedidos aguardando expedição";
+export const TITULO_COORTE = "Pedidos dos últimos dias";
 
 /**
  * UMA requisicao a' rota da jornada por (canal, marca, janela, evento).
@@ -140,9 +144,11 @@ function ListaDeEtapas({
               <span>{rotuloEtapa(e, evento)}</span>
               {descricao ? <InfoDica texto={descricao} /> : null}
             </span>
+            {/* EXPEDICAO-PERTO-DE-VENCER (30/10/2026): "46 · 6,4%" — a base ja'
+                esta' no subtitulo; "46 de 722" repetia o numero. */}
             <span className="text-right text-xs tabular-nums text-ink-muted">
               <span className="text-sm font-semibold text-ink">{formatarInteiro(e.count)}</span>{" "}
-              · {formatarPercentualComBase(e.count, base)}
+              · {partesDoPercentualComBase(e.count, base)?.percentual ?? "—"}
             </span>
             <span aria-hidden="true" className="col-span-2 block h-2 w-full overflow-hidden rounded bg-raised">
               <span className="tc-barra block h-full rounded bg-accent/70" style={{ width: `${larguraDaEtapa(e.count, base)}%` }} />
@@ -231,11 +237,11 @@ export function filaTemEtapasReais(r: RespostaJornada): boolean {
 
 function BlocoFilaAberta({ r, compacta = false }: { r: RespostaJornada; compacta?: boolean }) {
   const f = r.fila_aberta;
-  if (!f) return <SecaoNula titulo="Agora — fila aberta" secao="fila_aberta" r={r} />;
+  if (!f) return <SecaoNula titulo={TITULO_FILA_ABERTA} secao="fila_aberta" r={r} />;
   return (
     <Panel
-      titulo="Agora — fila aberta"
-      descricao={`${formatarInteiro(f.base)} ${f.grain === "shipment" ? "envios" : "pedidos"} pagos aguardando expedição.`}
+      titulo={TITULO_FILA_ABERTA}
+      descricao={`${formatarInteiro(f.base)} ${f.grain === "shipment" ? "envios" : "pedidos"} agora, por etapa.`}
       // O "ⓘ" fica fora do h3: o nome do titulo continua so' o titulo.
       // EXPEDICAO-ULTIMA-ATUALIZACAO: a hora fica so' no topo da tela; aqui,
       // so' o aviso quando a leitura esta' velha.
@@ -270,16 +276,17 @@ function BlocoFilaAberta({ r, compacta = false }: { r: RespostaJornada; compacta
 
 function BlocoCoorte({ r }: { r: RespostaJornada }) {
   const c = r.coorte;
-  if (!c) return <SecaoNula titulo="Coorte" secao="coorte" r={r} />;
+  if (!c) return <SecaoNula titulo={TITULO_COORTE} secao="coorte" r={r} />;
   const evento = c.evento;
   // R21: selo pelo booleano OU pelo `reason` da secao (fonte/publicacao velha).
   const velha = coorteDesatualizada(r);
+  // Pedido de 30/10/2026: nomes diretos. "Coorte", "dias fechados" e "evento"
+  // sairam do titulo; o evento ja' esta' na etapa ("Coletados"/"Despachados").
+  const rotulo = rotuloDaCoorte(c);
   return (
     <Panel
-      titulo={`Coorte — ${rotuloDaCoorte(c)}`}
-      descricao={`${formatarInteiro(c.base)} pedidos · dias fechados · evento: ${
-        evento === "despacho" ? "despacho" : "coleta"
-      }.`}
+      titulo={rotulo.charAt(0).toUpperCase() + rotulo.slice(1)}
+      descricao={`${formatarInteiro(c.base)} pedidos, pela etapa em que terminaram.`}
       acao={
         // EXPEDICAO-ULTIMA-ATUALIZACAO: sem "publicado em" nem "Atualizada" —
         // a hora fica so' no topo da tela. O aviso ESCRITO so' quando velha
@@ -312,7 +319,7 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
       <Sobreposicoes itens={c.sobreposicoes} etapas={c.etapas} base={c.base} evento={evento} />
       {c.fora_da_coorte.length ? (
         <p className="mt-2 text-xs text-ink-muted">
-          Fora da coorte:{" "}
+          Fora da contagem:{" "}
           {c.fora_da_coorte
             .map((f) =>
               f.count === null ? `${rotuloSobreposicao(f.key)}: indisponível` : `${formatarInteiro(f.count)} ${rotuloSobreposicao(f.key)}`,
@@ -358,7 +365,7 @@ export default function JornadaPedidos({
     return (
       <SecaoGerencial
         titulo="Jornada"
-        dica="Em que etapa estão os pedidos: agora (fila aberta) e nos dias fechados do período (coorte)."
+        dica="Em que etapa estão os pedidos agora e como terminaram os dos últimos dias."
       >
         {avisoDeMarcaNaoAplicada(marca, resposta) ? (
           <div data-testid="exp-jornada-marca-nao-aplicada">
@@ -378,7 +385,7 @@ export default function JornadaPedidos({
   return (
     <SecaoGerencial
       titulo="Jornada"
-      dica="Quantos pedidos há em cada etapa. A fila aberta (agora) e a coorte (dias fechados) são leituras separadas."
+      dica="Quantos pedidos há em cada etapa: os que aguardam expedição agora e como terminaram os dos últimos dias."
     >
       {estado === "carregando" ? <EstadoSecao tipo="carregando" titulo="Carregando a jornada…" /> : null}
       {estado === "indisponivel" ? (

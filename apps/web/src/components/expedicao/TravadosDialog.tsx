@@ -123,8 +123,8 @@ export default function TravadosDialog({
   const cfg = LISTAS[lista];
   const ehTravados = lista === "travados";
   const ehVencidos = lista === "vencidos";
-  // Vencidos vem do prazo mais antigo; o resto, do pagamento mais antigo.
-  const ordem = ehVencidos ? "mais atrasados" : "mais antigos";
+  // Vencidos e perto de vencer vem pelo prazo; o resto, pelo pagamento mais antigo.
+  const ordem = cfg.ordemTexto ?? "mais antigos";
   const query = alvo ? queryDaLista(lista, canal, alvo.marca, alvo.conta) : null;
 
   useEffect(() => {

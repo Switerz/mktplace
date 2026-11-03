@@ -136,8 +136,9 @@ class FrescorMarca(BaseModel):
 class ResumoConta(BaseModel):
     """Medidas materializadas por conta. Nada e' recalculado aqui.
 
-    Excecao unica: `due_next_day_count` e' CONTADO pela API sobre a fila do
-    MESMO lote (EXPEDICAO-VENCE-AMANHA) — nao existe materializado.
+    Excecao: `due_today_count`, `due_next_day_count` e `due_soon_count` sao
+    CONTADOS pela API sobre a fila do MESMO lote (EXPEDICAO-VENCE-AMANHA e
+    PERTO-DE-VENCER) — nao existem materializados.
     """
 
     shop_account: str
@@ -155,6 +156,12 @@ class ResumoConta(BaseModel):
     #: Pedidos com prazo no `Snapshot.next_due_date` (dia de Brasilia). Ja'
     #: contados em `on_time_count`. Nulo no canal sem prazo — nunca zero.
     due_next_day_count: Optional[int] = None
+    #: Ainda nao vencidos com prazo HOJE (dia de Brasilia da fotografia, ate'
+    #: 23:59). Nulo no canal sem prazo.
+    due_today_count: Optional[int] = None
+    #: "Perto de vencer" = `due_today_count + due_next_day_count`: a MESMA
+    #: definicao da lista `situacao=due_soon`. Nulo no canal sem prazo.
+    due_soon_count: Optional[int] = None
     run_status: str
     source_watermark_at: Optional[datetime] = None
     source_advanced: bool
@@ -179,6 +186,10 @@ class ResumoCanal(BaseModel):
     stalled_count: int
     #: Soma de `ResumoConta.due_next_day_count`; nulo no canal sem prazo.
     due_next_day_count: Optional[int] = None
+    #: Somas de `ResumoConta.due_today_count` e `.due_soon_count` (o total do
+    #: cartao "Perto de vencer" e' a soma da coluna da tabela); nulos sem prazo.
+    due_today_count: Optional[int] = None
+    due_soon_count: Optional[int] = None
 
 
 class OrderRow(BaseModel):

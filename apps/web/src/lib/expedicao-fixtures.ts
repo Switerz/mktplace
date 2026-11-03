@@ -86,7 +86,15 @@ function soma(lista: Totais[]): Totais {
 
 /** Shopee: o proximo dia de prazo (EXPEDICAO-VENCE-AMANHA) sai do "no prazo". */
 function comProximoDia(t: Totais): Totais {
-  return { ...t, due_next_day_count: Math.round(t.on_time_count * 0.6) };
+  // EXPEDICAO-PERTO-DE-VENCER: hoje = a faixa de 24 h (prazos as 23:59);
+  // perto de vencer = hoje + proximo dia de prazo.
+  const proximo = Math.round(t.on_time_count * 0.3);
+  return {
+    ...t,
+    due_next_day_count: proximo,
+    due_today_count: t.due_within_24h_count,
+    due_soon_count: t.due_within_24h_count + proximo,
+  };
 }
 
 function conta(shop: string, brand: string, t: Totais, hora: string): ResumoConta {

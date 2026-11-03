@@ -48,6 +48,7 @@ import {
   type DivisaoDaFila,
 } from "@/lib/expedicao-shopee-ldr";
 import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/CabecalhoExpedicao";
+import CartaoDeRisco from "@/components/expedicao/CartaoDeRisco";
 import RiscoEmDestaque from "@/components/expedicao/RiscoEmDestaque";
 import TravadosDialog from "@/components/expedicao/TravadosDialog";
 import { percentualDaFila, type AlvoTravados, type TipoLista } from "@/lib/expedicao-travados";
@@ -79,7 +80,7 @@ import {
   faixasDePrazo,
   montarRiscoAtual,
   recortarPorMarca,
-  rotuloDoProximoVencimento,
+  detalheDePertoDeVencer,
   rotuloFonte,
   ORDENACOES,
   ROTULO_CANAL,
@@ -176,6 +177,7 @@ const ROTULO_SITUACAO: Record<Situacao, string> = {
   slow: "Lentos",
   zombie: "Zumbis",
   due_next_day: "Próximo dia de prazo",
+  due_soon: "Perto de vencer",
 };
 
 /**
@@ -185,6 +187,7 @@ const ROTULO_SITUACAO: Record<Situacao, string> = {
  */
 const LISTA_DO_KPI: Partial<Record<string, TipoLista>> = {
   overdue: "vencidos",
+  due_soon: "perto_de_vencer",
   due24h: "vence_24h",
   due_next_day: "vence_proximo",
   over48h: "acima_48h",
@@ -193,6 +196,7 @@ const LISTA_DO_KPI: Partial<Record<string, TipoLista>> = {
 const MEDIDA_DA_LISTA: Record<TipoLista, keyof Totais> = {
   travados: "stalled_count",
   vencidos: "overdue_count",
+  perto_de_vencer: "due_soon_count",
   vence_24h: "due_within_24h_count",
   vence_proximo: "due_next_day_count",
   acima_48h: "over_48h_count",
@@ -201,9 +205,20 @@ const MEDIDA_DA_LISTA: Record<TipoLista, keyof Totais> = {
 /** O "ⓘ" de cada faixa da barra de prazo (so' a Shopee tem a barra). */
 const AJUDA_DA_FAIXA: Record<FaixaPrazo["chave"], ChaveMetrica> = {
   overdue: "shopee.overdue",
+  due_soon: "shopee.due_soon",
   due24h: "shopee.due24h",
   on_time: "shopee.no_prazo",
   sem_prazo: "shopee.sem_prazo",
+};
+
+/**
+ * EXPEDICAO-PERTO-DE-VENCER — a linha de baixo de cada cartao ao lado do
+ * destaque: so' o que ajuda a priorizar. "Perto de vencer" mostra de onde vem
+ * o total; os outros, a fatia da fila.
+ */
+const ROTULO_CURTO: Partial<Record<string, string>> = {
+  overdue: "Vencidos",
+  over48h: "Acima de 48 h",
 };
 
 const ROTULO_ORDEM: Record<Ordenacao, string> = {
@@ -220,6 +235,7 @@ const ROTULO_ORDEM: Record<Ordenacao, string> = {
  */
 const COR_SEGMENTO: Record<string, string> = {
   overdue: "bg-crit",
+  due_soon: "bg-warn",
   due24h: "bg-warn",
   on_time: "bg-ok",
   sem_prazo: "bg-line-strong",
@@ -603,10 +619,15 @@ export default function ExpedicaoClient({
   const risco = montarRiscoAtual(totaisRisco, recorte.frescor, filtros.channel, fotografiaDoPrazo).map((k) =>
     divisao && k.chave === "backlog"
       ? { ...k, rotulo: "Fila acionável do vendedor" }
-      : // A divisao nao separa o proximo dia de prazo: vale a fila publicada,
-        // e o cartao diz que ela inclui FBS (nunca zera nada).
-        divisao && k.chave === "due_next_day"
-        ? { ...k, valor: recorte.totais?.due_next_day_count ?? null, nota: "Fila publicada, com pedidos FBS." }
+      : // A divisao nao separa "perto de vencer": vale a fila publicada, com o
+        // mesmo detalhe, e o cartao diz que ela inclui FBS (nunca zera nada).
+        divisao && k.chave === "due_soon"
+        ? {
+            ...k,
+            valor: recorte.totais?.due_soon_count ?? null,
+            notaCurta: detalheDePertoDeVencer(recorte.totais, fotografiaDoPrazo),
+            nota: "Fila publicada, com pedidos FBS.",
+          }
         : k,
   );
   const frescor = montarFrescor(recorte.frescor);
@@ -683,23 +704,25 @@ export default function ExpedicaoClient({
   // medido (marca de varias contas sem divisao), volta a faixa de cartoes.
   const chaveDestaque = temPrazo ? "overdue" : "over48h";
   const kpiDestaque = risco.find((k) => k.chave === chaveDestaque);
+  // Rotulo curto no cartao: "prazo Shopee" e "limiar interno da Torre" ficam no "ⓘ".
+  const curto = (k: Kpi): Kpi => (ROTULO_CURTO[k.chave] ? { ...k, rotulo: ROTULO_CURTO[k.chave]! } : k);
   const destaque =
     kpiDestaque && kpiDestaque.valor !== null && kpiDestaque.valorTexto === undefined
-      ? kpiDestaque
+      ? curto(kpiDestaque)
       : null;
   const secundariosDoRisco = risco
     .filter((k) => k.chave !== chaveDestaque && k.chave !== "backlog" && k.chave !== "marcas_alerta")
-    // Rotulo curto no cartao: "limiar interno da Torre" fica no "ⓘ".
-    .map((k) => (k.chave === "over48h" ? { ...k, rotulo: "Acima de 48 h" } : k));
+    .map(curto);
   // "Onde agir": so' a marca que concentra — os numeros ja' estao no destaque.
   const ondeAgir = ondeAgirNaFila(totaisRisco, contasRisco, filtros.channel);
 
   /**
-   * Barra de situacao de prazo. Dentro do destaque, a legenda nao repete os
-   * numeros que os cartoes ja' mostram (vencidos, 24 h): so' os que so' ela tem.
+   * Barra de situacao de prazo, so' no painel "Prazo" (sem o destaque).
+   * EXPEDICAO-PERTO-DE-VENCER: saiu do destaque — a particao ja' esta' nos
+   * cartoes e na tabela por marca.
    */
   const temBarraDePrazo = Boolean(faixasPrazo && totaisRisco && totaisRisco.backlog_count > 0);
-  const barraDePrazo = (dentroDoDestaque: boolean) =>
+  const barraDePrazo = () =>
     temBarraDePrazo && faixasPrazo && totaisRisco ? (
       <>
         <div
@@ -715,26 +738,14 @@ export default function ExpedicaoClient({
             />
           ))}
         </div>
-        <ul
-          className={
-            dentroDoDestaque
-              ? "mt-1.5 flex flex-wrap gap-x-3 gap-y-1"
-              : "mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4"
-          }
-        >
+        <ul className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-4">
           {faixasPrazo.map((f) => (
             <li key={f.chave} className="flex items-center gap-1.5">
               <span aria-hidden="true" className={`inline-block h-2.5 w-2.5 shrink-0 rounded-sm ${COR_SEGMENTO[f.chave]}`} />
               <span className="text-xs text-ink-muted">{f.rotulo}</span>
               {/* EXPEDICAO-VENCE-AMANHA: o que cada faixa trata, no hover. */}
               <Ajuda chave={AJUDA_DA_FAIXA[f.chave]} />
-              {dentroDoDestaque && (f.chave === "overdue" || f.chave === "due24h") ? null : (
-                <span
-                  className={`text-sm font-semibold tabular-nums text-ink ${dentroDoDestaque ? "" : "ml-auto"}`}
-                >
-                  {numero(f.valor)}
-                </span>
-              )}
+              <span className="ml-auto text-sm font-semibold tabular-nums text-ink">{numero(f.valor)}</span>
             </li>
           ))}
         </ul>
@@ -764,20 +775,20 @@ export default function ExpedicaoClient({
                 lista: "vencidos",
               })
           : undefined,
-      // EXPEDICAO-TABELA-AMANHA: os que vencem no proximo dia de prazo, por conta.
-      venceProximo: temPrazo ? (a.due_next_day_count ?? null) : null,
-      pctVenceProximo:
-        temPrazo && a.due_next_day_count != null ? percentualDaFila(a.due_next_day_count, a.backlog_count) : null,
-      aoVerVenceProximo:
-        temPrazo && (a.due_next_day_count ?? 0) > 0
+      // EXPEDICAO-PERTO-DE-VENCER: o MESMO numero do cartao, por conta.
+      pertoDeVencer: temPrazo ? (a.due_soon_count ?? null) : null,
+      pctPertoDeVencer:
+        temPrazo && a.due_soon_count != null ? percentualDaFila(a.due_soon_count, a.backlog_count) : null,
+      aoVerPertoDeVencer:
+        temPrazo && (a.due_soon_count ?? 0) > 0
           ? () =>
               setAlvoTravados({
-                titulo: `${rotuloDoProximoVencimento(fotografiaDoPrazo?.next_due_date, fotografiaDoPrazo?.effective_at)} · ${brandLabel(a.brand)}`,
+                titulo: `Perto de vencer · ${brandLabel(a.brand)}`,
                 marca: a.brand,
                 conta: a.shop_account,
-                travados: a.due_next_day_count ?? 0,
+                travados: a.due_soon_count ?? 0,
                 backlog: a.backlog_count,
-                lista: "vence_proximo",
+                lista: "perto_de_vencer",
               })
           : undefined,
       acima48h: a.over_48h_count,
@@ -807,15 +818,14 @@ export default function ExpedicaoClient({
   });
 
   /**
-   * "ver quais" de um cartao do "Risco atual": abre a lista dos pedidos dele
-   * (EXPEDICAO-TRAVADOS-1 para travados; EXPEDICAO-VENCE-AMANHA para os demais).
-   * A lista vem da fila PUBLICADA, entao o numero inicial tambem.
+   * Abre a lista dos pedidos de um cartao do "Risco atual" (EXPEDICAO-TRAVADOS-1
+   * para travados; EXPEDICAO-VENCE-AMANHA/PERTO-DE-VENCER para os demais).
+   * A lista vem da fila PUBLICADA, entao o numero inicial tambem. Sem valor,
+   * o cartao nao abre nada.
    */
-  const botaoVerQuais = (k: Kpi, tipo: TipoLista) =>
-    (k.valor ?? 0) > 0 ? (
-      <button
-        type="button"
-        onClick={() =>
+  const abrirLista = (k: Kpi, tipo: TipoLista | undefined) =>
+    tipo && (k.valor ?? 0) > 0
+      ? () =>
           setAlvoTravados({
             titulo: marcaAtiva ? `${k.rotulo} · ${brandLabel(marcaAtiva)}` : k.rotulo,
             marca: marcaAtiva,
@@ -825,35 +835,29 @@ export default function ExpedicaoClient({
             incluiFbs: divisao !== null,
             lista: tipo,
           })
-        }
-        className="-my-3 inline-flex min-h-[44px] items-center font-semibold text-ink underline underline-offset-4 hover:text-accent"
-      >
-        ver quais
-      </button>
-    ) : null;
+      : undefined;
 
-  /** Cartao ao lado do destaque: o numero, o % da fila e "ver quais". */
-  const cartaoComLista = (k: Kpi, tipo: TipoLista) => {
-    // O % usa a fila do proprio numero: o proximo dia de prazo vem da fila
+  /**
+   * EXPEDICAO-PERTO-DE-VENCER — cartao limpo ao lado do destaque: rotulo com
+   * "ⓘ", numero e uma linha. "Perto de vencer" e' a prioridade (ambar com
+   * valor); acima de 48 h e travados ficam neutros, so' com a fatia da fila.
+   */
+  const cartaoDeRisco = (k: Kpi) => {
+    const valor = k.valor ?? 0;
+    // O % usa a fila do proprio numero: "perto de vencer" vem da fila
     // publicada mesmo com a divisao vendedor x FBS.
-    const base = divisao && tipo === "vence_proximo" ? recorte.totais?.backlog_count : totaisRisco?.backlog_count;
-    const pct = percentualDaFila(k.valor ?? 0, base ?? 0);
+    const base = divisao && k.chave === "due_soon" ? recorte.totais?.backlog_count : totaisRisco?.backlog_count;
+    const pct = percentualDaFila(valor, base ?? 0);
     return (
-      <KpiComAjuda
+      <CartaoDeRisco
         key={k.chave}
-        ajuda={chaveDoKpiDaFila(filtros.channel, k.chave)}
         rotulo={k.rotulo}
-        valor={numero(k.valor ?? 0)}
-        contexto={k.nota}
-        tom={tomDoKpi(k)}
-        destaque
-        comparacao={
-          <>
-            {pct ? `${pct} da fila` : null}
-            {pct && (k.valor ?? 0) > 0 ? " · " : null}
-            {botaoVerQuais(k, tipo)}
-          </>
-        }
+        ajuda={ajudaDaFila(k.chave)}
+        valor={k.valorTexto ?? (k.valor === null ? "—" : numero(valor))}
+        detalhe={k.chave === "due_soon" ? k.notaCurta : pct ? `${pct} da fila` : undefined}
+        tom={k.chave === "due_soon" && valor > 0 ? "atencao" : "neutro"}
+        aoAbrir={abrirLista(k, LISTA_DO_KPI[k.chave])}
+        rotuloAbrir={`Ver os ${numero(valor)} pedidos: ${k.rotulo}`}
       />
     );
   };
@@ -862,7 +866,9 @@ export default function ExpedicaoClient({
   const legendaDaBarra = (
     <ul className="flex flex-wrap gap-x-4 gap-y-1">
       {mapa.empilhavel ? (
-        (["overdue", "due24h", "on_time", "sem_prazo"] as const).map((chave) => {
+        // Vale a particao que a barra desenha: "perto de vencer" com a medida
+        // publicada; "vence em 24 h" na API antiga.
+        (["overdue", "due_soon", "due24h", "on_time", "sem_prazo"] as const).map((chave) => {
           const rotulo = mapa.linhas[0]?.segmentos.find((s) => s.chave === chave)
             ?.rotulo;
           return rotulo ? (
@@ -961,17 +967,10 @@ export default function ExpedicaoClient({
           backlog={risco.find((k) => k.chave === "backlog")}
           marcasAlerta={risco.find((k) => k.chave === "marcas_alerta")}
           ajuda={ajudaDaFila(chaveDestaque)}
-          acao={LISTA_DO_KPI[destaque.chave] ? botaoVerQuais(destaque, LISTA_DO_KPI[destaque.chave]!) : null}
-          secundarios={secundariosDoRisco.map((k) => {
-            const lista = LISTA_DO_KPI[k.chave];
-            return lista && k.valor !== null ? (
-              cartaoComLista(k, lista)
-            ) : (
-              <CelulaKpi key={k.chave} kpi={k} canal={filtros.channel} destaque={false} numeroGrande />
-            );
-          })}
-          // Sem prazo publicado (Mercado Livre), a barra seria 100% "sem prazo".
-          prazo={temPrazo ? barraDePrazo(true) : undefined}
+          // EXPEDICAO-PERTO-DE-VENCER: o cartao inteiro abre a lista; a barra
+          // de prazo saiu do destaque (a particao esta' nos cartoes e na tabela).
+          aoAbrir={abrirLista(destaque, LISTA_DO_KPI[destaque.chave])}
+          secundarios={secundariosDoRisco.map(cartaoDeRisco)}
           ondeAgir={ondeAgir}
         />
       ) : (
@@ -1004,7 +1003,7 @@ export default function ExpedicaoClient({
           titulo={divisao ? "Fila do vendedor por situação de prazo" : "Pedidos em fila por situação de prazo"}
           acao={<Ajuda chave="shopee.prazo_situacao" />}
         >
-          {barraDePrazo(false) ?? (
+          {barraDePrazo() ?? (
             <p className="text-sm text-ink-muted">
               {recorte.variasContas
                 ? "Situação de prazo por conta em “Backlog por marca”."
@@ -1157,10 +1156,9 @@ export default function ExpedicaoClient({
         resposta={temSerieNaTendencia ? tendencia : null}
         fila={linhasDaFila}
         rotuloBarra={temPrazo ? "Prazo" : "Distribuição"}
-        rotuloProximo={rotuloDoProximoVencimento(fotografiaDoPrazo?.next_due_date, fotografiaDoPrazo?.effective_at, "Vencem")}
         ajudas={{
           vencidos: ajudaDaFila("overdue"),
-          venceProximo: ajudaDaFila("due_next_day"),
+          pertoDeVencer: ajudaDaFila("due_soon"),
           acima48h: ajudaDaFila("over48h"),
           travados: ajudaDaFila("stalled"),
         }}

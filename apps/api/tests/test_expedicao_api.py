@@ -98,8 +98,8 @@ class SessaoFake:
             {"sync_run_id": 315, "status": "success",
              "rows_extracted": 985, "rows_loaded": 985}]
         self.tendencia = tendencia or []
-        # EXPEDICAO-VENCE-AMANHA: linhas (proximo_vencimento, shop_account,
-        # vencem). Padrao vazio: a fila padrao so' vence no dia da fotografia.
+        # EXPEDICAO-VENCE-AMANHA / PERTO-DE-VENCER: linhas (dia, shop_account,
+        # vencem) dos nao vencidos de hoje em diante. Padrao vazio.
         self.proximo = proximo or []
         self.consultas: list[tuple[str, dict]] = []
 
@@ -1006,18 +1006,22 @@ def test_auditoria_escolhe_a_execucao_produtora_e_nao_a_seguinte(ligada):
 # EXPEDICAO-VENCE-AMANHA — proximo dia de vencimento (30/10/2026)
 # ===========================================================================
 #: Fotografia de 16/09 18:35 BRT; o proximo dia com prazo na fila e' 17/09.
+HOJE = date(2026, 9, 16)
 AMANHA = date(2026, 9, 17)
 
 
+def _dia(dia, **por_conta):
+    """Linhas da consulta do perto de vencer: (dia do prazo, conta, vencem)."""
+    return [{"dia": dia, "shop_account": c, "vencem": n} for c, n in por_conta.items()]
+
+
 def _proximo(**por_conta):
-    return [{"proximo_vencimento": AMANHA, "shop_account": c, "vencem": n}
-            for c, n in por_conta.items()]
+    return _dia(AMANHA, **por_conta)
 
 
 def test_proximo_vencimento_por_conta_e_no_total(ligada):
     # A consulta devolve todo dia futuro; so' o MENOR conta.
-    depois = {"proximo_vencimento": date(2026, 9, 18), "shop_account": "lescent",
-              "vencem": 50}
+    depois = {"dia": date(2026, 9, 18), "shop_account": "lescent", "vencem": 50}
     s = SessaoFake(proximo=[depois, *_proximo(apice=7, barbours=3)])
     r = svc.get_expedicao(s)
     assert r["snapshot"]["next_due_date"] == AMANHA
@@ -1031,8 +1035,9 @@ def test_proximo_vencimento_le_o_mesmo_lote_no_dia_de_brasilia(ligada):
     svc.get_expedicao(s, include_queue=False)
     sql, params = next((q, p) for q, p in s.consultas if "AS vencem" in q)
     assert params["canal"] == "shopee" and params["batch"] == BATCH
-    # "amanha" e' relativo a' FOTOGRAFIA, nunca ao relogio da requisicao.
-    assert params["efetivo"] == AGORA
+    # "hoje" e "amanha" sao relativos a' FOTOGRAFIA (16/09 18:35 BRT), nunca
+    # ao relogio da requisicao; o dia e' calculado UMA vez e vai como parametro.
+    assert params["hoje"] == HOJE
     assert "AT TIME ZONE 'America/Sao_Paulo'" in sql
     assert "now()" not in sql.lower()
 
@@ -1086,7 +1091,7 @@ def test_pagina_da_fila_com_due_next_day_liga_o_parametro(ligada):
     svc._pagina_da_fila(s, svc.CANAIS["shopee"], BATCH, brands=None,
                         accounts=None, situacoes=["due_next_day", "stalled"],
                         order_by="deadline", limit=10, offset=0,
-                        proximo_vencimento=AMANHA)
+                        perto=svc.PertoDeVencer(HOJE, AMANHA, {}, {}))
     sql, params = s.consultas[-1]
     assert "= :proximo_vencimento" in sql and "is_stalled" in sql
     assert params["proximo_vencimento"] == AMANHA
@@ -1114,3 +1119,111 @@ def test_payload_com_proximo_vencimento_valida_no_schema(ligada):
     assert m.snapshot.next_due_date == AMANHA
     assert m.totals.due_next_day_count == 7
     assert {c.shop_account: c.due_next_day_count for c in m.accounts}["apice"] == 7
+
+
+# ===========================================================================
+# EXPEDICAO-PERTO-DE-VENCER — hoje ate' 23:59 + proximo dia de prazo (30/10/2026)
+# ===========================================================================
+def test_perto_de_vencer_soma_hoje_e_o_proximo_dia_por_conta(ligada):
+    depois = _dia(date(2026, 9, 18), lescent=50)  # depois do proximo: fora
+    s = SessaoFake(proximo=[*_dia(HOJE, apice=5, barbours=2),
+                            *_proximo(apice=7, barbours=3), *depois])
+    r = svc.get_expedicao(s)
+    contas = {c["shop_account"]: c for c in r["accounts"]}
+    assert {k: v["due_today_count"] for k, v in contas.items()} == {
+        "apice": 5, "barbours": 2, "lescent": 0, "rituaria": 0}
+    assert {k: v["due_next_day_count"] for k, v in contas.items()} == {
+        "apice": 7, "barbours": 3, "lescent": 0, "rituaria": 0}
+    assert {k: v["due_soon_count"] for k, v in contas.items()} == {
+        "apice": 12, "barbours": 5, "lescent": 0, "rituaria": 0}
+    t = r["totals"]
+    assert (t["due_today_count"], t["due_next_day_count"], t["due_soon_count"]) == (7, 10, 17)
+    # o total do cartao e' a soma da coluna da tabela (mesma informacao)
+    assert t["due_soon_count"] == sum(c["due_soon_count"] for c in r["accounts"])
+    assert r["snapshot"]["next_due_date"] == AMANHA
+
+
+def test_perto_de_vencer_conta_so_nao_vencidos_com_prazo_de_hoje_em_diante(ligada):
+    s = SessaoFake(proximo=_dia(HOJE, apice=1))
+    svc.get_expedicao(s, include_queue=False)
+    sql, params = next((q, p) for q, p in s.consultas if "AS vencem" in q)
+    assert svc.NAO_VENCIDO_COM_PRAZO_SQL in sql
+    assert "deadline_status <> 'overdue'" in svc.NAO_VENCIDO_COM_PRAZO_SQL
+    assert "dispatch_deadline IS NOT NULL" in svc.NAO_VENCIDO_COM_PRAZO_SQL
+    assert ">= :hoje" in svc.NAO_VENCIDO_COM_PRAZO_SQL
+    assert params["hoje"] == HOJE
+    assert sum("AS vencem" in q for q, _ in s.consultas) == 1, "uma consulta so'"
+
+
+def test_hoje_e_o_dia_de_brasilia_da_fotografia():
+    # 17/09 02:30 UTC ainda e' 16/09 23:30 em Brasilia
+    assert svc._dia_brt(datetime(2026, 9, 17, 2, 30, tzinfo=timezone.utc)) == HOJE
+    assert svc._dia_brt(datetime(2026, 9, 17, 3, 30, tzinfo=timezone.utc)) == AMANHA
+
+
+def test_fotografia_perto_da_meia_noite_usa_o_dia_de_brasilia(ligada):
+    # 17/09 02:30 UTC = 16/09 23:30 BRT: "hoje" ainda e' 16/09
+    efetivo = datetime(2026, 9, 17, 2, 30, tzinfo=timezone.utc)
+    cab = {"linhas": 985, "lotes": 1, "instantes": 1, "batch": BATCH,
+           "effective_at": efetivo}
+    s = SessaoFake(cabecalho=cab, proximo=_dia(HOJE, apice=4),
+                   resumos=[resumo(b, n, observed_at=efetivo) for b, n in CONTAS])
+    r = svc.get_expedicao(s, include_queue=False)
+    _sql, params = next((q, p) for q, p in s.consultas if "AS vencem" in q)
+    assert params["hoje"] == HOJE
+    assert r["totals"]["due_today_count"] == 4
+
+
+def test_sem_proximo_dia_perto_de_vencer_e_so_hoje(ligada):
+    s = SessaoFake(proximo=_dia(HOJE, apice=3))
+    r = svc.get_expedicao(s, situacoes=["due_soon"])
+    assert r["snapshot"]["next_due_date"] is None
+    assert r["totals"]["due_soon_count"] == r["totals"]["due_today_count"] == 3
+    _sql, params = next((q, p) for q, p in s.consultas if "LIMIT :limit OFFSET :offset" in q)
+    assert params["limite_perto"] == HOJE
+
+
+def test_lista_due_soon_usa_a_mesma_base_e_o_mesmo_dia_da_contagem(ligada):
+    """Cartao, tabela e lista com o MESMO numero: a contagem e a lista partem
+    do mesmo predicado base e do mesmo `:hoje`; so' o limite superior entra."""
+    s = SessaoFake(proximo=[*_dia(HOJE, apice=5), *_proximo(apice=7)])
+    svc.get_expedicao(s, situacoes=["due_soon"])
+    _c, p_contagem = next((q, p) for q, p in s.consultas if "AS vencem" in q)
+    for marcador in ("count(*) AS n", "LIMIT :limit OFFSET :offset"):
+        sql, params = next((q, p) for q, p in s.consultas if marcador in q)
+        assert svc.NAO_VENCIDO_COM_PRAZO_SQL in sql, marcador
+        assert f"{svc.DIA_DO_PRAZO_SQL} <= :limite_perto" in sql, marcador
+        assert params["hoje"] == p_contagem["hoje"] == HOJE
+        assert params["limite_perto"] == AMANHA
+
+
+def test_lista_due_next_day_tambem_parte_da_base_comum(ligada):
+    s = SessaoFake(proximo=_proximo(apice=2))
+    svc.get_expedicao(s, situacoes=["due_next_day"])
+    sql, params = next((q, p) for q, p in s.consultas if "LIMIT :limit OFFSET :offset" in q)
+    assert svc.NAO_VENCIDO_COM_PRAZO_SQL in sql
+    assert params["hoje"] == HOJE and params["proximo_vencimento"] == AMANHA
+
+
+def test_due_soon_fica_fora_dos_predicados_fixos_e_a_borda_aceita():
+    from fastapi import HTTPException
+
+    from app.routers import expedicao as rt
+
+    assert "due_soon" not in svc.SITUACAO_SQL
+    assert svc.SITUACAO_PERTO_DE_VENCER == "due_soon"
+    assert "due_soon" in svc.SITUACOES_ACEITAS
+    assert rt.situacoes_query("due_soon") == ["due_soon"]
+    with pytest.raises(HTTPException) as e:
+        rt.situacoes_query("soon")
+    assert "due_soon" in e.value.detail
+
+
+def test_payload_com_perto_de_vencer_valida_no_schema(ligada):
+    from app.schemas.expedicao import ExpedicaoResponse
+
+    s = SessaoFake(proximo=[*_dia(HOJE, apice=5), *_proximo(apice=7)])
+    m = ExpedicaoResponse.model_validate(svc.get_expedicao(s, situacoes=["due_soon"]))
+    assert (m.totals.due_today_count, m.totals.due_soon_count) == (5, 12)
+    apice = {c.shop_account: c for c in m.accounts}["apice"]
+    assert (apice.due_today_count, apice.due_next_day_count, apice.due_soon_count) == (5, 7, 12)

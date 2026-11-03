@@ -769,11 +769,11 @@ test("jornada 404 e rede: secao discreta, sem alerta vermelho", () => {
 
 test("jornada ML: fila aberta com etapas e coorte indisponivel com a limitacao", () => {
   const html = render(200, JORNADA_ML, "mercadolivre");
-  assert.match(html, /Agora — fila aberta/);
+  assert.match(html, /Pedidos aguardando expedição/);
   assert.match(html, /Aguardando expedição/);
-  assert.match(html, /100,0% · 10 de 10/);
+  assert.match(html, /100,0%/);
   assert.match(html, /Vencidos: indisponível — o Mercado Livre não publica prazo de despacho/);
-  assert.match(html, /Coorte<\/h3>[\s\S]*Indisponível neste canal: o Mercado Livre não publica prazo de despacho/);
+  assert.match(html, /Pedidos dos últimos dias<\/h3>[\s\S]*Indisponível neste canal: o Mercado Livre não publica prazo de despacho/);
   assert.match(html, /substatus do shipment não publicado na fila/);
 });
 
@@ -787,7 +787,7 @@ test("jornada TikTok: coorte rotulada, so' o selo 'Desatualizada' (publicacao no
     },
     "tiktok",
   );
-  assert.match(html, /Coorte — pedidos pagos de 19\/10 a 25\/10/);
+  assert.match(html, /Pedidos pagos de 19\/10 a 25\/10/);
   // EXPEDICAO-ULTIMA-ATUALIZACAO: a hora fica so' no topo; aqui, no `title`.
   assert.doesNotMatch(html, /publicado em <time/);
   assert.match(html, /title="Última publicação dos dias desta coorte: \d{2}\/\d{2} \d{2}:\d{2}\."/);
@@ -835,11 +835,11 @@ test("R21: unavailable com UMA secao presente e' 'pronta'; so' as duas nulas vir
 test("R21 render: fila valida + coorte nula (table_not_migrated) -> fila visivel, coorte indisponivel com o motivo", () => {
   const html = render(200, shopeeFilaSemCoorte(), "shopee");
   assert.match(html, /data-testid="exp-jornada"/, "os blocos aparecem");
-  assert.match(html, /Agora — fila aberta/);
-  assert.match(html, /10 pedidos pagos aguardando expedição\./);
-  assert.match(html, /100,0% · 10 de 10/);
+  assert.match(html, /Pedidos aguardando expedição/);
+  assert.match(html, /10 pedidos agora, por etapa\./);
+  assert.match(html, /100,0%/);
   assert.match(html, /exp-jornada-coorte-indisponivel/);
-  assert.match(html, /Coorte<\/h3>[\s\S]*Indisponível agora: a tabela ainda não foi publicada nesta base\./);
+  assert.match(html, /Pedidos dos últimos dias<\/h3>[\s\S]*Indisponível agora: a tabela ainda não foi publicada nesta base\./);
   assert.doesNotMatch(html, /Jornada indisponível/, "a secao inteira nao some");
   assert.doesNotMatch(html, /table_not_migrated/, "o codigo cru nao aparece");
 });
@@ -851,10 +851,10 @@ test("R21 render: fila nula + coorte valida (TikTok) -> coorte visivel", () => {
     "tiktok",
   );
   assert.match(html, /data-testid="exp-jornada"/);
-  assert.match(html, /Coorte — pedidos pagos de 19\/10 a 25\/10/);
+  assert.match(html, /Pedidos pagos de 19\/10 a 25\/10/);
   assert.match(html, /4\.310 pedidos/);
   assert.match(html, /exp-jornada-fila_aberta-indisponivel/);
-  assert.match(html, /Agora — fila aberta<\/h3>[\s\S]*Indisponível agora: nenhuma fotografia publicada ainda\./);
+  assert.match(html, /Pedidos aguardando expedição<\/h3>[\s\S]*Indisponível agora: nenhuma fotografia publicada ainda\./);
   assert.doesNotMatch(html, /Jornada indisponível/);
 });
 
@@ -876,7 +876,7 @@ test("R21 render: partial por fonte_desatualizada -> secao visivel com selo de d
     reason: "coorte: fonte_desatualizada",
   };
   const html = render(200, p, "tiktok");
-  assert.match(html, /Coorte — pedidos pagos de 19\/10 a 25\/10/);
+  assert.match(html, /Pedidos pagos de 19\/10 a 25\/10/);
   assert.match(html, /4\.310 pedidos/);
   assert.match(html, />Desatualizada</, "chip de frescor");
   assert.match(html, /exp-jornada-coorte-desatualizada/, "aviso no bloco");
@@ -997,7 +997,7 @@ test("jornada: etapas novas aparecem com o `label` da API; sem label, o rotulo d
     // Resposta sem `label`: o mapa local devolve o mesmo texto da API.
     assert.equal(rotuloEtapa({ key, label: null, count: 1 }), label, key);
   }
-  assert.match(html, /Entregue à transportadora<\/span>[\s\S]*?6<\/span> · 13,3% · 6 de 45/);
+  assert.match(html, /Entregue à transportadora<\/span>[\s\S]*?6<\/span> · 13,3%/);
 });
 
 test("jornada: chave de etapa DESCONHECIDA nao derruba o parser e aparece com o `label` da API", () => {
@@ -1010,7 +1010,7 @@ test("jornada: chave de etapa DESCONHECIDA nao derruba o parser e aparece com o 
   assert.ok(r.ok, r.ok ? "" : r.erro);
   const html = render(200, payload, "mercadolivre");
   assert.match(html, />Em trânsito para o CD<\/span>/);
-  assert.match(html, /58,3% · 7 de 12/);
+  assert.match(html, /58,3%/);
   assert.doesNotMatch(html, /etapa_que_ainda_nao_existe/);
   // sem label e sem rotulo local: humanizado, nunca a chave crua
   assert.match(html, />Outra sem label<\/span>/);

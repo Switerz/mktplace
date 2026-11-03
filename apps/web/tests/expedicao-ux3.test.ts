@@ -150,12 +150,14 @@ test("marca fora da cobertura: ausencia, nao backlog zero", () => {
 // 3. Risco atual: so' o que o canal sustenta
 // ===========================================================================
 // EXPEDICAO-VENCE-AMANHA: o proximo dia de prazo entrou depois de "vence em 24 h".
-test("Shopee: sete indicadores, com vencidos, vence em 24 h e o proximo dia de prazo", () => {
+// EXPEDICAO-PERTO-DE-VENCER: "vence em 24 h" e o proximo dia de prazo viraram
+// UM cartao, "perto de vencer" (hoje + proximo dia de prazo).
+test("Shopee: seis indicadores, com vencidos e perto de vencer", () => {
   assert.deepEqual(
     [...KPIS_RISCO_ATUAL.shopee],
-    ["backlog", "overdue", "due24h", "due_next_day", "over48h", "stalled", "marcas_alerta"],
+    ["backlog", "overdue", "due_soon", "over48h", "stalled", "marcas_alerta"],
   );
-  assert.equal(montarRiscoAtual(totais(), [], "shopee").length, 7);
+  assert.equal(montarRiscoAtual(totais(), [], "shopee").length, 6);
 });
 
 test("Mercado Livre: nenhum vencido, nenhum 'vence em 24 h'", () => {

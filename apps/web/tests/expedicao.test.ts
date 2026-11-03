@@ -196,8 +196,9 @@ test("com a flag desligada nenhum fetch pode ser disparado", () => {
 // Allowlists
 // ===========================================================================
 // EXPEDICAO-VENCE-AMANHA: `due_next_day` e' o nono.
-test("situacao: nove valores, nada fora da allowlist passa", () => {
-  assert.equal(SITUACOES.length, 9);
+// EXPEDICAO-PERTO-DE-VENCER: `due_soon` e' o decimo.
+test("situacao: dez valores, nada fora da allowlist passa", () => {
+  assert.equal(SITUACOES.length, 10);
   assert.deepEqual(sanitizarSituacoes(["overdue", "hack", "stalled"]), ["overdue", "stalled"]);
   assert.deepEqual(sanitizarSituacoes(["'; DROP TABLE x; --"]), []);
 });

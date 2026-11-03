@@ -9,9 +9,9 @@ A API NAO reclassifica nada a partir do relogio da requisicao: se o fizesse,
 dois consumidores veriam estados diferentes para a mesma fotografia.
 
 Os agregados calculados aqui sao o total do canal, que e' soma de contas do
-MESMO batch e nao existe materializado de proposito, e o proximo vencimento
-(`_proximo_vencimento`), contado na fila do mesmo batch a partir do dia da
-FOTOGRAFIA — nunca do relogio da requisicao.
+MESMO batch e nao existe materializado de proposito, e o perto de vencer
+(hoje + proximo dia de prazo, `_perto_de_vencer`), contado na fila do mesmo
+batch a partir do dia da FOTOGRAFIA — nunca do relogio da requisicao.
 
 A FOTOGRAFIA E' UMA SO'
 ------------------------
@@ -37,6 +37,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional, get_args
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 
@@ -97,12 +98,31 @@ SITUACAO_SQL = {
 #: `count(*) FILTER (WHERE ...)` so' com predicados fixos.
 SITUACAO_PROXIMO_VENCIMENTO = "due_next_day"
 
-#: O que a borda aceita em `situacao`: os predicados fixos e o parametrizado.
-SITUACOES_ACEITAS = frozenset(SITUACAO_SQL) | {SITUACAO_PROXIMO_VENCIMENTO}
+#: EXPEDICAO-PERTO-DE-VENCER — os que vencem HOJE ate' 23:59 e no PROXIMO dia
+#: de prazo, ainda nao vencidos. Tambem parametrizado, tambem fora de
+#: `SITUACAO_SQL`.
+SITUACAO_PERTO_DE_VENCER = "due_soon"
+
+#: O que a borda aceita em `situacao`: os predicados fixos e os parametrizados.
+SITUACOES_ACEITAS = frozenset(SITUACAO_SQL) | {
+    SITUACAO_PROXIMO_VENCIMENTO, SITUACAO_PERTO_DE_VENCER}
+
+#: Fuso dos prazos da Shopee (`ship_by_date` sempre as 23:59 de Brasilia).
+FUSO_DO_PRAZO = ZoneInfo("America/Sao_Paulo")
 
 #: Dia do prazo em Brasilia. `ship_by_date` e' `timestamptz`; o dia em UTC
 #: erraria as tres ultimas horas de cada dia.
 DIA_DO_PRAZO_SQL = "(dispatch_deadline AT TIME ZONE 'America/Sao_Paulo')::date"
+
+#: BASE COMUM da contagem e das listas do perto de vencer (EXPEDICAO-PERTO-DE-
+#: VENCER): pedido com prazo, ainda NAO vencido, com prazo de hoje em diante.
+#: A contagem agrupa por dia sobre ela; a lista so' acrescenta o limite
+#: superior. Partindo do MESMO texto e do MESMO `:hoje`, cartao, tabela e lista
+#: nao tem como divergir.
+NAO_VENCIDO_COM_PRAZO_SQL = (
+    "dispatch_deadline IS NOT NULL AND deadline_status <> 'overdue'"
+    f" AND {DIA_DO_PRAZO_SQL} >= :hoje"
+)
 
 #: Ordenacao PADRAO: criticidade operacional, depois prazo mais urgente, e a
 #: chave fisica como desempate. Sem o desempate estavel, duas paginas podem
@@ -620,38 +640,95 @@ def _cobertura(db, canal: Canal, resumos: list[dict],
 # ---------------------------------------------------------------------------
 # Endpoint principal
 # ---------------------------------------------------------------------------
-def _proximo_vencimento(db, canal: Canal, batch: str,
-                        effective_at: datetime) -> tuple[Optional[date], dict[str, int]]:
-    """EXPEDICAO-VENCE-AMANHA: o PROXIMO dia de prazo e quantos vencem nele.
+def _dia_brt(instante: datetime) -> date:
+    """Dia de Brasilia do instante. Sem fuso, o instante e' UTC (como no banco)."""
+    if instante.tzinfo is None:
+        instante = instante.replace(tzinfo=timezone.utc)
+    return instante.astimezone(FUSO_DO_PRAZO).date()
+
+
+@dataclass(frozen=True)
+class PertoDeVencer:
+    """EXPEDICAO-PERTO-DE-VENCER: o que vence hoje e no proximo dia de prazo.
+
+    `hoje` e' o dia de Brasilia da FOTOGRAFIA; `proximo`, o primeiro dia de
+    prazo depois dele (nulo sem prazo depois de hoje). As contagens sao por
+    conta, so' de pedidos ainda nao vencidos.
+    """
+
+    hoje: date
+    proximo: Optional[date]
+    hoje_por_conta: dict[str, int]
+    proximo_por_conta: dict[str, int]
+
+    @property
+    def limite(self) -> date:
+        """Ultimo dia que conta como "perto de vencer"."""
+        return self.proximo or self.hoje
+
+    def por_conta(self, conta: str) -> tuple[int, int, int]:
+        """(hoje, proximo dia, perto de vencer) da conta."""
+        h = self.hoje_por_conta.get(conta, 0)
+        p = self.proximo_por_conta.get(conta, 0)
+        return h, p, h + p
+
+
+def _perto_de_vencer(db, canal: Canal, batch: str,
+                     effective_at: datetime) -> PertoDeVencer:
+    """EXPEDICAO-VENCE-AMANHA + PERTO-DE-VENCER: hoje e o PROXIMO dia de prazo.
 
     O `ship_by_date` da Shopee cai sempre as 23:59 de Brasilia e nunca em fim
     de semana ou feriado (medido no SHOPEE-LDR-1). Entao "vence em 24 h" e', na
-    pratica, "vence hoje", e quem vence amanha nao aparece em lugar nenhum.
-    Aqui: o primeiro dia de prazo DEPOIS do dia da fotografia — amanha de
-    segunda a quinta; na sexta, o proximo dia util — e a contagem por conta.
+    pratica, "vence hoje", e quem vence amanha nao aparecia em lugar nenhum.
+    Pedido do usuario (30/10/2026): a prioridade e' "perto de vencer" = o que
+    vence HOJE ate' 23:59 + o que vence no proximo dia de prazo (amanha de
+    segunda a quinta; na sexta, o proximo dia util), sem os ja' vencidos.
 
-    "Hoje" e' o dia da FOTOGRAFIA (`effective_at`), nunca o relogio da
-    requisicao: dois consumidores do mesmo lote veem o mesmo dia. Canal
-    inteiro, como `totals`; o filtro de marca so' recorta a lista.
+    "Hoje" e' o dia da FOTOGRAFIA (`effective_at`), calculado UMA vez aqui e
+    passado como `:hoje`: o SQL e esta funcao nao tem como discordar, e dois
+    consumidores do mesmo lote veem o mesmo dia. Canal inteiro, como `totals`;
+    o filtro de marca so' recorta a lista.
 
-    Um SELECT so', por dia futuro x conta (poucas linhas: contas x dias
-    uteis); o menor dia e' escolhido aqui.
+    Um SELECT so', sobre `NAO_VENCIDO_COM_PRAZO_SQL` — a MESMA base das listas
+    `due_soon` e `due_next_day` —, por dia x conta (poucas linhas: contas x
+    dias uteis); o dia de hoje e o menor dia futuro sao escolhidos aqui.
     """
+    hoje = _dia_brt(effective_at)
     linhas = _linhas(db, f"""
-        SELECT {DIA_DO_PRAZO_SQL} AS proximo_vencimento, shop_account,
-               count(*) AS vencem
+        SELECT {DIA_DO_PRAZO_SQL} AS dia, shop_account, count(*) AS vencem
         FROM {FILA}
         WHERE channel = :canal AND refresh_batch_id = :batch
-          AND dispatch_deadline IS NOT NULL
-          AND {DIA_DO_PRAZO_SQL} > (CAST(:efetivo AS timestamptz)
-                                    AT TIME ZONE 'America/Sao_Paulo')::date
+          AND {NAO_VENCIDO_COM_PRAZO_SQL}
         GROUP BY 1, shop_account
-    """, {"canal": canal.slug, "batch": batch, "efetivo": effective_at})
-    if not linhas:
-        return None, {}
-    dia = min(r["proximo_vencimento"] for r in linhas)
-    return dia, {str(r["shop_account"]): int(r["vencem"])
-                 for r in linhas if r["proximo_vencimento"] == dia}
+    """, {"canal": canal.slug, "batch": batch, "hoje": hoje})
+    futuros = [r["dia"] for r in linhas if r["dia"] > hoje]
+    proximo = min(futuros) if futuros else None
+    return PertoDeVencer(
+        hoje=hoje,
+        proximo=proximo,
+        hoje_por_conta={str(r["shop_account"]): int(r["vencem"])
+                        for r in linhas if r["dia"] == hoje},
+        proximo_por_conta={str(r["shop_account"]): int(r["vencem"])
+                           for r in linhas if proximo is not None and r["dia"] == proximo},
+    )
+
+
+def _predicado_perto(situacao: str, perto: Optional[PertoDeVencer]) -> tuple[str, dict]:
+    """Predicado das listas `due_soon` e `due_next_day`, sobre a MESMA base da
+    contagem (`NAO_VENCIDO_COM_PRAZO_SQL` e o mesmo `:hoje`).
+
+    Sem prazo no canal (ou sem proximo dia, no `due_next_day`): `FALSE` —
+    lista vazia, nunca a fila inteira.
+    """
+    if perto is None:
+        return "FALSE", {}
+    if situacao == SITUACAO_PROXIMO_VENCIMENTO:
+        if perto.proximo is None:
+            return "FALSE", {}
+        return (f"({NAO_VENCIDO_COM_PRAZO_SQL} AND {DIA_DO_PRAZO_SQL} = :proximo_vencimento)",
+                {"hoje": perto.hoje, "proximo_vencimento": perto.proximo})
+    return (f"({NAO_VENCIDO_COM_PRAZO_SQL} AND {DIA_DO_PRAZO_SQL} <= :limite_perto)",
+            {"hoje": perto.hoje, "limite_perto": perto.limite})
 
 
 def get_expedicao(
@@ -688,13 +765,25 @@ def get_expedicao(
                "slow_count", "zombie_count", "stalled_count")
     totais = {m: sum(int(r[m]) for r in resumos) for m in medidas}
 
-    # Proximo vencimento: contado AQUI sobre o mesmo lote (nao e' materializado).
-    # Canal sem prazo: nulo por ausencia, nunca zero.
-    proximo: Optional[date] = None
-    vencem: Optional[dict[str, int]] = None
+    # Perto de vencer (hoje + proximo dia de prazo): contado AQUI sobre o mesmo
+    # lote (nao e' materializado). Canal sem prazo: nulo por ausencia, nunca zero.
+    perto: Optional[PertoDeVencer] = None
     if canal.publica_prazo:
-        proximo, vencem = _proximo_vencimento(db, canal, snap["batch"], effective_at)
-    totais["due_next_day_count"] = None if vencem is None else sum(vencem.values())
+        perto = _perto_de_vencer(db, canal, snap["batch"], effective_at)
+    if perto is None:
+        totais.update(due_today_count=None, due_next_day_count=None, due_soon_count=None)
+    else:
+        hoje_total = sum(perto.hoje_por_conta.values())
+        proximo_total = sum(perto.proximo_por_conta.values())
+        totais.update(due_today_count=hoje_total, due_next_day_count=proximo_total,
+                      due_soon_count=hoje_total + proximo_total)
+
+    def _perto_da_conta(conta: str) -> dict:
+        if perto is None:
+            return {"due_today_count": None, "due_next_day_count": None,
+                    "due_soon_count": None}
+        h, p, soma = perto.por_conta(conta)
+        return {"due_today_count": h, "due_next_day_count": p, "due_soon_count": soma}
 
     saude = "healthy"
     cobertura = _cobertura(db, canal, resumos, effective_at)
@@ -724,13 +813,12 @@ def get_expedicao(
             "rows_extracted": aud.get("rows_extracted"),
             "rows_loaded": aud.get("rows_loaded"),
             "audit_run_id": aud.get("sync_run_id"),
-            "next_due_date": proximo,
+            "next_due_date": perto.proximo if perto else None,
         },
         "totals": totais,
         "accounts": [
             {**{k: r[k] for k in medidas},
-             "due_next_day_count": (
-                 None if vencem is None else vencem.get(r["shop_account"], 0)),
+             **_perto_da_conta(str(r["shop_account"])),
              "shop_account": r["shop_account"], "brand": r["brand"],
              "run_status": r["run_status"],
              "source_watermark_at": r["source_watermark_at"],
@@ -749,7 +837,7 @@ def get_expedicao(
         fila, total = _pagina_da_fila(
             db, canal, snap["batch"], brands=brands, accounts=accounts,
             situacoes=situacoes, order_by=order_by, limit=limit, offset=offset,
-            proximo_vencimento=proximo)
+            perto=perto)
         resposta["queue"] = fila
         resposta["pagination"] = {
             "limit": limit, "offset": offset, "returned": len(fila),
@@ -760,16 +848,17 @@ def get_expedicao(
 
 def _pagina_da_fila(db, canal: Canal, batch: str, *, brands, accounts, situacoes,
                     order_by: str, limit: int, offset: int,
-                    proximo_vencimento: Optional[date] = None) -> tuple[list[dict], int]:
+                    perto: Optional[PertoDeVencer] = None) -> tuple[list[dict], int]:
     """Filtros e ordenacao por ALLOWLIST; valores sempre parametrizados.
 
     `channel` e `refresh_batch_id` entram JUNTOS no filtro: o batch ja' seria
     suficiente hoje, mas um lote com o mesmo id em dois canais serviria a fila
     errada, e o custo de manter o canal explicito e' zero.
 
-    `due_next_day` usa a data que `get_expedicao` calculou no MESMO lote. Sem
-    data (canal sem prazo, ou nenhum prazo depois de hoje), o filtro e' `FALSE`:
-    lista vazia, nunca a fila inteira.
+    `due_next_day` e `due_soon` usam o `PertoDeVencer` que `get_expedicao`
+    calculou no MESMO lote, sobre a MESMA base da contagem (`_predicado_perto`).
+    Sem ele (canal sem prazo) ou sem data, o filtro e' `FALSE`: lista vazia,
+    nunca a fila inteira.
     """
     onde = ["channel = :canal", "refresh_batch_id = :batch"]
     params: dict[str, Any] = {"canal": canal.slug, "batch": batch}
@@ -781,12 +870,10 @@ def _pagina_da_fila(db, canal: Canal, batch: str, *, brands, accounts, situacoes
         onde.append("shop_account = ANY(:accounts)")
         params["accounts"] = list(accounts)
     for i, s in enumerate(situacoes or []):
-        if s == SITUACAO_PROXIMO_VENCIMENTO:
-            if canal.publica_prazo and proximo_vencimento is not None:
-                onde.append(f"{DIA_DO_PRAZO_SQL} = :proximo_vencimento")
-                params["proximo_vencimento"] = proximo_vencimento
-            else:
-                onde.append("FALSE")
+        if s in (SITUACAO_PROXIMO_VENCIMENTO, SITUACAO_PERTO_DE_VENCER):
+            predicado, extra = _predicado_perto(s, perto if canal.publica_prazo else None)
+            onde.append(predicado)
+            params.update(extra)
             continue
         # `s` ja' foi validado contra SITUACOES_ACEITAS pela borda; o predicado
         # vem do dicionario, nunca da string do cliente.

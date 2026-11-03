@@ -13,7 +13,9 @@ import { join } from "node:path";
 
 import {
   SITUACOES,
+  faixasDePrazo,
   montarKpis,
+  montarMapaDeRisco,
   montarRiscoAtual,
   recortarPorMarca,
   rotuloDoProximoVencimento,
@@ -126,9 +128,41 @@ test("KPI do proximo vencimento: API antiga (sem o campo) e' ausencia, nunca zer
   assert.equal(k?.valor, null);
 });
 
-test("Risco atual da Shopee: vence amanha entre 'vence em 24h' e 'acima de 48h'", () => {
+// EXPEDICAO-PERTO-DE-VENCER: "vence em 24 h" + proximo dia viraram UM cartao.
+test("Risco atual da Shopee: 'perto de vencer' logo depois de vencidos", () => {
   const chaves = montarRiscoAtual(totais(), [], "shopee").map((k) => k.chave);
-  assert.deepEqual(chaves, ["backlog", "overdue", "due24h", "due_next_day", "over48h", "stalled", "marcas_alerta"]);
+  assert.deepEqual(chaves, ["backlog", "overdue", "due_soon", "over48h", "stalled", "marcas_alerta"]);
+});
+
+test("perto de vencer: o numero da API e a linha 'hoje · proximo dia'", () => {
+  const snap = { effective_at: "2026-10-30T18:12:23Z", next_due_date: "2026-11-03" };
+  const t = totais({ due_today_count: 378, due_next_day_count: 69, due_soon_count: 447 });
+  const k = montarRiscoAtual(t, [], "shopee", snap).find((x) => x.chave === "due_soon")!;
+  assert.equal(k.rotulo, "Perto de vencer");
+  assert.equal(k.valor, 447);
+  assert.equal(k.notaCurta, "378 hoje · 69 ter 03/11");
+  // API antiga: ausencia, nunca zero
+  const antiga = montarRiscoAtual(totais(), [], "shopee").find((x) => x.chave === "due_soon")!;
+  assert.equal(antiga.valor, null);
+  assert.equal(antiga.notaCurta, undefined);
+});
+
+test("particao de prazo: vencidos / perto de vencer / no prazo / sem prazo fecha o backlog", () => {
+  const t = totais({ due_today_count: 378, due_next_day_count: 69, due_soon_count: 447 });
+  const f = faixasDePrazo(t)!;
+  assert.deepEqual(f.map((x) => x.chave), ["overdue", "due_soon", "on_time", "sem_prazo"]);
+  assert.deepEqual(f.map((x) => x.valor), [5, 447, 270, 0]);
+  assert.equal(f.reduce((s, x) => s + x.valor, 0), t.backlog_count);
+  // a barra da tabela usa a MESMA particao, por conta
+  const mapa = montarMapaDeRisco([conta("apice", "apice", { due_today_count: 378, due_next_day_count: 69, due_soon_count: 447 })], "shopee");
+  assert.deepEqual(mapa.linhas[0].segmentos.map((x) => x.valor), [5, 447, 270, 0]);
+});
+
+test("lista 'perto de vencer': situacao due_soon, mais urgentes primeiro", () => {
+  const q = new URLSearchParams(queryDaLista("perto_de_vencer", "shopee", null, null));
+  assert.equal(q.get("situacao"), "due_soon");
+  assert.equal(q.get("order_by"), "deadline");
+  assert.equal(q.get("limit"), "500");
 });
 
 test("recorte por marca de uma conta leva a contagem do proximo vencimento", () => {
@@ -276,24 +310,24 @@ test("tabela por marca: vencidos com % da conta e ⓘ nos cabecalhos", () => {
 // ===========================================================================
 // EXPEDICAO-TABELA-AMANHA — coluna "Vencem amanhã" e vencidos em vermelho
 // ===========================================================================
-test("tabela por marca: coluna 'Vencem amanhã' logo depois de Vencidos, que abre a lista", () => {
+// EXPEDICAO-PERTO-DE-VENCER: a coluna virou "Perto de vencer", o MESMO numero do cartao.
+test("tabela por marca: coluna 'Perto de vencer' logo depois de Vencidos, que abre a lista", () => {
   const html = renderToStaticMarkup(
     h(EvolucaoPorMarca, {
       resposta: null,
       fila: [{
         conta: "apice", titulo: "ÁPICE", apelido: null, backlog: 420, vencidos: 4, acima48h: 2,
-        travados: 7, venceProximo: 46, pctVenceProximo: "11,0%", aoVerVenceProximo: () => {}, barra: null,
+        travados: 7, pertoDeVencer: 296, pctPertoDeVencer: "70,5%", aoVerPertoDeVencer: () => {}, barra: null,
       }],
-      rotuloProximo: "Vencem amanhã",
-      ajudas: { venceProximo: h("span", { "data-ajuda": "proximo" }) },
+      ajudas: { pertoDeVencer: h("span", { "data-ajuda": "perto" }) },
     }),
   );
   const cab = html.slice(html.indexOf("<thead"), html.indexOf("</thead>"));
-  assert.ok(cab.indexOf(">Vencidos") < cab.indexOf(">Vencem amanhã"), "logo depois de Vencidos");
-  assert.ok(cab.indexOf(">Vencem amanhã") < cab.indexOf(">Acima de 48 h"));
-  assert.match(cab, /data-ajuda="proximo"/);
-  assert.match(html, /aria-label="Ver os 46 pedidos de ÁPICE que vencem amanhã"[^>]*>46<\/button>/);
-  assert.match(html, />11,0%</);
+  assert.ok(cab.indexOf(">Vencidos") < cab.indexOf(">Perto de vencer"), "logo depois de Vencidos");
+  assert.ok(cab.indexOf(">Perto de vencer") < cab.indexOf(">Acima de 48 h"));
+  assert.match(cab, /data-ajuda="perto"/);
+  assert.match(html, /aria-label="Ver os 296 pedidos de ÁPICE perto de vencer"[^>]*>296<\/button>/);
+  assert.match(html, />70,5%</);
 });
 
 test("tabela por marca: sem a medida (ML ou API antiga), a coluna nao existe", () => {
@@ -303,7 +337,7 @@ test("tabela por marca: sem a medida (ML ou API antiga), a coluna nao existe", (
       fila: [{ conta: "1", titulo: "KOKESHI", apelido: null, backlog: 9, vencidos: null, acima48h: 1, travados: 0, barra: null }],
     }),
   );
-  assert.doesNotMatch(html, /Vencem/);
+  assert.doesNotMatch(html, /Perto de vencer/);
 });
 
 test("vencidos em destaque vermelho: titulo da coluna e numero em etiqueta vermelha", () => {
@@ -322,10 +356,11 @@ test("vencidos em destaque vermelho: titulo da coluna e numero em etiqueta verme
   assert.doesNotMatch(html, /bg-crit-soft[^"]*">0</);
 });
 
-test("tela: a tabela recebe o proximo dia de prazo da fotografia e abre a lista por conta", () => {
-  assert.match(CLIENTE, /venceProximo: temPrazo \? \(a\.due_next_day_count \?\? null\) : null/);
-  assert.match(CLIENTE, /lista: "vence_proximo"/);
-  assert.match(CLIENTE, /rotuloProximo=\{rotuloDoProximoVencimento\(/);
+test("tela: tabela e cartao usam a MESMA medida (due_soon_count) e a mesma lista", () => {
+  assert.match(CLIENTE, /pertoDeVencer: temPrazo \? \(a\.due_soon_count \?\? null\) : null/);
+  assert.match(CLIENTE, /lista: "perto_de_vencer"/);
+  assert.match(CLIENTE, /due_soon: "perto_de_vencer"/);
+  assert.match(CLIENTE, /perto_de_vencer: "due_soon_count"/);
   assert.equal(
     rotuloDoProximoVencimento("2026-11-03", "2026-10-30T18:12:23Z", "Vencem"),
     "Vencem ter 03/11",
