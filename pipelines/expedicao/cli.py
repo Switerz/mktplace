@@ -238,7 +238,8 @@ def diagnose(conn, effective_at: datetime) -> dict:
         "watermarks": carimbos,
         "baselines": baselines,
         "atraso_7d": _atraso_7d_diagnostico(
-            lambda: atraso_7d.calcular_shopee(conn, effective_at, carimbos)
+            lambda: atraso_7d.calcular_shopee(
+                conn, effective_at, carimbos, baselines)
         ),
     }
 
@@ -333,7 +334,16 @@ def format_atraso_7d(resultado: dict) -> list[str]:
     if not contas:
         linhas.append("  nenhuma conta com base na janela (publicaria NULL)")
         return linhas
-    linhas.append("  conta            janela usada              base  atras   taxa")
+    linhas.append(
+        "  conta            janela usada              base  atras   taxa"
+        "   >48h  travad"
+    )
+
+    def _opcional(valor) -> str:
+        # NULL = nao calculado (ML sem baseline, conta sem amostra): "-",
+        # nunca 0.
+        return "-" if valor is None else str(valor)
+
     for conta, v in sorted(contas.items()):
         taxa = 100.0 * v["late_7d_count"] / v["due_7d_count"]
         janela_usada = (
@@ -342,8 +352,14 @@ def format_atraso_7d(resultado: dict) -> list[str]:
         )
         linhas.append(
             f"  {conta:<16} {janela_usada:<24} {v['due_7d_count']:>6} "
-            f"{v['late_7d_count']:>6} {taxa:>5.2f}%"
+            f"{v['late_7d_count']:>6} {taxa:>5.2f}% "
+            f"{_opcional(v.get('over_48h_7d_count')):>6} "
+            f"{_opcional(v.get('stalled_7d_count')):>7}"
         )
+    linhas.append(
+        "  >48h: duracao (coleta, ou agora se aberto) acima de 48 h; travad: "
+        "acima de 2 x p50 da conta ('-' = sem baseline; ML nunca tem)."
+    )
     return linhas
 
 
@@ -593,14 +609,24 @@ class AdaptadorDeCanal:
     load_registry: Callable[..., tuple[dict[str, SellerAccount], list[str]]]
     extract: Callable[..., ExtractionResult]
     build_fila: Callable[..., list[dict]]
-    #: Atraso de 7 dias por conta (`external_seller_id -> 4 chaves`). `None` =
+    #: Atraso de 7 dias por conta (`external_seller_id -> 6 chaves`). `None` =
     #: canal sem o calculo: o resumo grava NULL.
     atraso_7d: Callable[..., dict[str, dict]] | None = None
+    #: p50 por conta (`external_seller_id -> (amostra, p50)`), lido UMA vez
+    #: por execucao e repassado a `build_fila` (`is_slow_vs_baseline`) e a
+    #: `atraso_7d` (travados de 7 dias). `None` = canal sem baseline (ML).
+    baselines: Callable[..., dict[str, tuple[int, float | None]]] | None = None
 
 
-def _fila_shopee(source, extracao, registry, effective_at, batch_id) -> list[dict]:
-    """Shopee precisa do p50 por conta para `is_slow_vs_baseline`."""
-    baselines = shopee_extract.fetch_baselines(source, effective_at)
+def _fila_shopee(source, extracao, registry, effective_at, batch_id,
+                 baselines=None) -> list[dict]:
+    """Shopee precisa do p50 por conta para `is_slow_vs_baseline`.
+
+    O orquestrador ja' le o baseline (`AdaptadorDeCanal.baselines`) e o
+    repassa; sem ele, le aqui.
+    """
+    if baselines is None:
+        baselines = shopee_extract.fetch_baselines(source, effective_at)
     return transform.build_fila_shopee(
         extracao.backlog_rows, registry, baselines, effective_at, batch_id
     )
@@ -618,10 +644,12 @@ def _fila_ml(source, extracao, registry, effective_at, batch_id) -> list[dict]:
     )
 
 
-def _atraso_7d_shopee(source, extracao, effective_at) -> dict[str, dict]:
-    """Maturidade pela MESMA leitura da fonte por conta que a fila ja' fez."""
+def _atraso_7d_shopee(source, extracao, effective_at,
+                      baselines=None) -> dict[str, dict]:
+    """Maturidade pela MESMA leitura da fonte por conta que a fila ja' fez, e
+    travados pelo MESMO baseline da fila (sem ele, travados NULL)."""
     return atraso_7d.calcular_shopee(
-        source, effective_at, extracao.account_watermarks
+        source, effective_at, extracao.account_watermarks, baselines
     )
 
 
@@ -638,6 +666,7 @@ ADAPTADORES: dict[Channel, AdaptadorDeCanal] = {
         extract=shopee_extract.extract,
         build_fila=_fila_shopee,
         atraso_7d=_atraso_7d_shopee,
+        baselines=shopee_extract.fetch_baselines,
     ),
     Channel.MERCADOLIVRE: AdaptadorDeCanal(
         load_registry=shopee_extract.load_registry,
@@ -1143,8 +1172,16 @@ def run_apply(
             # verificar. Identificador de conta REPETIDO entre contas distintas e'
             # coberto pelo invariante do lote, que ve as duas linhas de resumo com
             # a mesma chave.
+            # Baseline lido UMA vez: a fila (`is_slow_vs_baseline`) e os
+            # travados de 7 dias usam o mesmo p50. Canal sem baseline (ML)
+            # chama `build_fila` exatamente como antes.
+            baselines = (
+                adaptador.baselines(source, effective_at)
+                if adaptador.baselines is not None else None
+            )
             fila = adaptador.build_fila(
-                source, extracao, registry, effective_at, batch_id
+                source, extracao, registry, effective_at, batch_id,
+                **({} if baselines is None else {"baselines": baselines}),
             )
 
             contas = {ext: (nomes[ext], registry[ext].brand_key) for ext in esperadas}
@@ -1154,9 +1191,10 @@ def run_apply(
             avancou = source_advanced(atuais, anteriores)
 
             # Atraso de 7 dias: DEPOIS da fila, e sem poder derruba-la. Falha
-            # aqui vira aviso e NULL nas quatro colunas do resumo.
+            # aqui vira aviso e NULL nas colunas de 7 dias do resumo.
             sete_dias = _atraso_7d_ou_nada(
-                adaptador, source, extracao, effective_at, channel, avisar
+                adaptador, source, extracao, effective_at, channel, avisar,
+                baselines,
             )
 
             resumos = transform.build_account_summaries(
@@ -1275,7 +1313,7 @@ def run_apply(
 
 
 def _atraso_7d_ou_nada(
-    adaptador, source, extracao, effective_at, channel, avisar
+    adaptador, source, extracao, effective_at, channel, avisar, baselines=None
 ) -> dict[str, dict]:
     """O atraso de 7 dias, ou `{}` (NULL no resumo) se o calculo falhar.
 
@@ -1286,8 +1324,9 @@ def _atraso_7d_ou_nada(
     """
     if adaptador.atraso_7d is None:
         return {}
+    extra = {} if baselines is None else {"baselines": baselines}
     try:
-        return adaptador.atraso_7d(source, extracao, effective_at)
+        return adaptador.atraso_7d(source, extracao, effective_at, **extra)
     except Exception as exc:  # noqa: BLE001 — auxiliar: nunca bloqueia a fila
         avisar(
             f"atraso de 7 dias de {channel.value} NAO calculado (resumo grava "

@@ -229,12 +229,25 @@ def mesclar_estado(anteriores: list[dict], atuais: list[dict]) -> list[dict]:
 
 
 def atraso_7d_do_export(estado: list[dict], conta: SellerAccount,
-                        ingerido_em: datetime, effective_at: datetime) -> dict[str, dict]:
+                        ingerido_em: datetime, effective_at: datetime,
+                        base: tuple[int, float | None] | None = None,
+                        ) -> dict[str, dict]:
     """EXPEDICAO-ATRASO-7D na Kokeshi: a MESMA regra da Shopee do Data Mart
     (`atraso_7d.apurar_shopee`, classificacao da LDR) sobre o historico de
     pedidos do export. O "ultimo dia maduro" usa a hora do download como a
     ultima leitura da conta. Falha vira {} (colunas nulas), nunca derruba a
-    fila: e' metrica auxiliar."""
+    fila: e' metrica auxiliar.
+
+    Acima de 48 h e travados com o mesmo marco (`pay_time`) e a mesma coleta
+    (`pickup_done_time`) do export; travados pelo baseline do export
+    (`shopee_export.baseline`, o mesmo da fila em `montar_fotografia`). `base`
+    e' esse baseline ja' calculado; sem ele, e' calculado aqui."""
+    if base is None:
+        try:
+            base = E.baseline(estado, effective_at)
+        except Exception as exc:  # noqa: BLE001 — sem baseline: travados NULL
+            LOG.warning("baseline do export nao calculado (travados NULL): %s",
+                        type(exc).__name__)
     try:
         pedidos = [
             shopee_ldr.Pedido(
@@ -254,7 +267,8 @@ def atraso_7d_do_export(estado: list[dict], conta: SellerAccount,
             for p in estado
         ]
         return atraso_7d.apurar_shopee(
-            pedidos, {conta.external_seller_id: ingerido_em}, effective_at)
+            pedidos, {conta.external_seller_id: ingerido_em}, effective_at,
+            {conta.external_seller_id: base} if base is not None else None)
     except Exception as exc:  # noqa: BLE001 — auxiliar, nunca bloqueia a fila
         LOG.warning("atraso de 7 dias do export nao calculado: %s", type(exc).__name__)
         return {}
@@ -276,7 +290,8 @@ def montar_fotografia(leitura: E.LeituraExport, conta: SellerAccount, shop_accou
         accounts={conta.external_seller_id: (shop_account, conta.brand_key)},
         watermarks={conta.external_seller_id: leitura.ingerido_em},
         source_advanced=avancou,
-        atraso_7d=atraso_7d_do_export(estado, conta, leitura.ingerido_em, effective_at))
+        atraso_7d=atraso_7d_do_export(estado, conta, leitura.ingerido_em, effective_at,
+                                      (amostra, p50)))
     return fila, resumos, (amostra, p50)
 
 
