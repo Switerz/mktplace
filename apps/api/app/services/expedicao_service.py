@@ -189,8 +189,10 @@ class Canal:
     #: publica em `shop_account`. E' o que permite comparar ESPERADO com
     #: OBSERVADO sem misturar dominios — ver `_identidade_da_conta`.
     identidade_no_registry: str
-    #: A fonte publica prazo de despacho? Sem prazo, "proximo vencimento" nao
-    #: existe: a medida sai nula, nunca zero, e a consulta nem e' feita.
+    #: A fonte publica prazo de despacho em TODA fotografia? Sem prazo,
+    #: "proximo vencimento" nao existe: a medida sai nula, nunca zero, e a
+    #: consulta nem e' feita. O Mercado Livre e' `False` aqui e decide por
+    #: fotografia — ver `prazo_publicado`.
     publica_prazo: bool = False
 
     @property
@@ -227,11 +229,12 @@ CANAIS: dict[str, Canal] = {
         marcas_sem_cobertura=(),
         notas=(
             NOTA_SEM_AGENDAMENTO,
-            # Medido no EXP-3A: os campos candidatos a prazo estao 0% preenchidos
-            # na fonte. Derivar um prazo produziria "vencido" onde o marketplace
-            # nunca prometeu nada, e a Torre perderia o direito de ser acreditada.
-            "Mercado Livre nao publica prazo de despacho: deadline_status e'"
-            " sempre 'unavailable' e a ausencia nao indica atraso.",
+            # EXPEDICAO-ML-PRAZO: o unico prazo oficial e' o SLA do envio
+            # (`GET /shipments/{id}/sla`). Derivar prazo de outra data
+            # produziria "vencido" onde o marketplace nunca prometeu nada.
+            "Prazo do Mercado Livre = SLA oficial de despacho do envio"
+            " (expected_date de /shipments/{id}/sla). Envio sem SLA valido"
+            " sai 'unavailable', e a ausencia nao indica atraso.",
             "A unidade operacional do Mercado Livre e' o SHIPMENT, nao o pedido.",
             "A conta e' identificada pelo seller_id; a marca vem do registry.",
             NOTA_SEM_IDENTIFICADOR,
@@ -263,6 +266,22 @@ def canal_habilitado(canal: Canal) -> bool:
     if canal.slug == "mercadolivre":
         return bool(getattr(settings, "expedicao_ml_api_enabled", False))
     return True
+
+
+def prazo_publicado(canal: Canal, resumos: list[dict]) -> bool:
+    """A FOTOGRAFIA traz prazo de despacho? (EXPEDICAO-ML-PRAZO)
+
+    Shopee: sempre (`ship_by_date` nativo). Mercado Livre: so' quando o lote
+    tem ao menos um envio com SLA, ou seja `deadline_unavailable_count <
+    backlog_count` em alguma conta. Decidir pela fotografia, e nao por flag,
+    deixa a tela certa nos dois lados do deploy: antes de o extrator gravar o
+    SLA nada muda (todo envio `unavailable`, vencidos nulos), e o prazo aparece
+    sozinho no primeiro lote que o tiver.
+    """
+    if canal.publica_prazo:
+        return True
+    return any(int(r.get("deadline_unavailable_count") or 0)
+               < int(r.get("backlog_count") or 0) for r in resumos)
 
 
 def resolver_canal(slug: Optional[str]) -> Canal:
@@ -767,8 +786,9 @@ def get_expedicao(
 
     # Perto de vencer (hoje + proximo dia de prazo): contado AQUI sobre o mesmo
     # lote (nao e' materializado). Canal sem prazo: nulo por ausencia, nunca zero.
+    tem_prazo = prazo_publicado(canal, resumos)
     perto: Optional[PertoDeVencer] = None
-    if canal.publica_prazo:
+    if tem_prazo:
         perto = _perto_de_vencer(db, canal, snap["batch"], effective_at)
     if perto is None:
         totais.update(due_today_count=None, due_next_day_count=None, due_soon_count=None)
@@ -814,6 +834,9 @@ def get_expedicao(
             "rows_loaded": aud.get("rows_loaded"),
             "audit_run_id": aud.get("sync_run_id"),
             "next_due_date": perto.proximo if perto else None,
+            # EXPEDICAO-ML-PRAZO: a tela decide prazo x "indisponivel" por
+            # este campo, nunca pelo nome do canal.
+            "deadline_published": tem_prazo,
         },
         "totals": totais,
         "accounts": [
@@ -871,7 +894,8 @@ def _pagina_da_fila(db, canal: Canal, batch: str, *, brands, accounts, situacoes
         params["accounts"] = list(accounts)
     for i, s in enumerate(situacoes or []):
         if s in (SITUACAO_PROXIMO_VENCIMENTO, SITUACAO_PERTO_DE_VENCER):
-            predicado, extra = _predicado_perto(s, perto if canal.publica_prazo else None)
+            # `perto` so' existe quando a fotografia publica prazo.
+            predicado, extra = _predicado_perto(s, perto)
             onde.append(predicado)
             params.update(extra)
             continue
@@ -1013,6 +1037,12 @@ _ORDEM_FRESCOR = {"fresh": 0, "stale": 1, "unknown": 2, "critical": 3}
 _GRAVIDADE_STATUS = {"ok": 0, "partial": 1, "unavailable": 2}
 
 LIMITACAO_ML_SEM_PRAZO = "o Mercado Livre não publica prazo de despacho"
+#: Com o SLA na fotografia, o motivo de nao haver coorte deixa de ser "sem
+#: prazo": o SLA so' e' relido enquanto o envio esta' aberto, e a taxa de
+#: atraso por coorte (LDR) do ML nao foi construida.
+LIMITACAO_ML_SEM_COORTE = (
+    "taxa de atraso (LDR) do Mercado Livre ainda não calculada; o prazo "
+    "(SLA oficial) vale só para a fila aberta")
 LIMITACOES_FILA = {
     "shopee": [
         "etapa interna (a preparar × envio organizado) não publicada na fila",
@@ -1130,8 +1160,8 @@ _FILA_SOBREPOSICOES = (
     ("lento", "slow"),
     ("zumbi_fonte", "zombie"),
 )
-#: Sobreposicoes que dependem de prazo: no ML a fonte nao publica prazo, entao
-#: elas saem `None` + motivo, nunca 0.
+#: Sobreposicoes que dependem de prazo: numa fotografia do ML sem SLA elas
+#: saem `None` + motivo, nunca 0 (`prazo_publicado`).
 _SOBREPOSICOES_DE_PRAZO = ("vencido", "vence_24h")
 
 #: Contagens do resumo por conta (018). Fotografia vazia = TODAS zeradas.
@@ -1238,6 +1268,15 @@ def _etapas_reais(por_etapa: dict[str, int]) -> list[dict]:
             for k in chaves]
 
 
+def _limitacao_coorte_ml(fila: Optional[dict]) -> str:
+    """Por que o ML nao tem coorte: "sem prazo" so' quando a fila servida nao
+    tem prazo (ou nem foi servida); com SLA na fotografia, o motivo e' outro."""
+    com_prazo = bool(fila) and not any(
+        s.get("count") is None for s in fila["sobreposicoes"]
+        if s["key"] in _SOBREPOSICOES_DE_PRAZO)
+    return LIMITACAO_ML_SEM_COORTE if com_prazo else LIMITACAO_ML_SEM_PRAZO
+
+
 def _fila_aberta(db, channel: str,
                  filtro: _FiltroMarca) -> tuple[Optional[dict], list[str], str]:
     """(secao, motivos, estado). `None` quando a fonte nao serve fotografia."""
@@ -1284,9 +1323,12 @@ def _fila_aberta(db, channel: str,
         if channel == "mercadolivre":
             limitacoes.append(LIMITACAO_ML_ENTREGUE_NO_BACKLOG)
 
+    # Prazo decidido pela FOTOGRAFIA inteira (todas as contas do lote), nao
+    # pelo recorte de marca: e' a mesma regra de `get_expedicao`.
+    tem_prazo = prazo_publicado(canal, snap.get("resumos") or [])
     sobreposicoes = []
     for chave, _sit in _FILA_SOBREPOSICOES:
-        if channel == "mercadolivre" and chave in _SOBREPOSICOES_DE_PRAZO:
+        if not tem_prazo and chave in _SOBREPOSICOES_DE_PRAZO:
             sobreposicoes.append({"key": chave, "count": None,
                                   "reason": LIMITACAO_ML_SEM_PRAZO})
         else:
@@ -1670,7 +1712,7 @@ def get_jornada(
             # Desligada por decisao, nao por falha: limitacao, sem rebaixar status.
             resposta["limitacoes"].append(LIMITACAO_SHOPEE_LDR_DESLIGADA)
     else:
-        resposta["limitacoes"].append(LIMITACAO_ML_SEM_PRAZO)
+        resposta["limitacoes"].append(_limitacao_coorte_ml(fila))
 
     resposta["status"] = max(estados, key=_GRAVIDADE_STATUS.__getitem__)
     resposta["reason"] = "; ".join(motivos) or None

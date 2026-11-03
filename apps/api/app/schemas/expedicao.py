@@ -258,6 +258,11 @@ class Snapshot(BaseModel):
     #: de `effective_at`: amanha de segunda a quinta, o proximo dia util na
     #: sexta. Nulo sem prazo publicado ou sem pedido vencendo depois de hoje.
     next_due_date: Optional[date] = None
+    #: EXPEDICAO-ML-PRAZO — esta fotografia traz prazo de despacho? Shopee:
+    #: sempre. Mercado Livre: so' quando ha' envio com SLA oficial no lote.
+    #: Com `false`, vencidos/perto de vencer sao AUSENCIA de dado, nunca zero.
+    #: Nulo so' em API anterior a este campo.
+    deadline_published: Optional[bool] = None
 
 
 class Limitacoes(BaseModel):
