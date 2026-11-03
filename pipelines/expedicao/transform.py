@@ -30,6 +30,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from pipelines.expedicao.contract import (
+    ATRASO_7D_COLUMNS,
     DUE_SOON_WINDOW,
     FRESHNESS_FRESH_LIMIT,
     FRESHNESS_STALE_LIMIT,
@@ -599,6 +600,7 @@ def build_account_summaries(
     watermarks: dict[str, datetime | None],
     source_advanced: bool,
     run_status: str = RunStatus.SUCCESS.value,
+    atraso_7d: dict[str, dict] | None = None,
 ) -> list[dict]:
     """Resumo HORARIO POR CONTA. Grao: (channel, shop_account, snapshot_hour).
 
@@ -617,6 +619,15 @@ def build_account_summaries(
     O resumo do CANAL nao e materializado: some as contas na API. Persistir um
     total como se fosse uma quinta conta criaria uma linha que nao corresponde a
     nenhuma loja e que qualquer `GROUP BY shop_account` contaria em dobro.
+
+    ATRASO DE 7 DIAS (regra oficial da Shopee, migration 035)
+    ---------------------------------------------------------
+    `atraso_7d` mapeia `external_seller_id -> as quatro chaves` de
+    `contract.ATRASO_7D_COLUMNS`, calculadas fora daqui (modulo `atraso_7d`):
+    a base e' outra (7 dias de vencimentos), nao a fila. Toda linha recebe as
+    quatro chaves; conta fora do mapa (ou mapa ausente) recebe NULL nas quatro
+    — "nao calculado", nunca zero. O publicador so' as grava se a 035 existir
+    no destino.
     """
     _require_aware(effective_at, "effective_at")
     hora = snapshot_hour(effective_at)
@@ -628,9 +639,11 @@ def build_account_summaries(
     def _conta(linhas: list[dict], campo: str, valor: str) -> int:
         return sum(1 for r in linhas if r[campo] == valor)
 
+    atraso_7d = atraso_7d or {}
     saida: list[dict] = []
     for external_id, (shop_account, brand_key) in sorted(accounts.items()):
         linhas = por_conta.get(shop_account, [])
+        sete_dias = atraso_7d.get(external_id) or {}
         saida.append(
             {
                 "refresh_batch_id": refresh_batch_id,
@@ -663,6 +676,7 @@ def build_account_summaries(
                 "stalled_count": sum(1 for r in linhas if r["is_stalled"]),
                 "run_status": run_status,
                 "ingested_at": effective_at,
+                **{c: sete_dias.get(c) for c in ATRASO_7D_COLUMNS},
             }
         )
     return saida

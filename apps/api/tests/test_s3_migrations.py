@@ -195,7 +195,9 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # EXPEDICAO-KOKESHI-EXPORT: head avancado de 033 para 034, que cria as
     # tabelas proprias da fila alimentada pelo export do Seller Centre
     # (registry, pedido, fila e resumo), sem alterar nenhuma tabela existente.
-    assert heads == ["034"], f"head deveria ser unico e igual a 034, veio {heads}"
+    # Atraso de 7 dias da Expedicao: head avancado de 034 para 035, que
+    # acrescenta quatro colunas NULLABLE a marts.expedicao_refresh_run.
+    assert heads == ["035"], f"head deveria ser unico e igual a 035, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():

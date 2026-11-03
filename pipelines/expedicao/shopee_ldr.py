@@ -519,26 +519,52 @@ def janela_sql(hoje: date) -> dict:
 
 def _linhas(cur) -> list[dict]:
     """Aceita cursor de dicionario E de tupla — o fake e o real divergem."""
+    linhas = cur.fetchall()
+    if all(isinstance(r, dict) for r in linhas):
+        return [dict(r) for r in linhas]
     nomes = [d[0] for d in cur.description]
-    out = []
-    for r in cur.fetchall():
-        out.append(dict(r) if isinstance(r, dict) else dict(zip(nomes, r)))
-    return out
+    return [dict(r) if isinstance(r, dict) else dict(zip(nomes, r)) for r in linhas]
+
+
+def _para_pedido(r: dict) -> Pedido:
+    return Pedido(
+        shop_id=str(r["shop_id"]), shop_account=str(r["shop_account"]),
+        order_status=str(r["order_status"]), fulfillment_flag=r["fulfillment_flag"],
+        pay_time=r["pay_time"], ship_by_date=r["ship_by_date"],
+        pickup_done_time=r["pickup_done_time"], cancel_reason=r["cancel_reason"],
+    )
 
 
 def ler_pedidos(conn, hoje: date) -> list[Pedido]:
     with conn.cursor() as cur:
         cur.execute(PEDIDOS_SQL, janela_sql(hoje))
         linhas = _linhas(cur)
-    return [
-        Pedido(
-            shop_id=str(r["shop_id"]), shop_account=str(r["shop_account"]),
-            order_status=str(r["order_status"]), fulfillment_flag=r["fulfillment_flag"],
-            pay_time=r["pay_time"], ship_by_date=r["ship_by_date"],
-            pickup_done_time=r["pickup_done_time"], cancel_reason=r["cancel_reason"],
-        )
-        for r in linhas
-    ]
+    return [_para_pedido(r) for r in linhas]
+
+
+#: Recorte SO' por vencimento, para o atraso de 7 dias da fila
+#: (`pipelines.expedicao.atraso_7d`). Mesmas colunas e mesmo universo (pago)
+#: de `PEDIDOS_SQL`, sem o ramo "sem prazo": pedido sem `ship_by_date` nao tem
+#: dia de vencimento e nunca entra nessa base. Uma semana de pedidos, em vez
+#: das seis semanas da LDR — a publicacao da fila roda de hora em hora.
+PEDIDOS_POR_VENCIMENTO_SQL = f"""
+SELECT {', '.join(COLUNAS_FONTE)}
+  FROM raw.shopee_orders
+ WHERE pay_time IS NOT NULL
+   AND ship_by_date >= %(venc_desde)s AND ship_by_date < %(venc_ate_excl)s
+"""
+
+
+def ler_pedidos_por_vencimento(conn, desde: date, ate: date) -> list[Pedido]:
+    """Pedidos pagos com vencimento (dia BRT) em `[desde, ate]`."""
+    params = {
+        "venc_desde": inicio_do_dia_brt(desde),
+        "venc_ate_excl": inicio_do_dia_brt(ate + timedelta(days=1)),
+    }
+    with conn.cursor() as cur:
+        cur.execute(PEDIDOS_POR_VENCIMENTO_SQL, params)
+        linhas = _linhas(cur)
+    return [_para_pedido(r) for r in linhas]
 
 
 class ContaAmbigua(RuntimeError):

@@ -56,7 +56,9 @@ DDL_PATH = REPO / "db" / "sql" / "marts" / "pma_listing_price_serving_ddl.sql"
 #: SOBRE a 032 da Metas (nasceu 032 e foi renumerada).
 #: Avancado para 034 pelo EXPEDICAO-KOKESHI-EXPORT (tabelas proprias da fila
 #: alimentada pelo export do Seller Centre), encadeada SOBRE a 033.
-HEAD_ESPERADO = "034"
+#: Avancado para 035 pelo atraso de 7 dias da Expedicao (quatro colunas
+#: NULLABLE em marts.expedicao_refresh_run), encadeada SOBRE a 034.
+HEAD_ESPERADO = "035"
 
 #: Mapa OFICIAL de propriedade das revisoes. Existe para que uma frente nao
 #: ocupe o numero de outra: 016 e' do Full, 017 e' do PMA e a 018 esta

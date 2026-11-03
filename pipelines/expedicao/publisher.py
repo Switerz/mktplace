@@ -47,6 +47,14 @@ chave nova na linha nao entra no banco sem alguem declara-la aqui.
 
 Linha com etapa `outro` (valor novo da fonte) NAO bloqueia: e' contada em
 `relatorio` e vira aviso no log do run.
+
+ATRASO DE 7 DIAS NO RESUMO (migration 035)
+------------------------------------------
+Mesmo padrao da etapa, no RESUMO: `due_7d_count`, `late_7d_count`,
+`late_7d_window_start` e `late_7d_window_end` (`ATRASO_7D_COLUMNS`) so' entram
+no INSERT e no `ON CONFLICT ... DO UPDATE` se as QUATRO existirem na tabela de
+resumo do destino. Sem a 035 — ou na tabela de resumo do export, que nao as
+tem —, o INSERT e o upsert sao byte a byte os de antes.
 """
 from __future__ import annotations
 
@@ -57,6 +65,7 @@ from dataclasses import dataclass
 
 from pipelines.expedicao.contract import (
     ADVISORY_LOCK_KEYS,
+    ATRASO_7D_COLUMNS,
     FILA_TABLE,
     RUN_TABLE,
     Channel,
@@ -101,7 +110,8 @@ ETAPA_COLUMNS = ("etapa", "etapa_fonte")
 
 #: Deteccao por execucao. Roda DENTRO da transacao da publicacao, logo antes
 #: do INSERT: se a coluna sumir entre a leitura e a escrita, o INSERT falha e o
-#: rollback preserva a fila anterior.
+#: rollback preserva a fila anterior. Serve as duas deteccoes (etapa na fila,
+#: atraso de 7 dias no resumo).
 COLUNAS_ETAPA_SQL = """
 SELECT column_name
 FROM information_schema.columns
@@ -207,6 +217,23 @@ WHERE EXCLUDED.observed_at > {tabela}.observed_at
 """
 SUMMARY_CONFLICT_SQL = _SUMMARY_CONFLICT_TEMPLATE.format(tabela=_RUN)
 
+#: Ancora das colunas condicionais no `DO UPDATE SET`: entram logo antes dela.
+_ANCORA_CONFLITO = "    run_status = EXCLUDED.run_status,\n"
+
+
+def summary_conflict_sql(tabela: str, extras: tuple[str, ...] = ()) -> str:
+    """`ON CONFLICT` do resumo. Sem `extras`, identico ao de sempre.
+
+    Com as colunas da 035, a reexecucao da hora tambem as atualiza: senao a
+    observacao mais nova levaria as contagens da fila e deixaria o atraso de
+    7 dias da observacao anterior.
+    """
+    sql = _SUMMARY_CONFLICT_TEMPLATE.format(tabela=tabela)
+    if not extras:
+        return sql
+    novas = "".join(f"    {c} = EXCLUDED.{c},\n" for c in extras)
+    return sql.replace(_ANCORA_CONFLITO, novas + _ANCORA_CONFLITO, 1)
+
 
 def colunas_de_etapa_no_destino(cur, tabela: str = FILA_TABLE) -> tuple[str, ...]:
     """Recorte de `ETAPA_COLUMNS` presente no destino. Vazio = 033 ausente.
@@ -222,6 +249,49 @@ def colunas_de_etapa_no_destino(cur, tabela: str = FILA_TABLE) -> tuple[str, ...
     if "etapa" not in existentes:
         return ()
     return tuple(c for c in ETAPA_COLUMNS if c in existentes)
+
+
+def colunas_de_atraso_7d_no_destino(cur, tabela: str = RUN_TABLE) -> tuple[str, ...]:
+    """`ATRASO_7D_COLUMNS` se as QUATRO existem no resumo do destino; senao vazio.
+
+    Tudo ou nada: a API le as quatro juntas, e gravar parte delas publicaria
+    contagem sem janela (ou janela sem contagem).
+    """
+    esquema, nome = tabela.split(".")
+    cur.execute(COLUNAS_ETAPA_SQL, (esquema, nome, list(ATRASO_7D_COLUMNS)))
+    existentes = {
+        linha["column_name"] if isinstance(linha, dict) else linha[0]
+        for linha in cur.fetchall()
+    }
+    if not set(ATRASO_7D_COLUMNS) <= existentes:
+        return ()
+    return ATRASO_7D_COLUMNS
+
+
+def problemas_de_atraso_7d(summary_rows: list[dict]) -> list[str]:
+    """Linhas de resumo com o atraso de 7 dias incoerente. Vazio = ok.
+
+    Quatro NULL (ou chaves ausentes) = nao calculado. Preenchido: as quatro
+    juntas, base > 0, 0 <= atrasados <= base e janela em ordem.
+    """
+    problemas = []
+    for r in summary_rows:
+        v = [r.get(c) for c in ATRASO_7D_COLUMNS]
+        if all(x is None for x in v):
+            continue
+        due, late, inicio, fim = v
+        conta = r.get("shop_account")
+        if any(x is None for x in v):
+            problemas.append(f"conta {conta!r}: atraso de 7 dias parcial")
+        elif any(type(x) is not int for x in (due, late)):
+            problemas.append(f"conta {conta!r}: contagem de 7 dias nao inteira")
+        elif due <= 0 or not 0 <= late <= due:
+            problemas.append(
+                f"conta {conta!r}: atraso de 7 dias fora do dominio ({late}/{due})"
+            )
+        elif inicio > fim:
+            problemas.append(f"conta {conta!r}: janela de 7 dias invertida")
+    return problemas
 
 
 def contagem_por_etapa(fila_rows: list[dict]) -> dict[str, int]:
@@ -418,6 +488,16 @@ def publish_channel(
             f"publicacao de {channel.value} com etapa fora do dominio: "
             f"{fora_do_dominio}"
         )
+    # Atraso de 7 dias incoerente e' lote mal montado: recusa ANTES do DELETE,
+    # como a etapa. `atraso_7d` ja' entrega so' valores validados; isto e' a
+    # barreira do ponto unico por onde toda publicacao passa.
+    incoerencias_7d = problemas_de_atraso_7d(summary_rows)
+    if incoerencias_7d:
+        raise ValueError(
+            f"publicacao de {channel.value} com atraso de 7 dias incoerente: "
+            + "; ".join(incoerencias_7d)
+        )
+
     por_etapa = contagem_por_etapa(fila_rows)
     fontes_outro = sorted(
         {
@@ -443,6 +523,7 @@ def publish_channel(
         delete_params = (channel.value,)
 
     colunas_etapa: tuple[str, ...] = ()
+    colunas_7d: tuple[str, ...] = ()
     neon_conn.autocommit = False
     try:
         with neon_conn.cursor() as cur:
@@ -459,11 +540,17 @@ def publish_channel(
             # SEMPRE gravado, inclusive com backlog zero: e a prova de que a
             # fotografia foi tirada naquela hora, por conta.
             resumo = destino.resumo.split(".")[-1]
+            colunas_7d = colunas_de_atraso_7d_no_destino(cur, destino.resumo)
+            colunas_resumo = SUMMARY_COLUMNS + colunas_7d
             execute_values(
                 cur,
-                f"INSERT INTO {destino.resumo} ({', '.join(SUMMARY_COLUMNS)}) VALUES %s "
-                + _SUMMARY_CONFLICT_TEMPLATE.format(tabela=resumo),
-                [tuple(r[c] for c in SUMMARY_COLUMNS) for r in summary_rows],
+                f"INSERT INTO {destino.resumo} ({', '.join(colunas_resumo)}) VALUES %s "
+                + summary_conflict_sql(resumo, colunas_7d),
+                [
+                    tuple(r[c] for c in SUMMARY_COLUMNS)
+                    + tuple(r.get(c) for c in colunas_7d)
+                    for r in summary_rows
+                ],
             )
     except Exception:
         neon_conn.rollback()
@@ -491,5 +578,6 @@ def publish_channel(
         relatorio["etapa_por_etapa"] = por_etapa
         relatorio["etapa_outro_count"] = outro
         relatorio["etapa_outro_fontes"] = fontes_outro
+        relatorio["atraso_7d_colunas_escritas"] = colunas_7d
 
     return len(fila_rows), len(summary_rows)

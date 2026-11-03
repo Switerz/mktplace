@@ -238,6 +238,7 @@ class Cenario:
         self.anteriores = anteriores or []
         #: Colunas da 033 presentes no destino. Vazio = 033 nao aplicada.
         self.colunas_etapa: list[str] = []
+        self.vencimentos_7d: list[dict] = []
 
         self.target = ConexaoFake("target", self._rotear_target)
         self.source = ConexaoFake("source", self._rotear_source)
@@ -277,6 +278,10 @@ class Cenario:
         if "order_sn" in sql:
             self.ordem.append("backlog")
             return list(self.backlog)
+        if "ship_by_date >= %(venc_desde)s" in sql:
+            # Atraso de 7 dias (035): leitura auxiliar DEPOIS da fila. Fora de
+            # `ordem` de proposito - o roteiro das quinze etapas nao muda.
+            return list(self.vencimentos_7d)
         raise ErroDeUso(f"SQL inesperada na fonte: {sql[:60]!r}")
 
     def _rotear_audit(self, conn, sql, params):
