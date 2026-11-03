@@ -198,7 +198,7 @@ export const PROXIMO_PASSO: Record<
   fato_inexistente:
     "Depende das migrations 020 e 021 serem aplicadas no banco e de uma primeira carga autorizada.",
   sem_fotografia_publicada:
-    "As tabelas já existem; falta executar a carga. Ela é manual: não há agendamento.",
+    "As tabelas já existem; nenhuma fotografia foi publicada ainda. A rotina diária roda às 10:15 (BRT).",
 };
 
 // ---------------------------------------------------------------------------
@@ -256,8 +256,10 @@ export function fmtData(iso: string | null | undefined): string {
 /**
  * Frase de frescor.
  *
- * A carga e' MANUAL: a frase precisa dizer isso, senao o gestor le a data
- * como "atualiza sozinho todo dia" e confia num numero parado.
+ * A frase mostra a DATA da fotografia e a distancia ate' hoje. Ha rotina
+ * diaria (10:15 BRT), mas a origem de cada fotografia nao e' registrada: a
+ * frase nao afirma que esta veio da rotina, e a data nunca deve ser lida
+ * como "atualizado agora".
  */
 export function frescorLabel(f: Frescor): string {
   const dias = f.dias_desde_a_fotografia;
@@ -271,8 +273,8 @@ export function frescorLabel(f: Frescor): string {
 /**
  * A fotografia esta velha o bastante para avisar?
  *
- * Nao existe DAG: 2 dias ja' significa que ninguem rodou a carga, nao que o
- * agendador atrasou.
+ * A rotina diaria publica as 10:15 BRT; 2 dias sem fotografia nova e' atraso
+ * que vale avisar. O limiar (2) e' decisao de produto.
  */
 export const DIAS_ATE_AVISAR = 2;
 
@@ -405,9 +407,10 @@ export const AVISO_COBERTURA_TORRE =
   "“Cobertura da Torre” é cálculo nosso: estoque vendável dividido pela média " +
   "diária de vendas pagas de 28 dias. Não reproduz nenhuma fórmula da Shopee.";
 
-export const AVISO_CARGA_MANUAL =
-  "A carga desta fotografia é manual: não existe agendamento. A data mostrada " +
-  "é a da última execução autorizada.";
+export const AVISO_REGIME_CARGA =
+  "Atualização diária: a rotina da Torre publica a fotografia às 10:15 (BRT). " +
+  "A data mostrada é a da última fotografia publicada; se não for de hoje, " +
+  "a fotografia do dia ainda não foi publicada.";
 
 export const AVISO_KITS =
   "Kits ficam fora dos indicadores operacionais: a semântica de estoque de kit " +

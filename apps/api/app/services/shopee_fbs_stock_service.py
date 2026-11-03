@@ -87,9 +87,14 @@ COBERTURA_BAIXA_DIAS = 7
 COBERTURA_EXCESSO_DIAS = 90
 JANELA_VENDAS_DIAS = 28
 
-#: A carga e' MANUAL e nao ha DAG.
-LOAD_MODE = "manual_snapshot"
-NO_AUTOMATION = True
+#: REGIME, nao origem: desde o airflow #2239 o step `shopee_fbs_stock` roda na
+#: DAG `marketplace_tower_daily_chain` as 10:15 BRT, depois do catalogo Shopee
+#: das 06:00. Isso prova que ha rotina diaria configurada; NAO prova que uma
+#: fotografia especifica veio dela -- `audit.source_sync_run` nao registra quem
+#: disparou e a tabela tambem aceita execucao manual autorizada. Nao deduzir a
+#: origem pela idade nem pelo horario.
+LOAD_MODE = "scheduled_daily"
+NO_AUTOMATION = False
 
 #: Teto de linhas por resposta. A fato tem ~300 produtos FBS hoje, entao o teto
 #: nunca e' atingido -- ele existe para que um crescimento de catalogo nao vire
@@ -121,9 +126,11 @@ LIMITACAO_COBERTURA = (
     "rituaria. Kokeshi NÃO está na API — este total é “Estoque Full Shopee "
     "(cobertura API)”, nunca “Shopee total”."
 )
-LIMITACAO_CARGA_MANUAL = (
-    "Carga MANUAL: não existe agendamento para esta fotografia. A data "
-    "mostrada é a da última execução autorizada, não de um ciclo diário."
+LIMITACAO_REGIME_CARGA = (
+    "Atualização diária: a cadeia da Torre publica a fotografia às 10:15 "
+    "(BRT), depois do catálogo Shopee das 06:00. A data mostrada é a da "
+    "última fotografia publicada; se não for de hoje, a fotografia do dia "
+    "ainda não foi publicada."
 )
 LIMITACAO_KITS = (
     "Kits ficam FORA dos indicadores operacionais: a semântica de estoque de "
@@ -506,7 +513,7 @@ def get_estoque_full_block(
         db.execute(SQL_CONTAS_OBSERVADAS, escopo).mappings().all()]
 
     limitacoes = [
-        LIMITACAO_COBERTURA, LIMITACAO_CARGA_MANUAL, LIMITACAO_COBERTURA_TORRE,
+        LIMITACAO_COBERTURA, LIMITACAO_REGIME_CARGA, LIMITACAO_COBERTURA_TORRE,
         LIMITACAO_LIMIARES, LIMITACAO_DEMANDA, LIMITACAO_KITS,
         LIMITACAO_CONTEXTO,
     ]

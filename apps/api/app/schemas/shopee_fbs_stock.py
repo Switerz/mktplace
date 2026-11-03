@@ -92,8 +92,10 @@ class Frescor(BaseModel):
     ingested_at: Optional[datetime] = None
     #: Dias entre a fotografia e hoje. > 1 significa carga parada.
     dias_desde_a_fotografia: Optional[int] = None
-    load_mode: Literal["manual_snapshot"] = "manual_snapshot"
-    no_automation: bool = True
+    #: Regime de carga, nao origem desta fotografia (a origem nao e' registrada).
+    #: O valor antigo continua aceito por compatibilidade.
+    load_mode: Literal["manual_snapshot", "scheduled_daily"] = "scheduled_daily"
+    no_automation: bool = False
 
 
 class LimitesProvisorios(BaseModel):

@@ -17,6 +17,7 @@ import {
   AVISO_ALERTAS_SO_NA_TORRE,
   AVISO_CONTEXTO,
   AVISO_COBERTURA_TORRE,
+  AVISO_REGIME_CARGA,
   CLASSIFICACOES,
   CLASS_LABEL,
   CD_NAO_INFORMADO,
@@ -134,8 +135,8 @@ function ok(over: Partial<EstoqueFullOk> = {}): EstoqueFullOk {
       source_captured_at: "2026-09-23T08:00:00Z",
       ingested_at: "2026-09-23T09:00:00Z",
       dias_desde_a_fotografia: 1,
-      load_mode: "manual_snapshot",
-      no_automation: true,
+      load_mode: "scheduled_daily",
+      no_automation: false,
     },
     limites: {
       cobertura_baixa_dias: 7,
@@ -476,7 +477,7 @@ test("erro limpa o payload, para nao misturar numero velho com falha", () => {
 test("a tela exibe atualizacao e as ressalvas que mudam a leitura", () => {
   // Abas objetivas: sem bloco "Como ler". A ressalva de cada coluna fica num
   // InfoDica ao lado do rotulo (`texto={AVISO_...}`).
-  for (const nome of ["AVISO_COBERTURA_TORRE", "AVISO_CONTEXTO", "AVISO_CARGA_MANUAL"]) {
+  for (const nome of ["AVISO_COBERTURA_TORRE", "AVISO_CONTEXTO", "AVISO_REGIME_CARGA"]) {
     assert.ok(
       CLIENT_SRC.includes(`<InfoDica texto={${nome}} />`),
       `${nome} nao aparece na tela`,
@@ -484,6 +485,17 @@ test("a tela exibe atualizacao e as ressalvas que mudam a leitura", () => {
   }
   assert.ok(!CLIENT_SRC.includes("Como ler"), "bloco de metodologia voltou");
   assert.ok(CLIENT_SRC.includes("frescorLabel(payload.frescor)"));
+});
+
+test("o aviso de carga descreve o regime diario, nao 'carga manual'", () => {
+  // Desde o airflow #2239 ha rotina diaria as 10:15 BRT. O texto afirma o
+  // regime; a origem de cada fotografia nao e' registrada.
+  for (const texto of [AVISO_REGIME_CARGA, PROXIMO_PASSO.sem_fotografia_publicada]) {
+    assert.match(texto, /10:15/);
+    assert.doesNotMatch(texto, /manual/i);
+    assert.doesNotMatch(texto, /não existe agendamento|não há agendamento/i);
+  }
+  assert.ok(!CLIENT_SRC.includes("AVISO_CARGA_MANUAL"));
 });
 
 test("os alertas sao declarados como exclusivos da Torre", () => {
