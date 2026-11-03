@@ -234,10 +234,13 @@ def test_regime_de_carga_e_diario_e_nao_afirma_origem():
     assert Frescor(ref_date=REF, load_mode="manual_snapshot").load_mode == (
         "manual_snapshot")
 
-    for texto in (svc.LIMITACAO_REGIME_CARGA, svc.LIMITACAO_CARGA_MANUAL):
-        assert "10:15" in texto
-        assert "manual" not in texto.lower()
-        assert "não existe agendamento" not in texto
+    texto = svc.LIMITACAO_REGIME_CARGA
+    assert "10:15" in texto
+    assert "manual" not in texto.lower()
+    assert "não existe agendamento" not in texto
+    # Sem alias com o nome antigo: "CARGA_MANUAL" carregando texto de regime
+    # enganaria quem le o codigo.
+    assert not hasattr(svc, "LIMITACAO_CARGA_MANUAL")
 
 
 def test_lista_vazia_significa_sem_filtro():

@@ -1032,7 +1032,7 @@ def shopee_fbs_estoque(
             scope_label=fbs_stock_svc.SCOPE_LABEL,
             unavailable_reason=ausente.mensagem,
             motivo_tecnico=ausente.motivo_tecnico,
-            limitacoes=[fbs_stock_svc.LIMITACAO_CARGA_MANUAL],
+            limitacoes=[fbs_stock_svc.LIMITACAO_REGIME_CARGA],
         )
     except fbs_stock_svc.EstoqueFullContractError:
         # Contrato da FONTE quebrado. Nao e' erro do cliente.

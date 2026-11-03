@@ -132,9 +132,6 @@ LIMITACAO_REGIME_CARGA = (
     "última fotografia publicada; se não for de hoje, a fotografia do dia "
     "ainda não foi publicada."
 )
-#: Nome antigo mantido como alias: `routers/performance.py` o importa para a
-#: resposta "indisponivel". O texto e' o mesmo de LIMITACAO_REGIME_CARGA.
-LIMITACAO_CARGA_MANUAL = LIMITACAO_REGIME_CARGA
 LIMITACAO_KITS = (
     "Kits ficam FORA dos indicadores operacionais: a semântica de estoque de "
     "kit não foi conciliada com o Seller Center. Aparecem em contagem própria."
