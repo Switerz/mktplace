@@ -1,5 +1,6 @@
 "use client";
 
+import { torreFetch } from "@/lib/torre-fetch";
 import { Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { ArrowDown } from "lucide-react";
@@ -274,7 +275,7 @@ function BrandPageInner() {
 
     async function fetchDailyRange(dateFrom: string, dateTo: string): Promise<DailyRow[] | null> {
       try {
-        const res = await fetch(
+        const res = await torreFetch(
           `${apiUrl}/api/v1/performance/daily?brand=${brand}&marketplace=${marketplace}&date_from=${dateFrom}&date_to=${dateTo}`
         );
         if (res.ok) return (await res.json()).data;
