@@ -1430,3 +1430,267 @@ def test_run_terminado_sem_finished_at_recusa_tambem_marca_com_fotografia(ambien
     _sem_neon(monkeypatch)
     with pytest.raises(pub.PublicacaoRecusada, match="run_raw_nao_terminado.*finished_at=nulo"):
         pub.run(apply=True, ref_date=REF, **CONTRATO)
+
+
+# ---------------------------------------------------------------------------
+# T-0052 em PostgreSQL REAL descartavel: RAW do airflow + fatos da 029 + auditoria
+#
+#     docker run --rm -d --name pg-mlfull-zero -p 127.0.0.1:55452:5432 \
+#         -e POSTGRES_PASSWORD=postgres postgres:16
+#     ML_FULL_ZERO_TEST_DSN=postgresql://postgres:postgres@127.0.0.1:55452/postgres \
+#         python -m pytest pipelines/tests/test_publish_ml_full_stock_daily.py -q -k pg_
+#
+# Sem a variavel: SKIP. A DSN tem de ser local (barreira do conftest + checagem
+# abaixo). O MESMO banco faz de Data Mart (schema raw/api) e de Neon (marts/audit).
+# ---------------------------------------------------------------------------
+import os  # noqa: E402
+
+PG_DSN = os.environ.get("ML_FULL_ZERO_TEST_DSN")
+sem_pg = pytest.mark.skipif(not PG_DSN, reason="ML_FULL_ZERO_TEST_DSN ausente - exige PostgreSQL descartavel")
+
+#: DDL RAW copiada de airflow `src/mercadolivre/schema.sql` (T-0050 61467656), so' as 4 tabelas.
+DDL_RAW = """
+CREATE TABLE raw.ml_full_stock_runs (
+    run_id VARCHAR(36) PRIMARY KEY, started_at TIMESTAMPTZ NOT NULL, finished_at TIMESTAMPTZ,
+    brands_requested VARCHAR(200) NOT NULL,
+    status VARCHAR(16) NOT NULL CHECK (status IN ('running', 'completo', 'parcial')),
+    stop_reason VARCHAR(48), outcome_by_brand JSONB, gets_by_endpoint JSONB);
+CREATE TABLE raw.ml_full_inventory_snapshot (
+    brand VARCHAR(50) NOT NULL, seller_id VARCHAR(30) NOT NULL, inventory_id VARCHAR(60) NOT NULL,
+    ref_date DATE NOT NULL, captured_at TIMESTAMPTZ NOT NULL,
+    read_status VARCHAR(24) NOT NULL CHECK (read_status IN ('OK', 'NAO_ENCONTRADO', 'CONTRATO_QUEBRADO')),
+    available_quantity INTEGER CHECK (available_quantity >= 0),
+    not_available_quantity INTEGER CHECK (not_available_quantity >= 0),
+    total_quantity INTEGER CHECK (total_quantity >= 0), total_coerente BOOLEAN, detalhe_coerente BOOLEAN,
+    run_id VARCHAR(36) NOT NULL,
+    CONSTRAINT uk_ml_full_inventory_snapshot UNIQUE (brand, seller_id, inventory_id, ref_date),
+    CONSTRAINT ck_ml_full_snapshot_ok_tem_quantidade CHECK (
+        (read_status = 'OK' AND available_quantity IS NOT NULL AND not_available_quantity IS NOT NULL)
+        OR (read_status <> 'OK' AND available_quantity IS NULL AND not_available_quantity IS NULL
+            AND total_quantity IS NULL)));
+CREATE TABLE raw.ml_full_inventory_unavailable (
+    brand VARCHAR(50) NOT NULL, seller_id VARCHAR(30) NOT NULL, inventory_id VARCHAR(60) NOT NULL,
+    ref_date DATE NOT NULL, status_raw VARCHAR(40) NOT NULL, quantity INTEGER NOT NULL CHECK (quantity >= 0),
+    run_id VARCHAR(36) NOT NULL,
+    CONSTRAINT uk_ml_full_inventory_unavailable UNIQUE (brand, seller_id, inventory_id, ref_date, status_raw));
+CREATE TABLE raw.ml_full_inventory_listing (
+    brand VARCHAR(50) NOT NULL, seller_id VARCHAR(30) NOT NULL, item_id VARCHAR(30) NOT NULL,
+    variation_id VARCHAR(30) NOT NULL, inventory_id VARCHAR(60), user_product_id VARCHAR(60),
+    has_sku BOOLEAN NOT NULL, logistic_type VARCHAR(40), listing_status VARCHAR(30), ref_date DATE NOT NULL,
+    captured_at TIMESTAMPTZ NOT NULL, run_id VARCHAR(36) NOT NULL,
+    CONSTRAINT uk_ml_full_inventory_listing UNIQUE (brand, seller_id, item_id, variation_id, ref_date));
+"""
+#: So' as colunas que `SQL_VENDAS_FULL` e a auditoria tocam (vazias: sem venda na janela).
+DDL_APOIO = """
+CREATE TABLE api.ml_orders (brand TEXT, order_id TEXT, shipping_id TEXT, status TEXT, date_created TIMESTAMPTZ);
+CREATE TABLE api.ml_shipments (brand TEXT, shipment_id TEXT, logistic_type TEXT, updated_at TIMESTAMPTZ);
+CREATE TABLE api.ml_order_line_items (brand TEXT, order_id TEXT, item_id TEXT, variation_id BIGINT,
+                                      quantity INTEGER);
+CREATE TABLE audit.source_sync_run (
+    sync_run_id SERIAL PRIMARY KEY, source_name TEXT, marketplace_id INTEGER, loja_id INTEGER, status TEXT,
+    started_at TIMESTAMPTZ, finished_at TIMESTAMPTZ, rows_extracted INTEGER, rows_loaded INTEGER,
+    error_message TEXT);
+"""
+D, D2, D3, D4, ANTES = (date(2026, 10, 20), date(2026, 10, 21), date(2026, 10, 22), date(2026, 10, 23),
+                        date(2026, 10, 19))
+
+
+def _inicio(dia):           # 10:20 UTC = 07:20 em Sao Paulo, mesmo dia
+    return datetime(dia.year, dia.month, dia.day, 10, 20, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def pg(monkeypatch, tmp_path):
+    if not PG_DSN:
+        pytest.skip("ML_FULL_ZERO_TEST_DSN ausente")
+    from urllib.parse import urlparse
+    assert urlparse(PG_DSN).hostname in ("localhost", "127.0.0.1", "::1"), "DSN do teste tem de ser local"
+    from sqlalchemy import create_engine, text as sql
+    from sqlalchemy.orm import sessionmaker
+    eng = create_engine(PG_DSN)
+    with eng.begin() as c:
+        c.execute(sql("DROP SCHEMA IF EXISTS raw, marts, api, audit CASCADE"))
+        c.execute(sql("CREATE SCHEMA raw; CREATE SCHEMA marts; CREATE SCHEMA api; CREATE SCHEMA audit"))
+        c.execute(sql(DDL_RAW))
+        c.execute(sql(DDL_APOIO))
+        for ddl in _mig()._upgrade_sql():
+            c.execute(sql(ddl))
+        # publicacao anterior de OUTRO dia, para provar que nada fora do pedido muda
+        for m in QUATRO.split(","):
+            c.execute(sql(f"INSERT INTO {pub.FACT_MARCA} (ref_date, brand, inventarios, inventarios_full_lidos, "
+                          "inventarios_compartilhados, disponivel_full, nao_disponivel_full, transfer_full, "
+                          "unidades_28d_alocadas, source_run_id) VALUES (:d, :m, 1, 1, 0, 3, 0, 0, 0, 'antigo')"),
+                      {"d": ANTES, "m": m})
+            c.execute(sql(f"INSERT INTO {pub.FACT_INVENTARIO} VALUES (:d, :m, 'S0', 'I0', 'OK', 3, 0, 0, true, "
+                          "true, true, 1, 1, 1, 0, 0, NULL, 'SEM_GIRO_CANDIDATO', 'SEM_VENDA_NA_JANELA', "
+                          "'antigo', now())"), {"d": ANTES, "m": m})
+    monkeypatch.setattr(pub, "local_engine", lambda: eng)
+    monkeypatch.setattr(pub, "LocalSession", sessionmaker(bind=eng))
+    monkeypatch.setattr(pub, "DataMartSession", sessionmaker(bind=eng))
+    monkeypatch.setenv(pub.FLAG_AMBIENTE, "true")
+    monkeypatch.chdir(tmp_path)
+    bruta = eng.raw_connection()
+    try:
+        with bruta.cursor() as cur:
+            ident = pub.identidade_destino(cur)                      # o `-Identificar` deste banco
+    finally:
+        bruta.close()
+    assert ident["modo"] == "teste" and ident["system_identifier"]
+    gravar_destino(tmp_path / ARQ_DESTINO, ident)
+    yield eng
+    eng.dispose()
+
+
+def _exec(eng, q, **p):
+    from sqlalchemy import text as sql
+    with eng.begin() as c:
+        return c.execute(sql(q), p)
+
+
+def _run_raw(eng, rid, dia, marcas, status="completo", desfecho=None, fim=True):
+    desfecho = {m: "PUBLICADA" for m in marcas} if desfecho is None else desfecho
+    _exec(eng, "INSERT INTO raw.ml_full_stock_runs (run_id, started_at, finished_at, brands_requested, status, "
+               "outcome_by_brand) VALUES (:r, :i, CASE WHEN :f THEN :i + interval '30 minutes' END, :b, :s, "
+               "CAST(:o AS jsonb))",
+          r=rid, i=_inicio(dia), f=fim, b=",".join(marcas), s=status, o=json.dumps(desfecho))
+
+
+def _inventario(eng, rid, dia, marca, seller, inv, disp, nao=0, transfer=0):
+    _exec(eng, "INSERT INTO raw.ml_full_inventory_snapshot VALUES (:m, :s, :i, :d, :c, 'OK', :a, :n, :t, true, "
+               "true, :r)", m=marca, s=seller, i=inv, d=dia, c=_inicio(dia), a=disp, n=nao, t=disp + nao, r=rid)
+    _ponte(eng, rid, dia, marca, seller, "M" + inv, inv, "fulfillment")
+    if transfer:
+        _exec(eng, "INSERT INTO raw.ml_full_inventory_unavailable VALUES (:m, :s, :i, :d, 'transfer', :qt, :r)",
+              m=marca, s=seller, i=inv, d=dia, qt=transfer, r=rid)
+
+
+def _ponte(eng, rid, dia, marca, seller, item, inv=None, lt="cross_docking"):
+    _exec(eng, "INSERT INTO raw.ml_full_inventory_listing VALUES (:m, :s, :it, '0', :i, NULL, true, :lt, "
+               "'active', :d, :c, :r)", m=marca, s=seller, it=item, i=inv, lt=lt, d=dia, c=_inicio(dia), r=rid)
+
+
+def _contagens(eng):
+    """(fato, ref_date, brand) -> linhas, nas tres fatos."""
+    out = {}
+    for t in pub.TABELAS:
+        for d, b, n in _exec(eng, f"SELECT ref_date, brand, count(*) FROM {t} GROUP BY 1, 2").fetchall():
+            out[(t, d, b)] = n
+    return out
+
+
+def _marca(eng, dia):
+    return {r.brand: r for r in _exec(eng, f"SELECT * FROM {pub.FACT_MARCA} WHERE ref_date = :d", d=dia)}
+
+
+def _audit(eng):
+    return [tuple(r) for r in _exec(eng, "SELECT status, rows_loaded FROM audit.source_sync_run ORDER BY 1")]
+
+
+def _publicar(dia, marcas, raw_runs, publish_run_id):
+    return pub.run(apply=True, ref_date=dia, marcas=marcas, raw_runs=raw_runs, publish_run_id=publish_run_id,
+                   destino_esperado=ARQ_DESTINO)
+
+
+def _pid(n):
+    return f"{n:032x}"
+
+
+@sem_pg
+def test_pg_quatro_marcas_uma_full_zero_por_invocacao_e_repeticao_idempotente(pg):
+    _run_raw(pg, "R1", D, QUATRO.split(","))
+    _inventario(pg, "R1", D, "barbours", "S1", "IA", 10)
+    _inventario(pg, "R1", D, "kokeshi", "S2", "IK", 5, nao=1, transfer=1)
+    _inventario(pg, "R1", D, "lescent", "S3", "IL", 0)              # disponivel 0 COM inventario: normal
+    _ponte(pg, "R1", D, "rituaria", "S4", "MR")                     # Full zero: so' anuncio sem inventario
+    for n, m in enumerate(QUATRO.split(","), start=1):              # uma invocacao por marca
+        antes = _contagens(pg)
+        r = _publicar(D, [m], {m: "R1"}, _pid(n))
+        assert r["applied"] is True and r["marcas_publicadas"] == [m]
+        depois = _contagens(pg)
+        mudou = {k for k in set(antes) | set(depois) if antes.get(k) != depois.get(k)}
+        assert {(d, b) for _, d, b in mudou} == {(D, m)}, mudou      # so' (D, marca pedida)
+    fm = _marca(pg, D)
+    assert (fm["lescent"].inventarios, fm["lescent"].inventarios_full_lidos, fm["lescent"].disponivel_full) == \
+        (1, 1, 0)
+    z = fm["rituaria"]
+    assert (z.inventarios, z.inventarios_full_lidos, z.disponivel_full, z.nao_disponivel_full,
+            z.transfer_full, z.source_run_id) == (0, 0, None, None, None, _pid(4))
+    cont = _contagens(pg)
+    assert (pub.FACT_INVENTARIO, D, "rituaria") not in cont and (pub.FACT_STATUS, D, "rituaria") not in cont
+    assert cont[(pub.FACT_STATUS, D, "kokeshi")] == 1
+    assert r["marcas_full_zero_publicadas"] == ["rituaria"]
+    assert r["evidencia_conta_full_zero"] == {"rituaria": pub.CONTA_UNICA_NA_PONTE}
+    # repeticao: mesmo estado zero, outro publish id -> mesmas metricas e mesmas contagens
+    antes, metricas = _contagens(pg), {k: v for k, v in z._mapping.items()
+                                       if k not in ("source_run_id", "published_at")}
+    r2 = _publicar(D, ["rituaria"], {"rituaria": "R1"}, _pid(5))
+    z2 = _marca(pg, D)["rituaria"]
+    assert r2["applied"] is True and _contagens(pg) == antes and z2.source_run_id == _pid(5)
+    assert {k: v for k, v in z2._mapping.items() if k not in ("source_run_id", "published_at")} == metricas
+    # as 4 numa invocacao so' tambem fecham (zero incluido) e nao tocam o outro dia
+    r3 = _publicar(D, QUATRO.split(","), {m: "R1" for m in QUATRO.split(",")}, _pid(6))
+    assert r3["marcas_full_zero_publicadas"] == ["rituaria"] and _contagens(pg) == antes
+    assert sorted(_audit(pg)) == sorted([("success", 1)] * 3 + [("success", 0)] * 2 + [("success", 3)])
+    assert all(_marca(pg, ANTES)[m].source_run_id == "antigo" for m in QUATRO.split(","))
+
+
+@sem_pg
+def test_pg_todas_as_marcas_full_zero_total_zero(pg):
+    _run_raw(pg, "R2", D2, QUATRO.split(","))
+    antes = _contagens(pg)
+    r = _publicar(D2, QUATRO.split(","), {m: "R2" for m in QUATRO.split(",")}, _pid(10))
+    assert r["applied"] is True and r["inventarios_publicados"] == 0 and r["disponivel_publicado"] == 0
+    assert r["evidencia_conta_full_zero"] == {m: pub.CONTA_SEM_EVIDENCIA_RAW for m in QUATRO.split(",")}
+    fm = _marca(pg, D2)
+    assert sorted(fm) == QUATRO.split(",") and all(v.inventarios == 0 and v.disponivel_full is None
+                                                   for v in fm.values())
+    depois = _contagens(pg)
+    assert {k for k in depois if antes.get(k) != depois[k]} == {(pub.FACT_MARCA, D2, m) for m in QUATRO.split(",")}
+    assert pub.diagnosticar(D2, _pid(10))["veredito"] == pub.ESTADO_COMMIT
+
+
+def _semear_recusas(eng):
+    # D3: run parcial, kokeshi incompleta (0 linhas) | R4: running | D4: conta da kokeshi = conta da barbours
+    _run_raw(eng, "R3", D3, ["barbours", "kokeshi"], status="parcial",
+             desfecho={"barbours": "PUBLICADA", "kokeshi": "INCOMPLETA_NAO_PUBLICADA"})
+    _inventario(eng, "R3", D3, "barbours", "S1", "IA", 7)
+    _run_raw(eng, "R4", D3, ["lescent"], status="running", desfecho={}, fim=False)
+    _run_raw(eng, "R1", D, ["kokeshi"])
+    _run_raw(eng, "R6", D4, ["barbours", "kokeshi"])
+    _inventario(eng, "R6", D4, "barbours", "S1", "IA", 7)
+    _ponte(eng, "R6", D4, "kokeshi", "S1", "MK")
+
+
+@sem_pg
+@pytest.mark.parametrize("dia,marca,run_raw,trecho", [
+    (D3, "kokeshi", "R3", "run_raw_nao_publicado"),          # fonte incompleta / parcial sem PUBLICADA
+    (D3, "lescent", "R4", "run_raw_nao_terminado"),          # run ainda rodando
+    (D3, "kokeshi", "R1", "run_raw_de_outra_data"),          # run de outro dia
+    (D3, "rituaria", "R3", "run_raw_de_outra_marca"),        # run errado: nao pediu a marca
+    (D3, "rituaria", "NAO-EXISTE", "run_raw_nao_registrado"),  # ausencia
+    (D4, "kokeshi", "R6", "conta_em_outra_marca"),           # conta errada
+])
+def test_pg_zero_sem_prova_recusa_sem_tocar_o_destino(pg, dia, marca, run_raw, trecho):
+    _semear_recusas(pg)
+    antes, audit = _contagens(pg), _audit(pg)
+    with pytest.raises(pub.PublicacaoRecusada, match=f"^marca_pedida_sem_fotografia: {marca} .*{trecho}"):
+        _publicar(dia, [marca], {marca: run_raw}, _pid(20))
+    assert _contagens(pg) == antes and _audit(pg) == audit
+
+
+@sem_pg
+def test_pg_marca_pronta_do_run_parcial_publica_e_a_incompleta_fica_ausente(pg):
+    _semear_recusas(pg)
+    r = _publicar(D3, ["barbours"], {"barbours": "R3"}, _pid(21))
+    assert r["applied"] is True and sorted(_marca(pg, D3)) == ["barbours"]   # kokeshi: sem fotografia (sem linha)
+
+
+@sem_pg
+def test_pg_destino_divergente_recusa_zero_sem_escrita(pg, tmp_path):
+    _run_raw(pg, "R2", D2, ["rituaria"])
+    alvo = json.loads((tmp_path / ARQ_DESTINO).read_text(encoding="utf-8"))["identidade"]["alvo_neon"]
+    gravar_destino(tmp_path / ARQ_DESTINO, dict(alvo, system_identifier="1"))
+    antes, audit = _contagens(pg), _audit(pg)
+    with pytest.raises(pub.PublicacaoRecusada, match="destino_divergente: alvo_neon.system_identifier"):
+        _publicar(D2, ["rituaria"], {"rituaria": "R2"}, _pid(22))
+    assert _contagens(pg) == antes and _audit(pg) == audit
