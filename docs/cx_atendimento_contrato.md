@@ -153,7 +153,7 @@ Implementada antes das ingestões, para a aba nascer útil sem depender de revis
 
 | Canal | Indicadores | Fonte (lida direto pela API, engine do Data Mart) |
 |---|---|---|
-| ML | Pedidos com reclamação, taxa de pedidos com reclamação, cancelamentos; motivos de cancelamento; tabela por marca | `api.vw_ml_orders` (`mediations`, `cancel_detail`), um pedido por `order_id`, dia = `date_created` |
+| ML | Cancelamentos e taxa de cancelamento (qualquer autor); motivos de cancelamento; tabela por marca | `api.vw_ml_orders` (`cancel_detail`), um pedido por `order_id`, dia = `date_created` |
 | Shopee | Cancelamentos e taxa (sem "pedido não pago"), pedidos em devolução agora; motivos de cancelamento; tabela por marca | `silver.stg_shopee_orders` (`cancel_by`, `cancel_reason`, `order_status`), dia = `created_date_brt` |
 | TikTok | `sem_fonte`, com motivo | — |
 
@@ -165,8 +165,11 @@ Implementada antes das ingestões, para a aba nascer útil sem depender de revis
   "Ainda não publicado", com o motivo de cada um.
 - **Pré-requisito para ligar:** o usuário do Data Mart da API precisa de `SELECT` em `api.vw_ml_orders` e
   `silver.stg_shopee_orders` (hoje a API só lê `gold.*`). Sem o grant, cada bloco sai como `erro`, nunca zero.
-- Medido em 03/11/2026 (30 dias, 04/10 a 02/11): ML 1.876 pedidos com reclamação em 58.666 (3,2%);
+- Medido em 03/11/2026 (30 dias, 04/10 a 02/11): ML 2.343 cancelamentos em 58.666 pedidos (4,0%);
   Shopee 1.704 cancelamentos em 29.290 pedidos (5,8%), fora 3.854 não pagos.
+- **Reclamação do ML ficou de fora de propósito.** Contar pedidos com `mediations` dá Kokeshi 2,5% contra
+  0,61% na reputação oficial do mesmo período: o campo inclui o cancelamento pedido pelo comprador e não
+  aplica as exclusões do ML. A taxa oficial vem do snapshot de reputação (aba Performance, CX-MKT-2).
 
 ## 8. Arquitetura e fases
 

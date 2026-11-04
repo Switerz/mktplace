@@ -6,8 +6,7 @@ LE O DATA MART DIRETO, SEM INGESTAO NOVA
 ----------------------------------------
 Esta fatia usa so' o que o Airflow ja' grava:
 
-  ML      `api.vw_ml_orders`          `mediations` (ids de reclamacao do pedido)
-                                      e `cancel_detail` (motivo do cancelamento)
+  ML      `api.vw_ml_orders`          `cancel_detail` (motivo do cancelamento)
   Shopee  `silver.stg_shopee_orders`  `cancel_by`, `cancel_reason`, `order_status`
 
 O que depende de API nova (fila com prazo, motivo da reclamacao, devolucoes do
@@ -17,11 +16,10 @@ DEFINICOES (todas "calculo Torre")
 ----------------------------------
 * Pedido ML: um por `order_id` (a view pode repetir o pedido; fica a linha mais
   recente). Dia = `date_created` (horario do ML), igual ao resto da Torre.
-* Pedido com reclamacao (ML): pedido com `mediations` nao vazio. NAO e' a taxa
-  de reclamacoes da reputacao do ML: mistura tipos e nao aplica as exclusoes
-  da plataforma (contrato da Performance das contas, P2). Pedidos recentes
-  ainda podem receber reclamacao, entao a taxa da janela corrente sobe com o
-  tempo.
+* Reclamacoes do ML NAO sao contadas aqui. `mediations` do pedido mistura
+  tipos (inclui cancelamento pedido pelo comprador) e nao aplica as exclusoes
+  da plataforma: medido em 03/11/2026, Kokeshi daria 2,5% contra 0,61% na
+  reputacao oficial. A taxa oficial vem do snapshot de reputacao.
 * Pedido Shopee: um por linha da Silver (`order_sn`), dia = `created_date_brt`.
   "Pedido nao pago" cancelado pela Shopee nao e' venda nem atendimento: sai do
   denominador e dos motivos, e o volume aparece como `excluidos`.
@@ -178,7 +176,7 @@ def _texto_janela(j: Janela) -> str:
 _CTE_ML = """
 WITH o AS (
     SELECT DISTINCT ON (order_id)
-           order_id, brand, status, mediations, cancel_detail, updated_at
+           order_id, brand, status, cancel_detail, updated_at
       FROM api.vw_ml_orders
      WHERE brand = ANY(:marcas)
        AND date_created >= :inicio
@@ -190,8 +188,6 @@ WITH o AS (
 SQL_ML_MARCAS = _CTE_ML + """
 SELECT brand AS marca,
        COUNT(*) AS pedidos,
-       COUNT(*) FILTER (WHERE jsonb_typeof(mediations) = 'array'
-                          AND jsonb_array_length(mediations) > 0) AS com_reclamacao,
        COUNT(*) FILTER (WHERE status = 'cancelled') AS cancelados,
        MAX(updated_at) AS atualizado_em
   FROM o
@@ -399,15 +395,12 @@ def _canal_ml(consultar: Consultar, marcas: list[str], janela: Janela, agora: da
     for m in cobertura.marcas:
         r = por_marca.get(m)
         pedidos = _int(r.get("pedidos")) if r else None
-        recl = _int(r.get("com_reclamacao")) if r else None
+        cancelados = _int(r.get("cancelados")) if r else None
         marcas_linhas.append(LinhaMarca(
-            marca=m, pedidos=pedidos, pedidos_com_reclamacao=recl,
-            taxa_reclamacao_pct=_pct(recl, pedidos),
-            cancelamentos=_int(r.get("cancelados")) if r else None,
+            marca=m, pedidos=pedidos, cancelamentos=cancelados,
+            taxa_cancelamento_pct=_pct(cancelados, pedidos),
         ))
     pedidos = sum(x.pedidos for x in marcas_linhas if x.pedidos is not None) if ok else None
-    recl = sum(x.pedidos_com_reclamacao for x in marcas_linhas
-               if x.pedidos_com_reclamacao is not None) if ok else None
     canc = sum(x.cancelamentos for x in marcas_linhas if x.cancelamentos is not None) if ok else None
     instante = max((t for t in (_utc(r.get("atualizado_em")) for r in (linhas or [])) if t),
                    default=None)
@@ -417,21 +410,20 @@ def _canal_ml(consultar: Consultar, marcas: list[str], janela: Janela, agora: da
                if ok and sem_linha else None)
     vazio = ok and not pedidos
 
+    # Sem "taxa de reclamacao" aqui DE PROPOSITO: a contagem por `mediations`
+    # inclui cancelamento pedido pelo comprador e nao aplica as exclusoes do ML.
+    # Medido em 03/11/2026: Kokeshi 2,5% aqui contra 0,61% na reputacao oficial.
+    # O numero oficial vem do snapshot de reputacao (aba Performance).
     indicadores = [
-        _indicador("ml_pedidos_com_reclamacao", "Pedidos com reclamação",
-                   valor=None if vazio else recl, unidade="contagem", janela=jt, fonte=FONTE_ML,
-                   ok=ok, atualizado_em=instante, aviso=aviso, cobertura=cob_txt,
-                   ajuda="Pedidos criados na janela que têm ao menos uma reclamação aberta pelo comprador. "
-                         "Cálculo Torre: não é a taxa de reclamações da reputação do ML."),
-        _indicador("ml_taxa_reclamacao", "Taxa de pedidos com reclamação",
-                   valor=_pct(recl, pedidos), unidade="pct", janela=jt, fonte=FONTE_ML, ok=ok,
-                   atualizado_em=instante, aviso=aviso, cobertura=cob_txt,
-                   ajuda="Pedidos com reclamação ÷ pedidos criados na janela. Pedidos recentes ainda podem "
-                         "receber reclamação, então a taxa dos últimos dias tende a subir."),
         _indicador("ml_cancelamentos", "Cancelamentos",
                    valor=None if vazio else canc, unidade="contagem", janela=jt, fonte=FONTE_ML,
                    ok=ok, atualizado_em=instante, aviso=aviso, cobertura=cob_txt,
                    ajuda="Pedidos criados na janela e cancelados, de qualquer autor (comprador, ML ou logística)."),
+        _indicador("ml_taxa_cancelamento", "Taxa de cancelamento",
+                   valor=_pct(canc, pedidos), unidade="pct", janela=jt, fonte=FONTE_ML, ok=ok,
+                   atualizado_em=instante, aviso=aviso, cobertura=cob_txt,
+                   ajuda="Cancelamentos ÷ pedidos criados na janela, de qualquer autor. Não é a taxa "
+                         "\"Canceladas por você\" da reputação do ML, que conta só o que o vendedor cancelou."),
     ]
     bloco = _bloco_motivos(
         "Motivos de cancelamento",
@@ -467,10 +459,13 @@ def _canal_shopee(consultar: Consultar, marcas: list[str], janela: Janela, agora
     marcas_linhas = []
     for m in cobertura.marcas:
         r = por_marca.get(m)
+        pedidos_m = _int(r.get("pedidos")) if r else None
+        cancelados_m = _int(r.get("cancelados")) if r else None
         marcas_linhas.append(LinhaMarca(
             marca=m,
-            pedidos=_int(r.get("pedidos")) if r else None,
-            cancelamentos=_int(r.get("cancelados")) if r else None,
+            pedidos=pedidos_m,
+            cancelamentos=cancelados_m,
+            taxa_cancelamento_pct=_pct(cancelados_m, pedidos_m),
             cancelamentos_comprador=_int(r.get("cancelados_comprador")) if r else None,
             # fotografia: sem linha para a marca = nenhum pedido em devolucao (zero medido)
             em_devolucao=(dev_marca.get(m, 0) if ok_dev else None),
