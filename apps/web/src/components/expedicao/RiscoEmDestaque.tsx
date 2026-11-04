@@ -19,6 +19,7 @@
  * no hover, como os cartoes ao lado.
  */
 import type { ReactNode } from "react";
+import { AlertTriangle, Hourglass } from "lucide-react";
 
 import type { Kpi } from "@/lib/expedicao-contract";
 import { formatarInteiro } from "@/lib/expedicao-formato";
@@ -74,19 +75,22 @@ export default function RiscoEmDestaque({
   // Zero nao pinta: cor e' para risco, nao para decorar.
   const critico = principal.chave === "overdue";
   const tinta = valor === 0 ? "text-ink" : critico ? "text-crit-ink" : "text-warn-ink";
+  // UX-VIDRO-4: vidro com borda e brilho no tom do risco (zero continua neutro).
   const fundo =
     valor === 0
       ? "border-line bg-surface"
       : critico
-        ? "border-crit/30 bg-crit-soft"
-        : "border-warn/30 bg-warn-soft";
+        ? "border-crit/45 bg-surface tc-brilho-crit tc-brilho-forte"
+        : "border-warn/50 bg-surface tc-brilho-warn tc-brilho-forte";
+  const ladrilho = valor === 0 ? "bg-accent/10 text-accent" : critico ? "bg-crit/10 text-crit-ink" : "bg-warn/15 text-warn-ink";
+  const IconeDestaque = critico ? AlertTriangle : Hourglass;
   const qtdAlerta = marcasAlerta?.valor ?? 0;
 
   return (
     <div className="grid gap-3 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]" data-testid="exp-risco-destaque">
       <section
         aria-label={`${principal.rotulo}: ${formatarInteiro(valor)}`}
-        className={`group relative flex flex-col gap-2 rounded-xl border p-4 ${fundo} ${
+        className={`group relative flex flex-col gap-3 rounded-xl border p-5 ${fundo} ${
           aoAbrir ? "card-hover hover:border-accent/50" : ""
         }`}
       >
@@ -94,7 +98,10 @@ export default function RiscoEmDestaque({
           <CoberturaClicavel rotulo={`Ver os ${formatarInteiro(valor)} pedidos: ${principal.rotulo}`} aoAbrir={aoAbrir} />
         ) : null}
         <div className="pointer-events-none relative z-10 flex items-center justify-between gap-2">
-          <p className={`flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide ${tinta}`}>
+          <p className={`flex items-center gap-2 text-xs font-semibold uppercase tracking-wide ${tinta}`}>
+            <span aria-hidden="true" className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${ladrilho}`}>
+              <IconeDestaque className="h-4 w-4" strokeWidth={1.75} />
+            </span>
             {principal.rotulo}
             {ajuda ? <span className="pointer-events-auto inline-flex">{ajuda}</span> : null}
           </p>
@@ -105,7 +112,7 @@ export default function RiscoEmDestaque({
           ) : null}
         </div>
         <p className="pointer-events-none relative z-10 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-          <span className={`text-4xl font-bold leading-none tabular-nums ${tinta}`}>
+          <span className={`text-4xl sm:text-6xl font-extrabold leading-none tracking-tight tabular-nums ${tinta}`}>
             {formatarInteiro(valor)}
           </span>
           {backlog?.valor != null ? (

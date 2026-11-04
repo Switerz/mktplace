@@ -697,3 +697,64 @@ html:not(.dark) .tc-fundo .tc-tema-claro {
   min-width: 7.5rem;
   text-align: right;
 }
+
+/* UX-VIDRO-4 — brilho no canto do cartao, na cor do TOM (risco) ou do
+   destaque (neutro). `--brilho-cor` vem da classe; o degrade so' pinta em
+   cartao de vidro. `tc-brilho-forte` e' o do cartao em destaque. */
+.tc-brilho-crit { --brilho-cor: var(--tc-crit); }
+.tc-brilho-warn { --brilho-cor: var(--tc-warn); }
+.tc-brilho-neutro { --brilho-cor: var(--tc-kpi-ticket); }
+.rounded-xl.border.bg-surface:is(.tc-brilho-crit, .tc-brilho-warn, .tc-brilho-neutro) {
+  background-image: radial-gradient(18rem 12rem at 100% 100%, rgb(var(--brilho-cor) / 0.16), transparent 70%);
+}
+.rounded-xl.border.bg-surface.tc-brilho-forte {
+  background-image: radial-gradient(30rem 20rem at 78% 22%, rgb(var(--brilho-cor) / 0.2), transparent 68%);
+}
+.dark .rounded-xl.border.bg-surface:is(.tc-brilho-crit, .tc-brilho-warn, .tc-brilho-neutro) {
+  background-image: radial-gradient(18rem 12rem at 100% 100%, rgb(var(--brilho-cor) / 0.22), transparent 70%);
+}
+.dark .rounded-xl.border.bg-surface.tc-brilho-forte {
+  background-image: radial-gradient(30rem 20rem at 78% 22%, rgb(var(--brilho-cor) / 0.26), transparent 68%);
+}
+
+/* UX-VIDRO-4 — tabela em FAIXAS (proposta aprovada): cada linha e' uma faixa
+   arredondada com fundo suave e 6px de respiro entre elas, em vez de linhas
+   finas. Vale para "Backlog por marca" (Agora e Ultimos 7 dias). */
+table.tc-tabela-linhas {
+  border-collapse: separate;
+  border-spacing: 0 6px;
+  margin-top: -6px;
+}
+.tc-tabela-linhas thead th {
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
+  font-weight: 600;
+}
+.tc-tabela-linhas tbody > tr > :is(td, th) {
+  background-color: rgb(var(--tc-accent) / 0.05);
+  padding-top: 0.625rem;
+  padding-bottom: 0.625rem;
+  transition: background-color var(--mov-rapido) var(--mov-ease);
+}
+.dark .tc-tabela-linhas tbody > tr > :is(td, th) {
+  background-color: rgb(255 255 255 / 0.04);
+}
+.tc-tabela-linhas tbody > tr > :first-child {
+  border-top-left-radius: 0.75rem;
+  border-bottom-left-radius: 0.75rem;
+  padding-left: 0.875rem;
+}
+.tc-tabela-linhas tbody > tr > :last-child {
+  border-top-right-radius: 0.75rem;
+  border-bottom-right-radius: 0.75rem;
+}
+.tc-tabela-linhas thead > tr > :first-child {
+  padding-left: 0.875rem;
+}
+.tc-tabela-linhas tbody > tr:hover > :is(td, th) {
+  background-color: rgb(var(--tc-accent) / 0.1);
+}
+/* Linha de total: faixa um tom acima, sem divisor. */
+.tc-tabela-linhas tbody > tr.tc-linha-total > :is(td, th) {
+  background-color: rgb(var(--tc-accent) / 0.1);
+}

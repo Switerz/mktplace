@@ -194,7 +194,7 @@ function Sparkline({ serie, dominioX }: { serie: SerieMarca; dominioX: [number, 
 // `tc-tabela-num-pct`, que da' ao % largura fixa e faz a celula sem % reservar
 // o mesmo espaco (ver globals.css) — os numeros caem na mesma vertical.
 const CLASSE_TABELA =
-  "tc-tabela-num-pct w-full text-sm [&_td]:py-1.5 [&_td]:pr-4 [&_th]:py-1.5 [&_th]:pr-4 [&_thead_th]:align-bottom";
+  "tc-tabela-linhas tc-tabela-num-pct w-full text-sm [&_td]:py-1.5 [&_td]:pr-4 [&_th]:py-1.5 [&_th]:pr-4 [&_thead_th]:align-bottom";
 
 const NOTA_DO_EIXO =
   "Tendência no mesmo eixo de tempo para todas as marcas; hora sem ponto interrompe a linha.";
