@@ -819,7 +819,7 @@ test("V32 tabela rolável tem TableScrollHint e o layout não estoura", () => {
 
 test("V32 nenhum endpoint ou fetch novo, nenhuma dependência nova", () => {
   // a página mantém exatamente os dois fetches que já existiam
-  assert.equal((PAGINA.match(/await fetch\(/g) ?? []).length, 1, "o fetch diário direto, um só");
+  assert.equal((PAGINA.match(/await torreFetch\(/g) ?? []).length, 1, "o fetch diário direto, um só");
   assert.equal((PAGINA.match(/fetchBrandDetail\(/g) ?? []).length, 1, "uma única chamada mensal");
   assert.doesNotMatch(PAINEL, /\bfetch\s*\(|fetchBrandDetail/, "o painel não busca nada");
   for (const src of [PAINEL, DRILL, read("src/lib/brand/ref-month.ts"), read("src/lib/brand/period-changes.ts")]) {
@@ -959,7 +959,7 @@ test("F2 o retry volta à rede porque o PF1 não cacheia null", () => {
 
 test("F2 nenhuma requisição automática extra e nenhum endpoint novo", () => {
   assert.equal((PAGINA.match(/fetchBrandDetail\(/g) ?? []).length, 1);
-  assert.equal((PAGINA.match(/await fetch\(/g) ?? []).length, 1);
+  assert.equal((PAGINA.match(/await torreFetch\(/g) ?? []).length, 1);
   assert.doesNotMatch(PAGINA, /setInterval|setTimeout\(/, "nenhum polling");
   // e a tela não afirma tratamento de timeout, que apiFetch não distingue
   assert.doesNotMatch(PAINEL, /timeout|tempo esgotado/i);

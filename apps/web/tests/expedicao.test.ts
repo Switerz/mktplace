@@ -184,7 +184,7 @@ test("com a flag desligada nenhum fetch pode ser disparado", () => {
   // de demonstracao fora de producao), que termina no `fetch`.
   assert.ok(cliente.includes("buscarExpedicao("), "o fetch vive no descendente, atras do guard");
   assert.ok(!casca.includes("buscarExpedicao("), "a casca nao busca nem pelo helper");
-  assert.ok(fonte("src/lib/expedicao-demo.ts").includes("return fetch(url, init);"));
+  assert.ok(fonte("src/lib/expedicao-demo.ts").includes("return torreFetch(url, init);"));
 
   // A cadeia inteira precisa estar ligada: pagina -> casca -> cliente. Sem
   // isto, um render solto escaparia do guard sem o teste perceber.

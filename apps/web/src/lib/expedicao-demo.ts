@@ -12,6 +12,8 @@
  *
  * Rota que a demonstracao nao conhece cai no `fetch` real.
  */
+import { torreFetch } from "./torre-fetch.ts";
+
 export const PARAM_DEMO = "demo";
 
 /** Cenario pedido na URL, ou `null` sem `?demo=`. Puro, para teste. */
@@ -42,5 +44,5 @@ export async function buscarExpedicao(url: string, init?: RequestInit): Promise<
       }
     }
   }
-  return fetch(url, init);
+  return torreFetch(url, init);
 }

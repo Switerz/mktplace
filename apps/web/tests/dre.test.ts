@@ -441,7 +441,7 @@ test("a pagina usa a MESMA serializacao para a URL e para o fetch", () => {
   assert.match(cliente, /const q = dreUrlQuery\(\{ \.\.\.filtros, \.\.\.parcial \}\);/);
   assert.match(cliente, /fetchDre\(parseDreFiltros\(new URLSearchParams\(chave\)\)/);
   const api = semComentarios(fonte("src/lib/dre-api.ts"));
-  assert.match(api, /fetch\(dreApiUrl\(API_URL, filtros\)/);
+  assert.match(api, /torreFetch\(dreApiUrl\(API_URL, filtros\)/);
   // Sem modo demonstracao: nenhum dado de exemplo pode virar DRE.
   assert.doesNotMatch(api, /mock/i);
 });
