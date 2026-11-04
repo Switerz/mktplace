@@ -501,13 +501,22 @@ tbody tr:hover {
 
 /* Fundo: lavanda (claro) ou violeta profundo (escuro) com tres halos. Fixo
    na viewport, para nao "andar" com a rolagem. */
+/* UX-VIDRO-2: `--halo` regula a forca dos halos por tema. No claro os
+   cartoes cobrem quase toda a tela, entao o halo precisa ser mais forte para
+   aparecer nas bordas e tingir o vidro. */
+:root {
+  --halo: 1.45;
+}
+.dark {
+  --halo: 1;
+}
 .tc-fundo,
 .tc-tema-claro {
   background-color: rgb(var(--tc-canvas));
   background-image:
-    radial-gradient(60rem 40rem at 6% -12%, rgb(var(--tc-brilho-1) / 0.36), transparent 62%),
-    radial-gradient(52rem 36rem at 100% 0%, rgb(var(--tc-brilho-2) / 0.24), transparent 60%),
-    radial-gradient(46rem 32rem at 58% 112%, rgb(var(--tc-brilho-3) / 0.16), transparent 62%);
+    radial-gradient(64rem 44rem at 4% -14%, rgb(var(--tc-brilho-1) / calc(0.36 * var(--halo))), transparent 62%),
+    radial-gradient(56rem 38rem at 100% 0%, rgb(var(--tc-brilho-2) / calc(0.24 * var(--halo))), transparent 60%),
+    radial-gradient(48rem 34rem at 58% 112%, rgb(var(--tc-brilho-3) / calc(0.16 * var(--halo))), transparent 62%);
   background-attachment: fixed;
 }
 /* No tema claro a rota nao migrada ja' esta sobre o mesmo fundo: pintar de
@@ -519,7 +528,7 @@ html:not(.dark) .tc-fundo .tc-tema-claro {
 /* Cartao de vidro. */
 .tc-vidro,
 .rounded-xl.border.bg-surface {
-  background-color: rgb(var(--tc-vidro) / 0.74);
+  background-color: rgb(var(--tc-vidro) / 0.7);
   border-radius: 1rem;
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 0.55),
@@ -569,11 +578,13 @@ html:not(.dark) .tc-fundo .tc-tema-claro {
 
 /* Titulo da pagina: degrade violeta -> magenta. Fallback de cor solida para
    quem nao tem `background-clip: text` e para o modo de alto contraste. */
-.tc-titulo-pagina h2 {
+.tc-titulo-pagina h2,
+.tc-titulo-texto {
   color: rgb(var(--tc-titulo-1));
 }
 @supports (background-clip: text) or (-webkit-background-clip: text) {
-  .tc-titulo-pagina h2 {
+  .tc-titulo-pagina h2,
+  .tc-titulo-texto {
     background-image: linear-gradient(
       95deg,
       rgb(var(--tc-titulo-1)),
@@ -622,7 +633,8 @@ html:not(.dark) .tc-fundo .tc-tema-claro {
 }
 
 @media (forced-colors: active) {
-  .tc-titulo-pagina h2 {
+  .tc-titulo-pagina h2,
+  .tc-titulo-texto {
     background: none;
     color: CanvasText;
   }
@@ -631,4 +643,27 @@ html:not(.dark) .tc-fundo .tc-tema-claro {
     background: none;
     box-shadow: none;
   }
+}
+
+/* UX-VIDRO-2 — cartao de KPI com o brilho da propria identidade no canto,
+   alem da borda. A cor vem do token do KPI que o cartao ja' declara na borda
+   (`border-kpi-*`), entao nenhum componente precisa mudar. */
+[class*="border-kpi-gmv"] { --kpi-cor: var(--tc-kpi-gmv); }
+[class*="border-kpi-pedidos"] { --kpi-cor: var(--tc-kpi-pedidos); }
+[class*="border-kpi-ticket"] { --kpi-cor: var(--tc-kpi-ticket); }
+[class*="border-kpi-ads"] { --kpi-cor: var(--tc-kpi-ads); }
+[class*="border-kpi-roas"] { --kpi-cor: var(--tc-kpi-roas); }
+.rounded-xl.border.bg-surface[class*="border-kpi-"] {
+  background-image: radial-gradient(
+    16rem 10rem at 100% 0%,
+    rgb(var(--kpi-cor) / 0.16),
+    transparent 70%
+  );
+}
+.dark .rounded-xl.border.bg-surface[class*="border-kpi-"] {
+  background-image: radial-gradient(
+    16rem 10rem at 100% 0%,
+    rgb(var(--kpi-cor) / 0.22),
+    transparent 70%
+  );
 }
