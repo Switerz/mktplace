@@ -66,7 +66,7 @@ export default function GlobalFilterControls({ filters, onChange, hideCompare = 
       </button>
 
       {/* UX-TORRE-B2B-1: uma linha so' no desktop. Canal fica segmentado
-          (quatro opcoes, com a cor de identidade); marca e periodo viram
+          (Todos, Consolidado e os tres canais, com a cor de identidade); marca e periodo viram
           gatilhos que mostram o valor atual — os mesmos botoes, dentro de um
           painel. A barra passou de duas linhas (~100px) para uma (~52px). */}
       <div

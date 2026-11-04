@@ -17,7 +17,7 @@ import { useId, useMemo, useState } from "react";
 import BrandFilter from "@/components/BrandFilter";
 import MarketplaceFilter from "@/components/MarketplaceFilter";
 import { brandLabel } from "@/lib/filters/brands";
-import { isAllSelected } from "@/lib/marketplace-filter";
+import { isAllSelected, isConsolidadoSelected } from "@/lib/marketplace-filter";
 import { ROTULO_CANAL, mesesSelecionaveis, rotuloMes, type DreFiltros } from "@/lib/dre";
 
 interface Props {
@@ -30,7 +30,11 @@ interface Props {
 
 function resumo(f: DreFiltros, mesPadrao: string | null): string {
   const mes = f.mes ? rotuloMes(f.mes) : mesPadrao ? `${rotuloMes(mesPadrao)} (madura)` : "Competência madura";
-  const canais = isAllSelected(f.canais) ? "Todos os canais" : f.canais.map((c) => ROTULO_CANAL[c]).join(" + ");
+  const canais = isAllSelected(f.canais)
+    ? "Todos os canais"
+    : isConsolidadoSelected(f.canais)
+      ? "Consolidado (ML + Shopee)"
+      : f.canais.map((c) => ROTULO_CANAL[c]).join(" + ");
   const marcas =
     f.marcas.length === 0 ? "Todas as marcas" : f.marcas.length === 1 ? brandLabel(f.marcas[0]) : `${f.marcas.length} marcas`;
   return `${mes} · ${canais} · ${marcas}`;
