@@ -151,3 +151,12 @@ test("devolucoes: sem a chave na API = sem fonte; com dado formata reais e motiv
   assert.deepEqual(v.linhas.map((l) => [l.marca, l.devolucoes, l.reembolsado]),
     [["APICE", "4", reais(120.5)], ["LESCENT", "0", "—"]]);
 });
+
+test("aba CX busca pelo navegador (torreFetch), nunca no servidor", () => {
+  // 04/11/2026: com NEXT_PUBLIC_API_URL=/torre-api um fetch no servidor nao resolve.
+  const pagina = readFileSync(new URL("../app/cx/page.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(pagina, /carregarCxShopee/);
+  const conteudo = readFileSync(new URL("../app/cx/CxConteudo.tsx", import.meta.url), "utf8");
+  assert.match(conteudo, /^"use client";/);
+  assert.match(conteudo, /carregarCxShopee\(\{ marca, dias \}, torreFetch as typeof fetch\)/);
+});

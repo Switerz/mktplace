@@ -221,7 +221,7 @@ test("fetch: sucesso, status ruim, rede e json quebrado", async () => {
 // ---------------------------------------------------------------------------
 test("pagina: cancelamentos e devolucoes da Shopee vivem na aba CX (menu principal)", () => {
   // 04/11/2026: a aba Atendimento saiu da Performance das contas e virou a aba CX.
-  const cx = readFileSync(join(AQUI, "..", "app", "cx", "page.tsx"), "utf-8");
+  const cx = readFileSync(join(AQUI, "..", "app", "cx", "CxConteudo.tsx"), "utf-8");
   assert.match(cx, /<AtendimentoCanal /);
   const perf = readFileSync(join(AQUI, "..", "app", "performance-contas", "page.tsx"), "utf-8");
   assert.doesNotMatch(perf, /atendimento/i);
