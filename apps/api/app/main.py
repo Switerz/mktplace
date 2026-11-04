@@ -38,6 +38,7 @@ app.include_router(expedicao.router)
 app.include_router(performance_oficial.router)
 # CX-MKT-3: LDR do ML para a faixa do topo (mesma flag da Performance).
 app.include_router(ml_ldr.router)
+app.include_router(ml_ldr.router_shopee)
 app.include_router(dre.router)
 app.include_router(b2b_revenda.router)
 # T-0014: registrada, mas inerte -- responde 404 enquanto
