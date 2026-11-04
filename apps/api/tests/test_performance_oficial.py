@@ -179,6 +179,14 @@ def test_shopee_nota_metricas_e_meta_oficial():
     assert [f.marca for f in resp.cobertura.fora] == ["kokeshi"]
 
 
+def test_shopee_metricas_novas_saem_em_portugues():
+    # ids que a API devolveu em 04/11/2026 com o nome tecnico em ingles
+    assert svc.NOMES_SHOPEE[2032] == "Envios aos sábados"
+    assert svc.NOMES_SHOPEE[2033] == "Tempo médio de preparação"
+    assert svc.NOMES_SHOPEE[2037] == "Taxa de entrega no prazo"
+    assert all("_" not in r for r in svc.NOMES_SHOPEE.values())
+
+
 def test_shopee_metricas_indisponiveis_nao_derrubam_a_nota():
     resp, _ = _montar("shopee", fonte=Fonte(falhas={"shopee_metricas"}))
     k = resp.contas[0]
