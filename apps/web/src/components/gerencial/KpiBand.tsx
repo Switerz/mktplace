@@ -135,7 +135,7 @@ function Sparkline({ pontos, tinta }: { pontos: number[]; tinta: string }) {
   // O ponto final e' um <span> SEPARADO, fora do `preserveAspectRatio="none"`
   // da linha: dentro dele o circulo esticaria junto com o grafico.
   return (
-    <span className={`relative block h-8 w-full ${tinta}`}>
+    <span className={`relative block h-9 w-full ${tinta}`}>
       <svg viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true" className="tc-revela absolute inset-0 h-full w-[calc(100%-5px)] overflow-visible">
         <defs>
           <linearGradient id={idDegrade} x1="0" y1="0" x2="0" y2="1">
@@ -179,7 +179,7 @@ function LinhaDeTendencia({ t, tinta }: { t: TendenciaKpi; tinta: string }) {
   const detalhe =
     t.variacaoPct != null ? `${t.rotulo}: ${t.variacaoPct >= 0 ? "+" : ""}${t.variacaoPct.toFixed(1)}%` : undefined;
   return (
-    <span className="mt-1 block w-32" title={detalhe}>
+    <span className="block w-24 shrink-0 min-[1440px]:w-28" title={detalhe}>
       <Sparkline pontos={suavizar(t.pontos)} tinta={tinta} />
       {t.direcao && <span className="sr-only">Tendência: {DIRECAO_FALADA[t.direcao]}.</span>}
     </span>
@@ -270,21 +270,23 @@ function KpiCard({
         <span className="text-lg md:text-xl lg:text-2xl xl:text-lg min-[1440px]:text-2xl font-semibold tracking-tight text-ink-faint tabular-nums leading-tight">N/D</span>
       )}
 
-      {(kpi.deltaPct != null && kpi.value) || kpi.reference ? (
-        <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          {kpi.deltaPct != null && kpi.value && <DeltaBadge pct={kpi.deltaPct} tone={kpi.deltaTone} />}
-          {kpi.reference && <span className="text-xs text-ink-faint tabular-nums">{kpi.reference}</span>}
+      {/* UX-VIDRO-3 (print aprovado): rodape em duas colunas — variacao e
+          nota a' esquerda, mini grafico a' direita, alinhados pela base. */}
+      <span className="mt-auto flex items-end justify-between gap-3 pt-1">
+        <span className="flex min-w-0 flex-col gap-1">
+          {(kpi.deltaPct != null && kpi.value) || kpi.reference ? (
+            <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              {kpi.deltaPct != null && kpi.value && <DeltaBadge pct={kpi.deltaPct} tone={kpi.deltaTone} />}
+              {kpi.reference && <span className="text-xs text-ink-faint tabular-nums">{kpi.reference}</span>}
+            </span>
+          ) : null}
+          {kpi.comparisonNote && <span className="text-xs text-ink-faint">{kpi.comparisonNote}</span>}
+          {kpi.unavailableReason && (
+            <span className="text-xs text-ink-faint leading-snug">{kpi.unavailableReason}</span>
+          )}
         </span>
-      ) : null}
-
-      {tendencia && tendencia.pontos.length >= 4 && kpi.value && (
-        <LinhaDeTendencia t={tendencia} tinta={ICONE_KPI[kpi.key].tinta} />
-      )}
-
-      <span className="mt-auto flex flex-col gap-0.5 pt-1">
-        {kpi.comparisonNote && <span className="text-xs text-ink-faint">{kpi.comparisonNote}</span>}
-        {kpi.unavailableReason && (
-          <span className="text-xs text-ink-faint leading-snug">{kpi.unavailableReason}</span>
+        {tendencia && tendencia.pontos.length >= 4 && kpi.value && (
+          <LinhaDeTendencia t={tendencia} tinta={ICONE_KPI[kpi.key].tinta} />
         )}
       </span>
     </button>

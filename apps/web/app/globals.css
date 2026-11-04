@@ -655,14 +655,14 @@ html:not(.dark) .tc-fundo .tc-tema-claro {
 [class*="border-kpi-roas"] { --kpi-cor: var(--tc-kpi-roas); }
 .rounded-xl.border.bg-surface[class*="border-kpi-"] {
   background-image: radial-gradient(
-    16rem 10rem at 100% 0%,
+    16rem 11rem at 100% 100%,
     rgb(var(--kpi-cor) / 0.16),
     transparent 70%
   );
 }
 .dark .rounded-xl.border.bg-surface[class*="border-kpi-"] {
   background-image: radial-gradient(
-    16rem 10rem at 100% 0%,
+    16rem 11rem at 100% 100%,
     rgb(var(--kpi-cor) / 0.22),
     transparent 70%
   );
