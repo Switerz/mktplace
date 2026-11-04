@@ -150,6 +150,10 @@ NOMES_SHOPEE: dict[int, str] = {
     52: "Violações graves de anúncio",
     53: "Outras violações de anúncio",
     95: "Satisfação do cliente",
+    # vistos na API em 04/11/2026 (saturday_shipment_rate, avg_preparation_time_ps, otdr_dd_rate)
+    2032: "Envios aos sábados",
+    2033: "Tempo médio de preparação",
+    2037: "Taxa de entrega no prazo",
 }
 
 
