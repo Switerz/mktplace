@@ -14,7 +14,12 @@
  *   - indisponivel        -> painel proprio, com causa e proximo passo;
  *   - zero medido         -> "0";
  *   - sem leitura / marca sem fotografia -> travessao, via `fmtOpcional`,
- *     e o total e' rotulado PARCIAL com os motivos da API.
+ *     e o total e' rotulado PARCIAL com os motivos da API;
+ *   - marca "sem estoque Full" (T-0051: publicada com 0 inventarios) ->
+ *     "Sem estoque Full" em tom neutro; conta 0 e NAO torna o total parcial;
+ *   - marca com inventario e disponivel 0 -> "0" com "saldo disponível 0 ·
+ *     N não disponível".
+ *   - estado de marca desconhecido -> erro de contrato (`validarPayloadML`).
  *
  * A TELA NAO RECALCULA NADA: classificacao, cobertura, totais e parcialidade
  * chegam prontos da API.
@@ -38,11 +43,12 @@ import {
   AVISO_TRANSFER_ML,
   CLASS_LABEL_ML,
   CLASS_TOM_ML,
+  ContratoMLError,
   ERRO_DATA_FUTURA_ML,
   FILTROS_ML_VAZIOS,
   MARCAS_ML,
-  PREFIXO_PARCIAL_ML,
   PROXIMO_PASSO_ML,
+  ROTULO_SEM_ESTOQUE_FULL_ML,
   SEM_DADO,
   TITULO_INDISPONIVEL_ML,
   buildQueryML,
@@ -50,6 +56,8 @@ import {
   dataParaFiltroML,
   eDataHistorica,
   eErroDataFuturaML,
+  estadoExibicaoMarcaML,
+  marcasSemEstoqueFullML,
   fmtCobertura,
   fmtData,
   fmtDecimal,
@@ -62,11 +70,15 @@ import {
   leituraLabel,
   mostrarAvisoVelhaML,
   motivoParcialLegivel,
+  subtextoSaldoZeroML,
   subtituloTransferML,
   subvalorContagemML,
+  subvalorDisponivelTotalML,
   temFiltroAtivoML,
   textoVazioML,
   tituloMarca,
+  todasSemEstoqueFullML,
+  validarPayloadML,
   type ClassificacaoML,
   type FiltrosML,
   type InventarioML,
@@ -190,7 +202,23 @@ function TabelaMarcas({ marcas }: { marcas: MarcaML[] }) {
                     )}
                   </td>
                   <td className="px-4 py-3 text-right tabular-nums font-semibold text-slate-900">
-                    {fmtOpcional(m.disponivel_full)}
+                    {/* Tres estados: sem estoque Full (zero medido, tom neutro),
+                        saldo disponivel 0 (com o fisico nao disponivel) e
+                        ausencia (travessao). */}
+                    {estadoExibicaoMarcaML(m) === "sem_estoque_full" ? (
+                      <span className="font-medium text-slate-600 whitespace-nowrap">
+                        {ROTULO_SEM_ESTOQUE_FULL_ML}
+                      </span>
+                    ) : (
+                      <>
+                        {fmtOpcional(m.disponivel_full)}
+                        {subtextoSaldoZeroML(m) && (
+                          <span className="block text-xs font-normal text-slate-500 whitespace-nowrap">
+                            {subtextoSaldoZeroML(m)}
+                          </span>
+                        )}
+                      </>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-right tabular-nums text-slate-700">
                     {m.leitura
@@ -330,12 +358,15 @@ export default function MLFullEstoqueClient() {
     setCarregando(true);
     setErro(null);
     try {
-      setPayload(await fetchMLFullEstoque(query, ctrl.signal));
+      // Estado de marca desconhecido e' erro de contrato, nunca zero.
+      setPayload(validarPayloadML(await fetchMLFullEstoque(query, ctrl.signal)));
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") return;
       // Numero velho nunca convive com mensagem de falha.
       setPayload(null);
-      if (e instanceof MLFullEstoqueError) {
+      if (e instanceof ContratoMLError) {
+        setErro({ texto: e.message, dataFutura: false });
+      } else if (e instanceof MLFullEstoqueError) {
         const dataFutura = eErroDataFuturaML(e.status, refDate);
         setErro({ texto: dataFutura ? ERRO_DATA_FUTURA_ML : e.message, dataFutura });
       } else {
@@ -541,6 +572,13 @@ export default function MLFullEstoqueClient() {
                 — ausência, não zero
               </span>
             )}
+            {/* Zero MEDIDO: tom neutro, nunca o ambar da ausencia. */}
+            {marcasSemEstoqueFullML(payload.marcas).length > 0 && (
+              <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-slate-700">
+                {ROTULO_SEM_ESTOQUE_FULL_ML}:{" "}
+                {marcasSemEstoqueFullML(payload.marcas).map(tituloMarca).join(", ")}
+              </span>
+            )}
             {payload.indicadores.total_parcial && (
               <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 font-semibold text-amber-900">
                 Total parcial
@@ -557,11 +595,11 @@ export default function MLFullEstoqueClient() {
             <KpiCard
               label="Disponível Full"
               value={fmtOpcional(payload.indicadores.disponivel_full)}
-              subvalue={
-                parcial
-                  ? PREFIXO_PARCIAL_ML
-                  : `${fmtInt(payload.indicadores.inventarios_full_lidos)} inventários Full lidos`
-              }
+              subvalue={subvalorDisponivelTotalML({
+                parcial,
+                marcas: payload.marcas,
+                inventariosFullLidos: payload.indicadores.inventarios_full_lidos,
+              })}
               accent="bg-emerald-500"
             />
             {/* Contagens num total PARCIAL: "0" nao e' "nenhum". */}
@@ -636,6 +674,7 @@ export default function MLFullEstoqueClient() {
                   refDate: payload.frescor.ref_date,
                   inventarios: payload.indicadores.inventarios,
                   filtroAtivo: temFiltroAtivoML(filtros),
+                  semEstoqueFull: todasSemEstoqueFullML(payload.marcas),
                 })}
               </p>
             </section>

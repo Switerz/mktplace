@@ -37,6 +37,17 @@ Dentro de uma resposta `ok`, inventario SEM_LEITURA tem quantidades `None`,
 marca sem fotografia no dia tem todos os numeros `None` e o total diz que e'
 PARCIAL. Nada disso vira 0.
 
+SEM ESTOQUE FULL (T-0051) NAO E' AUSENCIA
+------------------------------------------
+Linha na fato de marca com `inventarios = 0` (contagens 0, quantidades NULL,
+linhagem `source_run_id`/`published_at` presente) e NENHUMA linha de
+inventario nem de status no dia: a enumeracao terminou e deu zero. A coluna
+NULL nao e' lida como zero: o 0 vem da regra de contrato. A marca sai com
+`estado = "sem_estoque_full"`, quantidades 0, conta como coberta e nao torna
+o total parcial. Qualquer outra divergencia marca x inventario continua 503.
+A 029 ja' admite essa linha (CHECK `(inventarios_full_lidos > 0) =
+(disponivel_full IS NOT NULL)`); nenhuma migration foi necessaria.
+
 SEGURANCA
 ---------
 Allowlist explicita de colunas; nunca `SELECT *`. Filtros sempre como
@@ -199,13 +210,15 @@ SQL_ULTIMA_FOTOGRAFIA = text(f"""
      WHERE brand = ANY(CAST(:brands AS text[]))
 """)
 
+#: `source_run_id` e' lido so' para provar a linhagem do "sem estoque Full";
+#: nao sai no payload.
 SQL_MARCAS_DO_DIA = text(f"""
     SELECT brand, inventarios, inventarios_full_lidos,
            inventarios_compartilhados, disponivel_full, nao_disponivel_full,
            transfer_full, unidades_28d_alocadas,
            unidades_28d_item_varios_inventarios,
            unidades_28d_sem_inventory_id, unidades_28d_fora_da_ponte,
-           cobertura_da_alocacao, published_at
+           cobertura_da_alocacao, source_run_id, published_at
       FROM {BRAND_TABLE}
      WHERE ref_date = :ref_date
        AND brand = ANY(CAST(:brands AS text[]))
@@ -255,6 +268,16 @@ SQL_STATUS = text(f"""
        AND i.read_status = 'OK'
      GROUP BY s.brand, s.status_raw
      ORDER BY s.brand, quantidade DESC, s.status_raw
+""")
+
+#: Linhas de status por marca SEM o JOIN com inventario: uma marca "sem
+#: estoque Full" nao pode ter nenhuma. Contagem so', nenhum ID.
+SQL_STATUS_POR_MARCA = text(f"""
+    SELECT brand, COUNT(*) AS linhas
+      FROM {STATUS_TABLE}
+     WHERE ref_date = :ref_date
+       AND brand = ANY(CAST(:brands AS text[]))
+     GROUP BY brand
 """)
 
 _FILTRO_LISTAGEM = """
@@ -353,14 +376,18 @@ def _horas_desde(publicado: Optional[datetime],
     return round((agora - publicado).total_seconds() / 3600, 1)
 
 
-def _agregar_contagens(linhas: list[dict]) -> dict[str, dict]:
-    """Contagens por marca a partir das linhas agrupadas de SQL_CONTAGENS."""
-    por_marca: dict[str, dict] = defaultdict(lambda: {
+def _contagem_vazia() -> dict:
+    return {
         "inventarios": 0, "full": 0, "full_lidos": 0, "fora_do_full": 0,
         "compartilhados": 0, "lidos": 0, "sem_leitura": 0,
         "full_sem_leitura": 0, "por_classificacao": defaultdict(int),
         "disp_full": [], "nao_disp_full": [], "transfer_full": [],
-    })
+    }
+
+
+def _agregar_contagens(linhas: list[dict]) -> dict[str, dict]:
+    """Contagens por marca a partir das linhas agrupadas de SQL_CONTAGENS."""
+    por_marca: dict[str, dict] = defaultdict(_contagem_vazia)
     for r in linhas:
         m = por_marca[r["brand"]]
         n = int(r["inventarios"])
@@ -386,12 +413,42 @@ def _agregar_contagens(linhas: list[dict]) -> dict[str, dict]:
     return por_marca
 
 
-def _reconciliar(marca: str, fato: dict, contagem: Optional[dict]) -> None:
-    """A fato de marca e a de inventario descrevem o MESMO dia. Se divergem,
-    nenhuma das duas e' escolhida em silencio."""
-    if contagem is None:
+ESTADO_COM_INVENTARIO = "com_inventario"
+ESTADO_SEM_ESTOQUE_FULL = "sem_estoque_full"
+
+
+def _conferir_sem_estoque_full(marca: str, fato: dict) -> None:
+    """Agregado com 0 inventarios e nenhuma linha de inventario no dia: so' e'
+    "sem estoque Full" se TODA a linha de marca disser o mesmo e tiver
+    linhagem. Qualquer outro numero e' contradicao, nunca um zero escolhido."""
+    contraditos = [c for c in ("inventarios_full_lidos",
+                               "inventarios_compartilhados")
+                   if int(fato[c]) != 0]
+    contraditos += [c for c in ("disponivel_full", "nao_disponivel_full",
+                                "transfer_full")
+                    if fato[c] is not None]
+    if contraditos:
         raise MLFullEstoqueContractError(
-            f"marca {marca}: agregado sem inventarios no dia")
+            f"marca {marca}: agregado com 0 inventarios e "
+            + ", ".join(contraditos) + " preenchido(s)")
+    if not fato.get("source_run_id") or fato.get("published_at") is None:
+        raise MLFullEstoqueContractError(
+            f"marca {marca}: agregado com 0 inventarios sem linhagem")
+
+
+def _reconciliar(marca: str, fato: dict, contagem: Optional[dict],
+                 linhas_status: int = 0) -> str:
+    """A fato de marca e a de inventario descrevem o MESMO dia. Se divergem,
+    nenhuma das duas e' escolhida em silencio. Devolve o estado da marca."""
+    if contagem is None:
+        if int(fato["inventarios"]) != 0:
+            raise MLFullEstoqueContractError(
+                f"marca {marca}: agregado sem inventarios no dia")
+        _conferir_sem_estoque_full(marca, fato)
+        if linhas_status:
+            raise MLFullEstoqueContractError(
+                f"marca {marca}: agregado com 0 inventarios e status no dia")
+        return ESTADO_SEM_ESTOQUE_FULL
     pares = (
         ("inventarios", int(fato["inventarios"]), contagem["inventarios"]),
         ("inventarios_full_lidos", int(fato["inventarios_full_lidos"]),
@@ -403,6 +460,7 @@ def _reconciliar(marca: str, fato: dict, contagem: Optional[dict]) -> None:
         if no_agregado != nos_inventarios:
             raise MLFullEstoqueContractError(
                 f"marca {marca}: {campo} diverge entre agregado e inventarios")
+    return ESTADO_COM_INVENTARIO
 
 
 # ---------------------------------------------------------------------------
@@ -468,8 +526,20 @@ def get_ml_full_estoque_block(
     if orfas:
         raise MLFullEstoqueContractError(
             "inventarios sem agregado de marca no dia: " + ", ".join(orfas))
-    for marca, fato in fatos_marca.items():
-        _reconciliar(marca, fato, contagens.get(marca))
+    status_brutos = {r["brand"]: int(r["linhas"]) for r in
+                     db.execute(SQL_STATUS_POR_MARCA, p).mappings().all()}
+    estados = {marca: _reconciliar(marca, fato, contagens.get(marca),
+                                   status_brutos.get(marca, 0))
+               for marca, fato in fatos_marca.items()}
+    sem_estoque = {m for m, e in estados.items()
+                   if e == ESTADO_SEM_ESTOQUE_FULL}
+
+    def qtd_marca(marca: str, campo: str) -> Optional[int]:
+        """Sem estoque Full: nao ha' inventario nenhum, entao 0 MEDIDO. Nos
+        demais casos, o valor da fato (None continua None)."""
+        if marca in sem_estoque:
+            return 0
+        return _opt_int(fatos_marca[marca][campo])
 
     status_por_marca: dict[str, list] = defaultdict(list)
     for r in db.execute(SQL_STATUS, p).mappings().all():
@@ -493,9 +563,10 @@ def get_ml_full_estoque_block(
                 ultima_fotografia=ult["ref_date"] if ult else None,
                 published_at=ult["published_at"] if ult else None))
             continue
-        c = contagens[marca]
+        # Sem estoque Full nao tem linha de contagem: tudo zero, por contrato.
+        c = contagens.get(marca) or _contagem_vazia()
         blocos_marca.append(MarcaEstoque(
-            brand=marca, tem_fotografia_no_dia=True,
+            brand=marca, tem_fotografia_no_dia=True, estado=estados[marca],
             ultima_fotografia=dia, published_at=fato["published_at"],
             inventarios=int(fato["inventarios"]),
             inventarios_full_lidos=int(fato["inventarios_full_lidos"]),
@@ -503,9 +574,9 @@ def get_ml_full_estoque_block(
             leitura=Leitura(inventarios=c["inventarios"],
                             inventarios_lidos=c["lidos"],
                             inventarios_sem_leitura=c["sem_leitura"]),
-            disponivel_full=_opt_int(fato["disponivel_full"]),
-            nao_disponivel_full=_opt_int(fato["nao_disponivel_full"]),
-            transfer_full=_opt_int(fato["transfer_full"]),
+            disponivel_full=qtd_marca(marca, "disponivel_full"),
+            nao_disponivel_full=qtd_marca(marca, "nao_disponivel_full"),
+            transfer_full=qtd_marca(marca, "transfer_full"),
             unidades_28d_alocadas=int(fato["unidades_28d_alocadas"]),
             unidades_28d_item_varios_inventarios=int(
                 fato["unidades_28d_item_varios_inventarios"]),
@@ -532,8 +603,9 @@ def get_ml_full_estoque_block(
     if sem_foto:
         motivos_parcial.append(
             "Sem fotografia no dia: " + ", ".join(sem_foto) + ".")
+    # Sem estoque Full tem disponivel 0 medido: nao e' "sem Full lido".
     sem_full_lido = [m for m in com_foto
-                     if fatos_marca[m]["disponivel_full"] is None]
+                     if qtd_marca(m, "disponivel_full") is None]
     if sem_full_lido:
         motivos_parcial.append(
             "Sem inventário Full lido: " + ", ".join(sem_full_lido) + ".")
@@ -547,11 +619,11 @@ def get_ml_full_estoque_block(
                             inventarios_sem_leitura=total("sem_leitura"))
     indicadores = Indicadores(
         disponivel_full=_soma_opcional(
-            fatos_marca[m]["disponivel_full"] for m in com_foto),
+            qtd_marca(m, "disponivel_full") for m in com_foto),
         nao_disponivel_full=_soma_opcional(
-            fatos_marca[m]["nao_disponivel_full"] for m in com_foto),
+            qtd_marca(m, "nao_disponivel_full") for m in com_foto),
         transfer_full=_soma_opcional(
-            fatos_marca[m]["transfer_full"] for m in com_foto),
+            qtd_marca(m, "transfer_full") for m in com_foto),
         total_parcial=bool(motivos_parcial),
         motivos_total_parcial=motivos_parcial,
         inventarios=leitura_total.inventarios,
