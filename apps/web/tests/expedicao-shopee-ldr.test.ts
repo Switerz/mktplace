@@ -147,8 +147,8 @@ test("flag desligada: a secao Prazo fica como antes, inclusive o aviso de LDR au
   assert.match(CLIENTE, /<SecaoGerencial titulo="Prazo" dica=\{ldrNaSecao \? undefined : dicaDaSecaoPrazo\(filtros\.channel\)\}>/);
   assert.match(CLIENTE, /\{ldrNaSecao \? <LdrShopeePanel ldr=\{ldr\} marca=\{marcaAtiva\} \/> : null\}/);
   // Flag off = nenhuma requisicao: o hook so' liga com a flag E na Shopee.
-  // UI-EXPEDICAO-1: a LDR le o periodo do topo da pagina.
-  assert.match(CLIENTE, /useLdrShopee\(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros\.channel === "shopee", janela\)/);
+  // O LDR e' sempre dos ultimos 7 dias, independente do periodo do topo.
+  assert.match(CLIENTE, /useLdrShopee\(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros\.channel === "shopee", DIAS_LDR_SHOPEE\)/);
   assert.match(PAINEL, /if \(!ligada\) \{\s*setResposta\(null\);/);
 });
 
@@ -223,4 +223,9 @@ test("erro nao mantem o numero antigo", () => {
 
 test("a LDR do TikTok nao foi tocada", () => {
   assert.doesNotMatch(TIKTOK, /shopee\/ldr|LdrShopee|LDR_SHOPEE/);
+});
+
+test("painel da LDR nao mostra os avisos de fila (pedido de 04/11/2026)", () => {
+  assert.match(PAINEL, /const AVISOS_DE_FILA = new Set\(\["pendentes_vencidos", "em_risco"\]\);/);
+  assert.match(PAINEL, /a\.severity !== "info" && !AVISOS_DE_FILA\.has\(a\.code\)/);
 });

@@ -43,6 +43,7 @@ import type { LinhaDaFila } from "@/components/expedicao/EvolucaoPorMarca";
 import LdrShopeePanel, { useLdrShopee } from "@/components/expedicao/LdrShopeePanel";
 import {
   AVISO_FILA_COM_FBS,
+  DIAS_LDR_SHOPEE,
   divisaoDaFila,
   textoDaReconciliacao,
   type DivisaoDaFila,
@@ -622,7 +623,9 @@ export default function ExpedicaoClient({
   // a jornada e' buscada nos dois canais; o `days` so' vai onde ha coorte.
   const jornada = useJornada(API, filtros.channel, marcaAtiva, { dias: janela });
 
-  const ldr = useLdrShopee(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros.channel === "shopee", janela);
+  // O LDR e' sempre dos ultimos 7 dias (regra da Shopee), nao do periodo do
+  // topo: com 3 dias no topo o painel mostrava uma taxa que nao e' a do canal.
+  const ldr = useLdrShopee(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros.channel === "shopee", DIAS_LDR_SHOPEE);
 
   const temFiltro =
     filtros.brands.length > 0 || filtros.accounts.length > 0 || filtros.situacao.length > 0;
