@@ -592,16 +592,32 @@ SQL_TABELAS_CX = (
     "to_regclass('raw.shopee_chat_snapshot') IS NOT NULL AS chat"
 )
 
+#: Status da devolucao na Shopee (04/11/2026: ACCEPTED, CANCELLED, PROCESSING,
+#: JUDGING, REQUESTED, CLOSED, SELLER_DISPUTE). So' ACCEPTED vira reembolso;
+#: CANCELLED = o comprador desistiu do pedido de devolucao.
+STATUS_ACEITA = "ACCEPTED"
+STATUS_CANCELADA = "CANCELLED"
+STATUS_EM_ANDAMENTO = ("REQUESTED", "PROCESSING", "JUDGING", "SELLER_DISPUTE")
+
 SQL_DEVOLUCOES_MARCAS = """
-SELECT brand AS marca, COUNT(*) AS devolucoes, SUM(refund_amount) AS reembolsado
+SELECT brand AS marca,
+       COUNT(*) AS devolucoes,
+       COUNT(*) FILTER (WHERE status = 'ACCEPTED') AS aceitas,
+       COUNT(*) FILTER (WHERE status IN ('REQUESTED', 'PROCESSING', 'JUDGING', 'SELLER_DISPUTE')) AS em_andamento,
+       COUNT(*) FILTER (WHERE status = 'CANCELLED') AS canceladas,
+       SUM(refund_amount) FILTER (WHERE status = 'ACCEPTED') AS reembolsado
   FROM raw.shopee_returns
  WHERE brand = ANY(:marcas)
    AND (create_time AT TIME ZONE 'America/Sao_Paulo')::date BETWEEN :inicio AND :fim
  GROUP BY brand
 """
 
+#: Motivos so' dos pedidos que o comprador NAO cancelou: o desistido nao e'
+#: problema a tratar e aparece a' parte (`excluidos`).
 SQL_DEVOLUCOES_MOTIVOS = """
-SELECT COALESCE(reason, '') AS motivo, COUNT(*) AS quantidade
+SELECT COALESCE(reason, '') AS motivo,
+       COUNT(*) FILTER (WHERE status IS DISTINCT FROM 'CANCELLED') AS quantidade,
+       COUNT(*) FILTER (WHERE status = 'CANCELLED') AS canceladas
   FROM raw.shopee_returns
  WHERE brand = ANY(:marcas)
    AND (create_time AT TIME ZONE 'America/Sao_Paulo')::date BETWEEN :inicio AND :fim
@@ -631,6 +647,9 @@ MOTIVOS_DEVOLUCAO: dict[str, tuple[str, str]] = {
     "DIFFERENT_DESCRIPTION": ("Diferente do anúncio", "vendedor"),
     "DIFF_DESC": ("Diferente do anúncio", "vendedor"),
     "EXPIRED_PRODUCT": ("Produto vencido", "vendedor"),
+    "SPILLED_CONTENTS": ("Produto vazou", "vendedor"),
+    "ITEM_FAKE": ("Suspeita de falsificação", "vendedor"),
+    "SUSPICIOUS_PARCEL": ("Pacote suspeito ou violado", "logistica"),
     "COUNTERFEIT": ("Suspeita de falsificação", "vendedor"),
     "USED_PRODUCT": ("Produto usado", "vendedor"),
     "OTHERS": ("Outros", "comprador"),
@@ -678,24 +697,44 @@ def _devolucoes_shopee(consultar: Consultar, marcas: list[str], janela: Janela,
     marcas_linhas = []
     for m in marcas:
         r = linhas.get(m)
-        reemb = r.get("reembolsado") if r else None
+        # tabela existe e a marca nao tem linha = zero medido na janela
+        if r is None:
+            marcas_linhas.append(LinhaDevolucao(marca=m, devolucoes=0, aceitas=0, em_andamento=0,
+                                                canceladas=0, reembolsado=0.0))
+            continue
+        reemb = r.get("reembolsado")
+        aceitas = _int(r.get("aceitas"))
         marcas_linhas.append(LinhaDevolucao(
             marca=m,
-            # tabela existe e a marca nao tem linha = zero medido na janela
-            devolucoes=_int(r.get("devolucoes")) if r else 0,
-            reembolsado=round(float(reemb), 2) if reemb is not None else (None if r else 0.0),
+            devolucoes=_int(r.get("devolucoes")),
+            aceitas=aceitas,
+            em_andamento=_int(r.get("em_andamento")),
+            canceladas=_int(r.get("canceladas")),
+            # sem aceita = nada reembolsado (zero); com aceita e soma nula = ausente
+            reembolsado=round(float(reemb), 2) if reemb is not None else (0.0 if not aceitas else None),
         ))
-    total = sum(x.devolucoes or 0 for x in marcas_linhas)
-    reembolsado = round(sum(x.reembolsado or 0.0 for x in marcas_linhas), 2)
+
+    def soma(campo):
+        vals = [getattr(x, campo) for x in marcas_linhas if getattr(x, campo) is not None]
+        return sum(vals) if vals else None
+
+    reembolsado = soma("reembolsado")
+    canceladas_motivos = sum(_int(r.get("canceladas")) or 0 for r in (motivos or []))
     bloco = _bloco_motivos(
         "Motivos de devolução", ajuda,
         None if motivos is None else [
             (*rotular_devolucao(r.get("motivo")), _int(r.get("quantidade")) or 0) for r in motivos
         ],
+        excluidos=canceladas_motivos or None,
+        rotulo_excluidos="pedidos de devolução cancelados pelo próprio comprador (fora dos motivos)",
         texto_vazio="Nenhuma devolução no recorte.",
     )
-    return DevolucoesShopee(estado="dado", fonte=FONTE_CX_SHOPEE, total=total,
-                            reembolsado=reembolsado, motivos=bloco, marcas=marcas_linhas)
+    return DevolucoesShopee(
+        estado="dado", fonte=FONTE_CX_SHOPEE, total=soma("devolucoes"), aceitas=soma("aceitas"),
+        em_andamento=soma("em_andamento"), canceladas=soma("canceladas"),
+        reembolsado=None if reembolsado is None else round(reembolsado, 2),
+        motivos=bloco, marcas=marcas_linhas,
+    )
 
 
 def _nao_lidas(consultar: Consultar, marcas: list[str],

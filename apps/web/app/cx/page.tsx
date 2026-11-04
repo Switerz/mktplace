@@ -211,16 +211,20 @@ function Devolucoes({ v }: { v: VisaoDevolucoes }) {
         />
       ) : (
         <div className="flex flex-col gap-4" data-testid="cx-devolucoes">
-          <dl className="grid grid-cols-2 gap-3 sm:max-w-md">
-            <div className="rounded-lg border border-line bg-surface p-3">
-              <dt className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Devoluções</dt>
-              <dd className="mt-1 text-2xl font-semibold tabular-nums text-ink">{v.total}</dd>
-            </div>
-            <div className="rounded-lg border border-line bg-surface p-3">
-              <dt className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Valor reembolsado</dt>
-              <dd className="mt-1 text-2xl font-semibold tabular-nums text-ink">{v.reembolsado}</dd>
-            </div>
+          <dl className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {[
+              ["Pedidos de devolução", v.total],
+              ["Aceitas", v.aceitas],
+              ["Em andamento", v.emAndamento],
+              ["Reembolsado (aceitas)", v.reembolsado],
+            ].map(([rotulo, valor]) => (
+              <div key={rotulo} className="rounded-lg border border-line bg-surface p-3">
+                <dt className="text-xs font-semibold uppercase tracking-wide text-ink-faint">{rotulo}</dt>
+                <dd className="mt-1 text-2xl font-semibold tabular-nums text-ink">{valor}</dd>
+              </div>
+            ))}
           </dl>
+          <p className="-mt-2 text-xs text-ink-faint">{v.canceladas} pedido(s) cancelado(s) pelo próprio comprador.</p>
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
             {v.motivos && <Motivos m={v.motivos} cor="bg-canal-shopee" />}
             <section aria-label="Devoluções por marca" className="flex min-w-0 flex-col gap-2 rounded-lg border border-line bg-surface p-3">
@@ -230,7 +234,9 @@ function Devolucoes({ v }: { v: VisaoDevolucoes }) {
                   <thead>
                     <tr className="border-b border-line text-left text-xs font-semibold text-ink-faint">
                       <th scope="col" className="py-2 pr-3">Marca</th>
-                      <th scope="col" className="whitespace-nowrap px-2 py-2 text-right">Devoluções</th>
+                      <th scope="col" className="whitespace-nowrap px-2 py-2 text-right">Pedidos</th>
+                      <th scope="col" className="whitespace-nowrap px-2 py-2 text-right">Aceitas</th>
+                      <th scope="col" className="whitespace-nowrap px-2 py-2 text-right">Em andamento</th>
                       <th scope="col" className="whitespace-nowrap px-2 py-2 text-right">Reembolsado</th>
                     </tr>
                   </thead>
@@ -239,6 +245,8 @@ function Devolucoes({ v }: { v: VisaoDevolucoes }) {
                       <tr key={l.chave} className="border-b border-line last:border-b-0">
                         <th scope="row" className="py-2 pr-3 text-left font-medium text-ink">{l.marca}</th>
                         <td className="whitespace-nowrap px-2 py-2 text-right tabular-nums text-ink-muted">{l.devolucoes}</td>
+                        <td className="whitespace-nowrap px-2 py-2 text-right tabular-nums text-ink-muted">{l.aceitas}</td>
+                        <td className="whitespace-nowrap px-2 py-2 text-right tabular-nums text-ink-muted">{l.emAndamento}</td>
                         <td className="whitespace-nowrap px-2 py-2 text-right tabular-nums text-ink-muted">{l.reembolsado}</td>
                       </tr>
                     ))}

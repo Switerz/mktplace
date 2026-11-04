@@ -31,13 +31,15 @@ class FonteCx:
         self.coleta = {
             svc.SQL_TABELAS_CX: ("tabelas_cx", [{"returns": tabelas[0], "chat": tabelas[1]}]),
             svc.SQL_DEVOLUCOES_MARCAS: ("devolucoes_marcas", devolucoes if devolucoes is not None else [
-                {"marca": "apice", "devolucoes": 3, "reembolsado": 120.5},
-                {"marca": "barbours", "devolucoes": 1, "reembolsado": None},
+                {"marca": "apice", "devolucoes": 5, "aceitas": 3, "em_andamento": 1, "canceladas": 1,
+                 "reembolsado": 120.5},
+                {"marca": "barbours", "devolucoes": 1, "aceitas": 1, "em_andamento": 0, "canceladas": 0,
+                 "reembolsado": None},
             ]),
             svc.SQL_DEVOLUCOES_MOTIVOS: ("devolucoes_motivos", motivos if motivos is not None else [
-                {"motivo": "CHANGE_MIND", "quantidade": 2},
-                {"motivo": "ITEM_MISSING", "quantidade": 1},
-                {"motivo": "NOVO_MOTIVO_X", "quantidade": 1},
+                {"motivo": "CHANGE_MIND", "quantidade": 2, "canceladas": 1},
+                {"motivo": "SPILLED_CONTENTS", "quantidade": 1, "canceladas": 0},
+                {"motivo": "NOVO_MOTIVO_X", "quantidade": 1, "canceladas": 0},
             ]),
             svc.SQL_NAO_LIDAS: ("nao_lidas", nao_lidas if nao_lidas is not None else [
                 {"marca": "apice", "unread_count": 12, "captured_at": AGORA},
@@ -143,13 +145,17 @@ def test_flag_nasce_ligada():
 def test_devolucoes_com_motivo_valor_e_zero_medido_por_marca():
     resp, fonte = _montar(dias=7)
     d = resp.devolucoes
-    assert d.estado == "dado" and d.total == 4 and d.reembolsado == 120.5
+    assert (d.estado, d.total, d.aceitas, d.em_andamento, d.canceladas) == ("dado", 6, 4, 1, 1)
+    assert d.reembolsado == 120.5, "so' as aceitas somam reembolso"
     por_marca = {m.marca: m for m in d.marcas}
     assert por_marca["lescent"].devolucoes == 0, "tabela existe e sem linha = zero medido"
-    assert por_marca["barbours"].reembolsado is None, "valor ausente na fonte nao vira zero"
+    assert por_marca["lescent"].reembolsado == 0.0
+    assert por_marca["barbours"].reembolsado is None, "aceita com valor ausente nao vira zero"
     rotulos = {i.rotulo: i for i in d.motivos.itens}
     assert rotulos["Mudou de ideia"].quantidade == 2
+    assert rotulos["Produto vazou"].mapeado is True
     assert rotulos["NOVO_MOTIVO_X"].mapeado is False
+    assert d.motivos.excluidos == 1, "cancelados pelo comprador ficam fora dos motivos"
     params = dict(fonte.chamadas)["devolucoes_marcas"]
     assert params["marcas"] == ["apice", "barbours", "lescent", "rituaria"]
     assert params["inicio"] == resp.janela.inicio and params["fim"] == resp.janela.fim

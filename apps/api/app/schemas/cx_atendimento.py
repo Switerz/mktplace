@@ -117,7 +117,13 @@ class NaoLidas(BaseModel):
 
 class LinhaDevolucao(BaseModel):
     marca: str
+    #: Pedidos de devolucao/reembolso abertos na janela (todos os status).
     devolucoes: Optional[int] = None
+    aceitas: Optional[int] = None
+    em_andamento: Optional[int] = None
+    #: O comprador desistiu do pedido de devolucao.
+    canceladas: Optional[int] = None
+    #: Soma de `refund_amount` (R$) so' das aceitas.
     reembolsado: Optional[float] = None
 
 
@@ -127,7 +133,10 @@ class DevolucoesShopee(BaseModel):
     fonte: str
     motivo_indisponivel: Optional[str] = None
     total: Optional[int] = None
-    #: Soma de `refund_amount` (R$) das devolucoes da janela.
+    aceitas: Optional[int] = None
+    em_andamento: Optional[int] = None
+    canceladas: Optional[int] = None
+    #: Soma de `refund_amount` (R$) das devolucoes ACEITAS da janela.
     reembolsado: Optional[float] = None
     motivos: Optional[BlocoMotivos] = None
     marcas: list[LinhaDevolucao] = []

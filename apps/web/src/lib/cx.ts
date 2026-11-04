@@ -56,9 +56,20 @@ export interface DevolucoesShopee {
   fonte: string;
   motivo_indisponivel?: string | null;
   total?: number | null;
+  aceitas?: number | null;
+  em_andamento?: number | null;
+  canceladas?: number | null;
+  /** So' das aceitas. */
   reembolsado?: number | null;
   motivos?: BlocoMotivos | null;
-  marcas: { marca: string; devolucoes: number | null; reembolsado: number | null }[];
+  marcas: {
+    marca: string;
+    devolucoes: number | null;
+    aceitas?: number | null;
+    em_andamento?: number | null;
+    canceladas?: number | null;
+    reembolsado: number | null;
+  }[];
 }
 
 export interface CxShopeeResponse {
@@ -264,9 +275,24 @@ export interface VisaoDevolucoes {
   estado: EstadoBloco;
   motivo: string | null;
   total: string;
+  aceitas: string;
+  emAndamento: string;
+  canceladas: string;
   reembolsado: string;
   motivos: VisaoMotivos | null;
-  linhas: { chave: string; marca: string; devolucoes: string; reembolsado: string }[];
+  linhas: {
+    chave: string;
+    marca: string;
+    devolucoes: string;
+    aceitas: string;
+    emAndamento: string;
+    canceladas: string;
+    reembolsado: string;
+  }[];
+}
+
+function inteiro(v: number | null | undefined): string {
+  return v == null ? "—" : FMT_INT.format(v);
 }
 
 export function montarDevolucoes(
@@ -275,20 +301,27 @@ export function montarDevolucoes(
 ): VisaoDevolucoes {
   if (!d) {
     return {
-      estado: "sem_fonte", total: "—", reembolsado: "—", motivos: null, linhas: [],
+      estado: "sem_fonte", total: "—", aceitas: "—", emAndamento: "—", canceladas: "—",
+      reembolsado: "—", motivos: null, linhas: [],
       motivo: "Aguardando a primeira coleta de CX da Shopee no Airflow (shopee_cx_coleta).",
     };
   }
   return {
     estado: d.estado,
     motivo: d.motivo_indisponivel ?? null,
-    total: d.total == null ? "—" : FMT_INT.format(d.total),
+    total: inteiro(d.total),
+    aceitas: inteiro(d.aceitas),
+    emAndamento: inteiro(d.em_andamento),
+    canceladas: inteiro(d.canceladas),
     reembolsado: reais(d.reembolsado),
     motivos: d.estado === "dado" ? montarMotivos(d.motivos) : null,
     linhas: d.marcas.map((m) => ({
       chave: m.marca,
       marca: rotuloMarca(m.marca),
-      devolucoes: m.devolucoes == null ? "—" : FMT_INT.format(m.devolucoes),
+      devolucoes: inteiro(m.devolucoes),
+      aceitas: inteiro(m.aceitas),
+      emAndamento: inteiro(m.em_andamento),
+      canceladas: inteiro(m.canceladas),
       reembolsado: reais(m.reembolsado),
     })),
   };

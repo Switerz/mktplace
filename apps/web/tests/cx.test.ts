@@ -137,9 +137,15 @@ test("devolucoes: sem a chave na API = sem fonte; com dado formata reais e motiv
       titulo: "Motivos de devolução", estado: "dado", total: 4, ajuda: "a",
       itens: [{ codigo: "change_mind", rotulo: "Mudou de ideia", natureza: "comprador", quantidade: 4, pct: 100, mapeado: true }],
     },
-    marcas: [{ marca: "apice", devolucoes: 4, reembolsado: 120.5 }, { marca: "lescent", devolucoes: 0, reembolsado: null }],
+    aceitas: 3, em_andamento: 1, canceladas: 0,
+    marcas: [
+      { marca: "apice", devolucoes: 4, aceitas: 3, em_andamento: 1, canceladas: 0, reembolsado: 120.5 },
+      { marca: "lescent", devolucoes: 0, aceitas: 0, em_andamento: 0, canceladas: 0, reembolsado: null },
+    ],
   }, rotulo);
   assert.equal(v.total, "4");
+  assert.equal(v.aceitas, "3");
+  assert.equal(v.emAndamento, "1");
   assert.equal(v.reembolsado, reais(120.5));
   assert.equal(v.motivos?.itens[0].rotulo, "Mudou de ideia");
   assert.deepEqual(v.linhas.map((l) => [l.marca, l.devolucoes, l.reembolsado]),
