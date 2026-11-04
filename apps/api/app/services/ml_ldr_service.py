@@ -32,7 +32,6 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
-from sqlalchemy import text
 
 from app.services.gold_service import ML_BRANDS, TZ_OPERACIONAL
 
@@ -81,12 +80,11 @@ SELECT brand AS marca,
 
 
 def consultar_datamart(sql: str, params: dict) -> list[dict]:
-    from app.database import datamart_engine  # import tardio: testes injetam `consultar`
+    """Direto no Data Mart; se o banco recusar por permissao, pelo Metabase
+    (ver `datamart_leitura`)."""
+    from app.services import datamart_leitura  # import tardio: testes injetam `consultar`
 
-    if datamart_engine is None:
-        raise RuntimeError("datamart indisponivel")
-    with datamart_engine.connect() as conn:
-        return [dict(r) for r in conn.execute(text(sql), params).mappings()]
+    return datamart_leitura.consultar(sql, params)
 
 
 def _int(v: Any) -> int:
