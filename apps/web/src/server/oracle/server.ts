@@ -16,6 +16,8 @@ export const SERVER_INFO = { name: "torre-marketplace", version: "0.1.0" } as co
 
 export type BuildServerOptions = {
   backendBaseUrl: string;
+  /** Chave de servico do backend (header `x-torre-service-key`). */
+  serviceKey?: string | undefined;
   /** Injetavel para teste — sem isso a suite dependeria de rede. */
   fetchImpl?: typeof fetch;
   now?: () => Date;
@@ -37,6 +39,7 @@ export function buildOracleServer(opts: BuildServerOptions): McpServer {
 
   const client = new TorreClient({
     baseUrl: opts.backendBaseUrl,
+    serviceKey: opts.serviceKey,
     fetchImpl: opts.fetchImpl,
     timeoutMs: opts.timeoutMs,
   });
