@@ -109,3 +109,39 @@ test("menu: CX fica em Operações logo depois da Expedição e tem titulo propr
   const navList = readFileSync(new URL("../src/components/shell/NavList.tsx", import.meta.url), "utf8");
   assert.match(navList, /cx: true,/);
 });
+
+// ---------------------------------------------------------------------------
+// Coleta de CX (devolucoes + conversas nao lidas), 04/11/2026
+// ---------------------------------------------------------------------------
+import { montarDevolucoes, reais } from "../src/lib/cx.ts";
+
+test("chat: coluna de nao lidas so' com a coleta publicada; nulo vira traco", () => {
+  const sem = montarChat(chat(), rotulo);
+  assert.equal(sem.comNaoLidas, false);
+  assert.match(sem.motivoNaoLidas ?? "", /shopee_cx_coleta/);
+  const com = montarChat({
+    ...chat(),
+    nao_lidas_estado: "dado",
+    nao_lidas: [{ marca: "apice", valor: 1234, capturado_em: null }, { marca: "rituaria", valor: null, capturado_em: null }],
+  }, rotulo);
+  assert.equal(com.comNaoLidas, true);
+  assert.equal(com.motivoNaoLidas, null);
+  assert.deepEqual(com.linhas.map((l) => l.naoLidas), ["1.234", "—"]);
+});
+
+test("devolucoes: sem a chave na API = sem fonte; com dado formata reais e motivos", () => {
+  assert.equal(montarDevolucoes(undefined, rotulo).estado, "sem_fonte");
+  const v = montarDevolucoes({
+    estado: "dado", fonte: "x", total: 4, reembolsado: 120.5,
+    motivos: {
+      titulo: "Motivos de devolução", estado: "dado", total: 4, ajuda: "a",
+      itens: [{ codigo: "change_mind", rotulo: "Mudou de ideia", natureza: "comprador", quantidade: 4, pct: 100, mapeado: true }],
+    },
+    marcas: [{ marca: "apice", devolucoes: 4, reembolsado: 120.5 }, { marca: "lescent", devolucoes: 0, reembolsado: null }],
+  }, rotulo);
+  assert.equal(v.total, "4");
+  assert.equal(v.reembolsado, reais(120.5));
+  assert.equal(v.motivos?.itens[0].rotulo, "Mudou de ideia");
+  assert.deepEqual(v.linhas.map((l) => [l.marca, l.devolucoes, l.reembolsado]),
+    [["APICE", "4", reais(120.5)], ["LESCENT", "0", "—"]]);
+});

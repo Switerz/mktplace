@@ -107,6 +107,38 @@ class AtendimentoResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Aba CX (menu principal), 04/11/2026: primeira versao so' Shopee.
 # ---------------------------------------------------------------------------
+class NaoLidas(BaseModel):
+    """Conversas nao lidas no chat, ultima foto da loja (`shopee_cx_coleta`)."""
+    marca: str
+    #: None = a Shopee nao devolveu o numero (nunca zero).
+    valor: Optional[int] = None
+    capturado_em: Optional[datetime] = None
+
+
+class LinhaDevolucao(BaseModel):
+    marca: str
+    devolucoes: Optional[int] = None
+    reembolsado: Optional[float] = None
+
+
+class DevolucoesShopee(BaseModel):
+    """Devolucoes/reembolsos criados na janela (`raw.shopee_returns`)."""
+    estado: EstadoBloco
+    fonte: str
+    motivo_indisponivel: Optional[str] = None
+    total: Optional[int] = None
+    #: Soma de `refund_amount` (R$) das devolucoes da janela.
+    reembolsado: Optional[float] = None
+    motivos: Optional[BlocoMotivos] = None
+    marcas: list[LinhaDevolucao] = []
+
+    @model_validator(mode="after")
+    def _ausencia_nao_e_zero(self) -> "DevolucoesShopee":
+        if self.estado != "dado" and (self.total is not None or self.marcas):
+            raise ValueError("so' o estado 'dado' carrega total e marcas")
+        return self
+
+
 class ChatShopee(BaseModel):
     """Metricas de atendimento da Saude da Conta (fotografia diaria oficial).
 
@@ -119,6 +151,9 @@ class ChatShopee(BaseModel):
     fonte: str
     contas: list[ContaOficial] = []
     sem_foto: list[ContaSemFoto] = []
+    #: Conversas nao lidas (coleta propria, a cada 2 h).
+    nao_lidas_estado: EstadoBloco = "sem_fonte"
+    nao_lidas: list[NaoLidas] = []
 
 
 class CxShopeeResponse(BaseModel):
@@ -126,3 +161,4 @@ class CxShopeeResponse(BaseModel):
     janela: Janela
     chat: ChatShopee
     atendimento: CanalAtendimento
+    devolucoes: DevolucoesShopee

@@ -21,15 +21,17 @@ import {
   hrefCx,
   lerFiltrosCx,
   montarChat,
+  montarDevolucoes,
   type CelulaChat,
   type FiltrosCx,
   type VisaoChat,
+  type VisaoDevolucoes,
 } from "@/lib/cx";
 import { ALL_BRAND_KEYS, ALL_BRAND_OPTIONS, brandLabel } from "@/lib/filters/brands";
 import { formatarInstante } from "@/lib/performance-contas";
 import { montarCanaisAtendimento, textoJanela } from "@/lib/performance-contas-atendimento";
 
-import AtendimentoCanal from "./AtendimentoCanal";
+import AtendimentoCanal, { Motivos } from "./AtendimentoCanal";
 
 export const dynamic = "force-dynamic";
 
@@ -62,6 +64,7 @@ export default async function CxPage({ searchParams }: { searchParams: SearchPar
 
   const { dados } = resultado;
   const chat = montarChat(dados.chat, brandLabel);
+  const devolucoes = montarDevolucoes(dados.devolucoes, brandLabel);
   const [atendimento] = montarCanaisAtendimento(
     { gerado_em: dados.gerado_em, janela: dados.janela, canais: [dados.atendimento] },
     null,
@@ -78,6 +81,7 @@ export default async function CxPage({ searchParams }: { searchParams: SearchPar
         filters={<Filtros f={filtros} />}
       />
       <Chat v={chat} />
+      <Devolucoes v={devolucoes} />
       {atendimento ? <AtendimentoCanal canal={{ ...atendimento, titulo: "Cancelamentos e devoluções", pendencias: [] }} /> : null}
       <ProximasFontes />
     </PageContainer>
@@ -157,6 +161,9 @@ function Chat({ v }: { v: VisaoChat }) {
                       {c.rotulo}
                     </th>
                   ))}
+                  {v.comNaoLidas && (
+                    <th scope="col" className="whitespace-nowrap px-2 py-2 text-right">Conversas não lidas</th>
+                  )}
                   <th scope="col" className="whitespace-nowrap px-2 py-2 text-right">Foto de</th>
                 </tr>
               </thead>
@@ -169,12 +176,16 @@ function Chat({ v }: { v: VisaoChat }) {
                         <Celula c={c} />
                       </td>
                     ))}
+                    {v.comNaoLidas && (
+                      <td className="whitespace-nowrap px-2 py-2 text-right tabular-nums text-ink">{l.naoLidas}</td>
+                    )}
                     <td className="whitespace-nowrap px-2 py-2 text-right text-xs tabular-nums text-ink-faint">{l.dia}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+          {v.motivoNaoLidas && <p className="text-xs text-ink-faint">{v.motivoNaoLidas}</p>}
           {v.semFoto.length > 0 && (
             <ul className="text-xs text-ink-faint">
               {v.semFoto.map((s) => (
@@ -182,6 +193,60 @@ function Chat({ v }: { v: VisaoChat }) {
               ))}
             </ul>
           )}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function Devolucoes({ v }: { v: VisaoDevolucoes }) {
+  return (
+    <Panel titulo="Devoluções e reembolsos" descricao="Criadas no período · API de devoluções da Shopee" aria-label="Devoluções">
+      {v.estado !== "dado" ? (
+        <StateBlock
+          tipo={v.estado === "erro" ? "erro" : v.estado === "vazio_legitimo" ? "vazio" : "indisponivel"}
+          compacto
+          titulo={v.estado === "erro" ? "Devoluções indisponíveis nesta carga" : v.estado === "vazio_legitimo" ? "Nenhuma loja Shopee no filtro" : "Ainda sem dados"}
+          descricao={v.motivo ?? undefined}
+        />
+      ) : (
+        <div className="flex flex-col gap-4" data-testid="cx-devolucoes">
+          <dl className="grid grid-cols-2 gap-3 sm:max-w-md">
+            <div className="rounded-lg border border-line bg-surface p-3">
+              <dt className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Devoluções</dt>
+              <dd className="mt-1 text-2xl font-semibold tabular-nums text-ink">{v.total}</dd>
+            </div>
+            <div className="rounded-lg border border-line bg-surface p-3">
+              <dt className="text-xs font-semibold uppercase tracking-wide text-ink-faint">Valor reembolsado</dt>
+              <dd className="mt-1 text-2xl font-semibold tabular-nums text-ink">{v.reembolsado}</dd>
+            </div>
+          </dl>
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            {v.motivos && <Motivos m={v.motivos} cor="bg-canal-shopee" />}
+            <section aria-label="Devoluções por marca" className="flex min-w-0 flex-col gap-2 rounded-lg border border-line bg-surface p-3">
+              <h3 className="text-sm font-semibold text-ink">Por marca</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-line text-left text-xs font-semibold text-ink-faint">
+                      <th scope="col" className="py-2 pr-3">Marca</th>
+                      <th scope="col" className="whitespace-nowrap px-2 py-2 text-right">Devoluções</th>
+                      <th scope="col" className="whitespace-nowrap px-2 py-2 text-right">Reembolsado</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {v.linhas.map((l) => (
+                      <tr key={l.chave} className="border-b border-line last:border-b-0">
+                        <th scope="row" className="py-2 pr-3 text-left font-medium text-ink">{l.marca}</th>
+                        <td className="whitespace-nowrap px-2 py-2 text-right tabular-nums text-ink-muted">{l.devolucoes}</td>
+                        <td className="whitespace-nowrap px-2 py-2 text-right tabular-nums text-ink-muted">{l.reembolsado}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
         </div>
       )}
     </Panel>
