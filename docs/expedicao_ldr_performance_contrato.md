@@ -28,12 +28,20 @@ Janela: os últimos 7 dias. Ausência de base é "—", nunca 0%.
 |---|---|---|---|---|
 | Shopee | `ship_by_date` da Shopee (dias úteis já aplicados) | coleta (`pickup_done_time`) | `GET /expedicao/shopee/ldr?days=7`, LDR operacional (EXPEDICAO-SHOPEE-LDR-1; FBS fora; cancelado sem coleta fora) | Pronto, atrás de flag: falta a migration 030 no Neon, as flags e despausar a publicação |
 | TikTok | 2 dias úteis após o pagamento (prazo reconstruído; o oficial `tts_sla_time` substitui quando ingerido) | coleta | `GET /expedicao/tiktok?event=coleta&days=7` | No ar |
-| Mercado Livre | SLA oficial de despacho (`/shipments/{id}/sla` → `expected_date`; no Mercado Coleta é o horário da coleta agendada) | coleta (`picked_up` em `substatus_history`; "coletado = expedido", decisão de 03/11) | ainda sem rota | O SLA é gravado desde 03/11 (`raw.ml_shipments.sla_*`, 7% a 15% dos envios dos últimos 10 dias). A coluna mostra "Aguardando 7 dias de prazo oficial do ML" |
+| Mercado Livre | SLA oficial de despacho (`/shipments/{id}/sla` → `expected_date`; no Mercado Coleta é o horário AGENDADO da coleta) | coleta até o **fim do dia** do prazo (`picked_up`/`dropped_off`/`in_hub` em `substatus_history`) | `GET /expedicao/ml/ldr?days=7` (lê `raw.ml_shipments` no Data Mart) | Série desde 03/11/2026; com menos de 7 dias fechados a célula diz "janela parcial: N de 7 dias" |
 
-**Próximo passo do ML (fora deste gate):** publicar `marts.expedicao_ml_ldr_daily` pela mesma partição da Shopee
-(base = envios seller-managed com SLA vencendo no dia; atrasado = `picked_up` depois do SLA; pendente vencido = SLA
-passado sem coleta) e expor `GET /expedicao/ml/ldr?days=7` com o mesmo formato `brands[]`. A faixa já aceita a rota
-assim que `urlLdr` deixar de devolver `null` para o ML.
+**Regra do ML (validada no Data Mart em 03/11/2026).** Comparar a coleta com o horário exato do SLA daria ~80% de
+"atraso" que o próprio ML não marca: no Mercado Coleta o SLA é o horário agendado e a coleta é registrada minutos ou
+horas depois (mediana +0,5 h). A regra que bate com o `sla_status = 'delayed'` do ML:
+
+- base: envios de modalidade com coleta (`cross_docking`, `xd_drop_off`, `drop_off`) com SLA vencendo no dia
+  (Brasília), menos cancelados sem coleta;
+- atrasado: coletado depois do fim do dia do prazo, OU `delayed` pelo ML, OU sem coleta com o dia fechado;
+- fora da base (contado): enviado/entregue sem marco de coleta.
+
+Conferência: "coletado depois do dia" = `delayed` do ML em 31/10 (Kokeshi, 15 de 15) e 30/10 (Rituária, 3 de 3).
+Prévia de 03/11 (dia ainda aberto): Barbour's 1/99, Kokeshi 0/340, Lescent 0/51, Rituária 3/82. A série começa em
+03/11 porque antes disso só envios presos tinham SLA gravado (taxa enviesada).
 
 O número oficial de atraso do ML existe à parte: `delayed_handling_time` da reputação (60 dias), mostrado na seção
 Performance como "Envios com atraso".

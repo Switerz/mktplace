@@ -10,7 +10,6 @@ import {
   CANAIS_LDR,
   DIAS_LDR_TOPO,
   META_TETO,
-  MOTIVO_ML_AGUARDANDO,
   ROTULO_FAIXA,
   escalaBarra,
   inteiro,
@@ -45,14 +44,8 @@ const PONTO_CANAL: Record<CanalLdr, string> = {
 
 function useFonte(api: string, canal: CanalLdr, marca: string | null): FonteCanal {
   const url = urlLdr(api, canal, marca);
-  const [fonte, setFonte] = useState<FonteCanal>(
-    url ? { estado: "carregando" } : { estado: "indisponivel", motivo: MOTIVO_ML_AGUARDANDO },
-  );
+  const [fonte, setFonte] = useState<FonteCanal>({ estado: "carregando" });
   useEffect(() => {
-    if (!url) {
-      setFonte({ estado: "indisponivel", motivo: MOTIVO_ML_AGUARDANDO });
-      return;
-    }
     let vivo = true;
     setFonte({ estado: "carregando" });
     buscarExpedicao(url, { headers: { Accept: "application/json" } })
@@ -182,6 +175,7 @@ function CelulaLdr({ celula, canal }: { celula: Celula; canal: CanalLdr }) {
       </div>
       <span className="text-[11px] tabular-nums text-ink-faint">
         {inteiro(celula.atrasados)} atrasados de {inteiro(celula.base)} com prazo vencido
+        {celula.parcial ? ` · ${celula.parcial}` : ""}
       </span>
     </div>
   );

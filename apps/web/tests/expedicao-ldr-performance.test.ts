@@ -73,8 +73,23 @@ test("celula: sem conta, sem base e taxa nula nunca viram 0%", () => {
   assert.equal(a.tipo === "dado" && a.faixa, "acima");
 });
 
-test("ML sem rota fica aguardando com motivo; Apice sem conta ML", () => {
-  assert.equal(urlLdr("http://api", "mercadolivre", null), null);
+test("ML: rota propria, janela parcial dita e serie ainda nao iniciada com motivo", () => {
+  assert.equal(urlLdr("http://api", "mercadolivre", "kokeshi"),
+    "http://api/api/v1/expedicao/ml/ldr?days=7&brands=kokeshi");
+  const parcial = lerRespostaLdr({ availability: "available", mature_days: 2, requested_days: 7,
+    brands: [{ brand: "kokeshi", base: 340, late: 3, rate: 3 / 340 }] });
+  const c = celula(parcial, "mercadolivre", "kokeshi");
+  assert.equal(c.tipo === "dado" && c.parcial, "janela parcial: 2 de 7 dias");
+  const cheio = lerRespostaLdr({ availability: "available", mature_days: 7, requested_days: 7,
+    brands: [{ brand: "kokeshi", base: 340, late: 3, rate: 3 / 340 }] });
+  const c2 = celula(cheio, "mercadolivre", "kokeshi");
+  assert.equal(c2.tipo === "dado" && c2.parcial, null);
+  const naoIniciada = lerRespostaLdr({ availability: "unavailable", unavailable_reason: "series_not_started" });
+  assert.equal(naoIniciada.estado, "indisponivel");
+  assert.match(naoIniciada.estado === "indisponivel" ? naoIniciada.motivo : "", /03\/11\/2026/);
+});
+
+test("ML aguardando com motivo; Apice sem conta ML", () => {
   const linhas = montarMatriz({
     shopee: { estado: "carregando" },
     mercadolivre: { estado: "indisponivel", motivo: MOTIVO_ML_AGUARDANDO },

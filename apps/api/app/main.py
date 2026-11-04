@@ -10,6 +10,7 @@ from app.routers import (
     dre,
     expedicao,
     metas,
+    ml_ldr,
     performance,
     performance_oficial,
     regioes,
@@ -35,6 +36,8 @@ app.include_router(regioes.router)
 app.include_router(expedicao.router)
 # CX-MKT-2: secao Performance da Expedicao, inerte ate' `expedicao_performance_api_enabled`.
 app.include_router(performance_oficial.router)
+# CX-MKT-3: LDR do ML para a faixa do topo (mesma flag da Performance).
+app.include_router(ml_ldr.router)
 app.include_router(dre.router)
 app.include_router(b2b_revenda.router)
 # T-0014: registrada, mas inerte -- responde 404 enquanto

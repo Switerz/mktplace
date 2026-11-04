@@ -12,8 +12,10 @@
  *           operacional, `GET /expedicao/shopee/ldr?days=7`).
  *   TikTok  mesma conta com o prazo de 2 dias úteis após o pagamento, coleta
  *           como marco (`GET /expedicao/tiktok?event=coleta&days=7`).
- *   ML      prazo oficial de despacho do ML (SLA) × coleta. O SLA só é gravado
- *           desde 03/11/2026: a coluna fica "aguardando" até a série existir.
+ *   ML      prazo oficial de despacho do ML (SLA); atrasado = coletado depois do
+ *           FIM DO DIA do prazo, marcado `delayed` pelo ML, ou sem coleta com o
+ *           dia fechado (`GET /expedicao/ml/ldr?days=7`). Série desde 03/11/2026:
+ *           com menos de 7 dias fechados a célula diz "janela parcial".
  *
  * Os números são CÁLCULO TORRE, não a métrica oficial de penalização de cada
  * plataforma (essa fica na seção "Performance"). Ausência nunca vira 0%.
@@ -43,7 +45,7 @@ export const META_TETO: Record<CanalLdr, MetaTeto> = {
 
 export const CANAIS_LDR: readonly { canal: CanalLdr; titulo: string; regra: string }[] = [
   { canal: "shopee", titulo: "Shopee", regra: "prazo Shopee × coleta" },
-  { canal: "mercadolivre", titulo: "Mercado Livre", regra: "prazo oficial ML (SLA) × coleta" },
+  { canal: "mercadolivre", titulo: "Mercado Livre", regra: "prazo oficial ML × coleta até o fim do dia" },
   { canal: "tiktokshop", titulo: "TikTok Shop", regra: "2 dias úteis após o pagamento × coleta" },
 ];
 
@@ -72,7 +74,7 @@ export const ROTULO_FAIXA: Record<Faixa, string> = {
 };
 
 export type Celula =
-  | { tipo: "dado"; taxa: number; atrasados: number; base: number; faixa: Faixa }
+  | { tipo: "dado"; taxa: number; atrasados: number; base: number; faixa: Faixa; parcial: string | null }
   | { tipo: "sem_base"; motivo: string }
   | { tipo: "sem_conta" }
   | { tipo: "indisponivel"; motivo: string }
@@ -89,7 +91,7 @@ export interface LinhaLdrMarca {
 export type FonteCanal =
   | { estado: "carregando" }
   | { estado: "indisponivel"; motivo: string }
-  | { estado: "dado"; marcas: LinhaLdrMarca[] };
+  | { estado: "dado"; marcas: LinhaLdrMarca[]; diasMaduros?: number; diasPedidos?: number };
 
 function numero(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
@@ -119,13 +121,19 @@ export function lerRespostaLdr(json: unknown): FonteCanal {
     }
     marcas.push({ brand: m.brand, base: m.base, late: m.late, rate: numero(m.rate) ? m.rate : null });
   }
-  return { estado: "dado", marcas };
+  const parcial =
+    numero(j.mature_days) && numero(j.requested_days) && j.mature_days < j.requested_days
+      ? { diasMaduros: j.mature_days, diasPedidos: j.requested_days }
+      : {};
+  return { estado: "dado", marcas, ...parcial };
 }
 
 const MOTIVOS_INDISPONIVEL: Record<string, string> = {
   disabled: "LDR deste canal ainda desligado na Torre.",
   table_not_migrated: "LDR deste canal ainda não publicado (tabela pendente).",
   no_series_published: "Sem série publicada na janela.",
+  series_not_started: "Prazo oficial do ML gravado desde 03/11/2026: o primeiro dia ainda não fechou.",
+  source_error: "Não foi possível calcular agora.",
 };
 
 /** Motivo fixo da coluna do ML enquanto o SLA não tem 7 dias de série. */
@@ -147,6 +155,10 @@ export function celula(fonte: FonteCanal, canal: CanalLdr, marca: string): Celul
     atrasados: linha.late,
     base: linha.base,
     faixa: classificar(linha.rate, META_TETO[canal]),
+    parcial:
+      fonte.diasMaduros !== undefined && fonte.diasPedidos !== undefined
+        ? `janela parcial: ${fonte.diasMaduros} de ${fonte.diasPedidos} dias`
+        : null,
   };
 }
 
@@ -190,7 +202,7 @@ export function escalaBarra(taxa: number, mt: MetaTeto): { preenchido: number; m
   return { preenchido: r(taxa), meta: r(mt.meta), teto: r(mt.teto) };
 }
 
-export function urlLdr(api: string, canal: CanalLdr, marca: string | null): string | null {
+export function urlLdr(api: string, canal: CanalLdr, marca: string | null): string {
   const qs = new URLSearchParams({ days: String(DIAS_LDR_TOPO) });
   if (marca) qs.set("brands", marca);
   if (canal === "shopee") return `${api}/api/v1/expedicao/shopee/ldr?${qs.toString()}`;
@@ -198,5 +210,5 @@ export function urlLdr(api: string, canal: CanalLdr, marca: string | null): stri
     qs.set("event", "coleta");
     return `${api}/api/v1/expedicao/tiktok?${qs.toString()}`;
   }
-  return null; // ML: ainda sem rota de LDR
+  return `${api}/api/v1/expedicao/ml/ldr?${qs.toString()}`;
 }
