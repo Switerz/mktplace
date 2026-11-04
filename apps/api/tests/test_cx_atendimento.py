@@ -1,4 +1,4 @@
-"""CX-MKT-1 — aba "Atendimento" (`/api/v1/performance-contas/atendimento`).
+"""CX-MKT-1 — aba CX (`/api/v1/cx/atendimento`).
 
 O que estes testes existem para impedir:
   1. fonte caida, ausencia ou zero pedidos virarem 0 na tela;
@@ -21,7 +21,7 @@ from app.config import settings
 from app.routers import cx_atendimento as rota
 from app.services import cx_atendimento_service as svc
 
-URL = "/api/v1/performance-contas/atendimento"
+URL = "/api/v1/cx/atendimento"
 SEGREDO = "postgresql://usuario:senha-NAO-PODE-VAZAR@host/db"
 AGORA = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)  # 09:00 em Sao Paulo
 
@@ -277,7 +277,7 @@ def test_ordem_dos_canais():
 def cliente(monkeypatch):
     app = FastAPI()
     app.include_router(rota.router)
-    monkeypatch.setattr(settings, "performance_contas_atendimento_api_enabled", True)
+    monkeypatch.setattr(settings, "cx_api_enabled", True)
     chamadas = []
     original = svc.montar_atendimento
 
@@ -291,7 +291,7 @@ def cliente(monkeypatch):
 
 def test_flag_desligada_e_404_sem_chamar_nada(cliente, monkeypatch):
     c, chamadas = cliente
-    monkeypatch.setattr(settings, "performance_contas_atendimento_api_enabled", False)
+    monkeypatch.setattr(settings, "cx_api_enabled", False)
     assert c.get(URL).status_code == 404
     assert chamadas == []
 

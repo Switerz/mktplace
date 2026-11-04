@@ -45,7 +45,7 @@ app.include_router(b2b_revenda.router)
 # T-0014: registrada, mas inerte -- responde 404 enquanto
 # `performance_contas_api_enabled` estiver desligada (padrao).
 app.include_router(account_performance.router)
-# CX-MKT-1: aba "Atendimento", inerte ate' `performance_contas_atendimento_api_enabled`.
+# Aba CX (menu principal): `/api/v1/cx/*`, flag `cx_api_enabled` (ligada).
 app.include_router(cx_atendimento.router)
 app.include_router(metas.router)
 app.include_router(alertas.router)

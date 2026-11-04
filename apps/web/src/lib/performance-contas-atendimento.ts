@@ -2,7 +2,7 @@
  * CX-MKT-1 — aba "Atendimento" da Performance das contas
  * (contrato: docs/cx_atendimento_contrato.md).
  *
- * Tipos de `GET /api/v1/performance-contas/atendimento`, a flag da aba, o
+ * Tipos de `GET /api/v1/cx/atendimento`, a flag da aba, o
  * fetch do servidor e as funcoes puras de apresentacao. Sem React: tudo que
  * decide o que aparece e' testavel com `node --test`.
  *
@@ -357,7 +357,7 @@ export function textoJanela(j: AtendimentoResponse["janela"]): string {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
-export const ROTA_API_ATENDIMENTO = "/api/v1/performance-contas/atendimento";
+export const ROTA_API_ATENDIMENTO = "/api/v1/cx/atendimento";
 
 export function urlAtendimento(base: string, filtros: { marca: string | null; dias: JanelaDias }): string {
   const qs = new URLSearchParams();

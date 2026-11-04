@@ -157,7 +157,7 @@ Implementada antes das ingestões, para a aba nascer útil sem depender de revis
 | Shopee | Cancelamentos e taxa (sem "pedido não pago"), pedidos em devolução agora; motivos de cancelamento; tabela por marca | `silver.stg_shopee_orders` (`cancel_by`, `cancel_reason`, `order_status`), dia = `created_date_brt` |
 | TikTok | `sem_fonte`, com motivo | — |
 
-- Rota: `GET /api/v1/performance-contas/atendimento?brands=&dias=7|30|90`, atrás da flag
+- Rota: `GET /api/v1/cx/atendimento?brands=&dias=7|30|90` (e `GET /api/v1/cx/shopee`, aba CX do menu principal desde 04/11/2026), atrás da flag
   `PERFORMANCE_CONTAS_ATENDIMENTO_API_ENABLED` (API) e `NEXT_PUBLIC_PERFORMANCE_CONTAS_ATENDIMENTO_ENABLED`
   (web). As duas nascem desligadas; desligada, `?aba=atendimento` é ignorado e a rota responde 404.
 - A aba é `?aba=atendimento` em `/performance-contas`, por link (sem JS), mantendo canal e marca.
@@ -181,7 +181,7 @@ repo publica no Neon; a API e a web leem do Neon.
 | 0 | Probes inertes de capacidade: `mercadolivre_cx_capability_probe`, `tiktok_cx_capability_probe`, `shopee_cx_capability_probe` | goca-airflow | merge, deploy e disparo manual de cada probe; se faltar permissão, pedir no painel de desenvolvedor do ML / Partner Center do TikTok |
 | 1 | Ingestão incremental: `raw.ml_cx_claims`, `raw.ml_cx_claim_reasons`, `raw.ml_cx_returns`, `raw.ml_cx_questions`, `raw.ml_cx_account_daily`, `raw.tiktok_cx_returns`, `raw.tiktok_cx_cancellations`, `raw.shopee_cx_returns` (cancelamentos da Shopee já vêm de `silver.stg_shopee_orders`) (a cada 2 h, janela móvel por `last_updated`/`update_time`) | goca-airflow | migrations, deploy, ligar a flag |
 | 2 | `pipelines/cx/` normaliza para `cx_caso` e publica `marts.cx_casos` + `marts.cx_conta_dia` no Neon | mktplace | migration no Neon |
-| 3 | `GET /api/v1/performance-contas/atendimento` + aba na web atrás de flag | mktplace | flags no Render/Vercel |
+| 3 | `GET /api/v1/cx/*` + aba CX no menu principal (flag `cx_api_enabled`, ligada) | mktplace | flags no Render/Vercel |
 | 4 | Enriquecimentos: afeta reputação (ML), avaliações (Shopee), chat (se liberado) | ambos | — |
 
 ## 9. Riscos

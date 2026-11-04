@@ -1,4 +1,4 @@
-"""CX-MKT-1 — schema da aba "Atendimento" (`/api/v1/performance-contas/atendimento`).
+"""CX-MKT-1 — schema da aba CX (`/api/v1/cx/atendimento` e `/api/v1/cx/shopee`).
 
 Contrato: `docs/cx_atendimento_contrato.md`.
 
@@ -24,6 +24,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, model_validator
 
 from app.schemas.account_performance import CanalPerformance, Cobertura, Indicador
+from app.schemas.performance_oficial import ContaOficial, ContaSemFoto, EstadoCanal
 
 #: Quem originou o cancelamento/caso, em vocabulario comum aos canais.
 Natureza = Literal["comprador", "reclamacao", "logistica", "vendedor", "plataforma"]
@@ -101,3 +102,27 @@ class AtendimentoResponse(BaseModel):
     gerado_em: datetime
     janela: Janela
     canais: list[CanalAtendimento]
+
+
+# ---------------------------------------------------------------------------
+# Aba CX (menu principal), 04/11/2026: primeira versao so' Shopee.
+# ---------------------------------------------------------------------------
+class ChatShopee(BaseModel):
+    """Metricas de atendimento da Saude da Conta (fotografia diaria oficial).
+
+    Cada conta traz so' as metricas do grupo "Atendimento" (taxa de resposta
+    do chat, nota da loja e, quando a Shopee publica, tempo de resposta e
+    chats sem resposta), com a meta da propria Shopee.
+    """
+    estado: EstadoCanal
+    motivo: Optional[str] = None
+    fonte: str
+    contas: list[ContaOficial] = []
+    sem_foto: list[ContaSemFoto] = []
+
+
+class CxShopeeResponse(BaseModel):
+    gerado_em: datetime
+    janela: Janela
+    chat: ChatShopee
+    atendimento: CanalAtendimento

@@ -1,7 +1,10 @@
-"""CX-MKT-1 — rota read-only da aba "Atendimento" da Performance das contas.
+"""Aba CX (menu principal) — rotas read-only `/api/v1/cx/*`.
 
-INERTE POR FLAG PROPRIA: com `settings.performance_contas_atendimento_api_enabled`
-desligada (padrao) toda requisicao responde 404, antes de qualquer consulta.
+  * `/shopee`      chat (Saude da Conta) + cancelamentos e devolucoes da Shopee;
+  * `/atendimento` cancelamentos e devolucoes dos tres canais (base do CX-MKT-1).
+
+Flag `settings.cx_api_enabled` (ligada por padrao): desligada, toda requisicao
+responde 404 antes de qualquer consulta.
 
 Le o Data Mart direto (ver `cx_atendimento_service`). SOMENTE GET. Entrada fora
 da allowlist vira 422 com mensagem FIXA, sem ecoar o que veio.
@@ -11,19 +14,19 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.config import settings
-from app.schemas.cx_atendimento import JANELAS_DIAS, AtendimentoResponse
+from app.schemas.cx_atendimento import JANELAS_DIAS, AtendimentoResponse, CxShopeeResponse
 from app.services import cx_atendimento_service as svc
 
 
 def exigir_flag() -> None:
     """Flag desligada = 404 igual ao de rota inexistente. Lida a cada requisicao."""
-    if not settings.performance_contas_atendimento_api_enabled:
+    if not settings.cx_api_enabled:
         raise HTTPException(404, "Not Found")
 
 
 router = APIRouter(
-    prefix="/api/v1/performance-contas/atendimento",
-    tags=["performance-contas"],
+    prefix="/api/v1/cx",
+    tags=["cx"],
     dependencies=[Depends(exigir_flag)],
 )
 
@@ -56,8 +59,16 @@ def dias_query(
     return int(dias)
 
 
-@router.get("", response_model=AtendimentoResponse)
-@router.get("/", response_model=AtendimentoResponse, include_in_schema=False)
+@router.get("/shopee", response_model=CxShopeeResponse)
+def cx_shopee(
+    brands: Optional[list[str]] = Depends(brands_query),
+    dias: int = Depends(dias_query),
+):
+    """Chat (Saude da Conta) e cancelamentos/devolucoes da Shopee."""
+    return svc.montar_cx_shopee(brands=brands, dias=dias)
+
+
+@router.get("/atendimento", response_model=AtendimentoResponse)
 def atendimento(
     brands: Optional[list[str]] = Depends(brands_query),
     dias: int = Depends(dias_query),

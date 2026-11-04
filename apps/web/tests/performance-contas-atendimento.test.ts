@@ -102,10 +102,10 @@ test("dias fora da allowlist caem em 30", () => {
 test("url leva marca e janela", () => {
   assert.equal(
     urlAtendimento("http://api", { marca: "kokeshi", dias: 7 }),
-    "http://api/api/v1/performance-contas/atendimento?brands=kokeshi&dias=7",
+    "http://api/api/v1/cx/atendimento?brands=kokeshi&dias=7",
   );
   assert.equal(urlAtendimento("http://api", { marca: null, dias: 30 }),
-               "http://api/api/v1/performance-contas/atendimento?dias=30");
+               "http://api/api/v1/cx/atendimento?dias=30");
 });
 
 test("texto da janela", () => {
@@ -219,10 +219,10 @@ test("fetch: sucesso, status ruim, rede e json quebrado", async () => {
 // ---------------------------------------------------------------------------
 // Fiacao da pagina (leitura do fonte, como os demais testes de contrato)
 // ---------------------------------------------------------------------------
-test("pagina: aba so' com a flag e Atendimento por link com aria-current", () => {
-  const fonte = readFileSync(join(AQUI, "..", "app", "performance-contas", "page.tsx"), "utf-8");
-  assert.match(fonte, /atendimentoHabilitado\(\)/);
-  assert.match(fonte, /lerAba\(params, abaHabilitada\)/);
-  assert.match(fonte, /aria-current=\{ativa \? "page" : undefined\}/);
-  assert.match(fonte, /name="aba" value="atendimento"/);
+test("pagina: cancelamentos e devolucoes da Shopee vivem na aba CX (menu principal)", () => {
+  // 04/11/2026: a aba Atendimento saiu da Performance das contas e virou a aba CX.
+  const cx = readFileSync(join(AQUI, "..", "app", "cx", "page.tsx"), "utf-8");
+  assert.match(cx, /<AtendimentoCanal /);
+  const perf = readFileSync(join(AQUI, "..", "app", "performance-contas", "page.tsx"), "utf-8");
+  assert.doesNotMatch(perf, /atendimento/i);
 });

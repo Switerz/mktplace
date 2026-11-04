@@ -2,7 +2,7 @@ import Panel from "@/components/ui/Panel";
 import StateBlock from "@/components/ui/StateBlock";
 import type { VisaoCanalAtendimento, VisaoMotivos } from "@/lib/performance-contas-atendimento";
 
-import IndicadorItem from "./IndicadorItem";
+import IndicadorItem from "../performance-contas/IndicadorItem";
 
 /**
  * CX-MKT-1 — um canal da aba "Atendimento".

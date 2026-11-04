@@ -107,6 +107,7 @@ export default function NavList({ pathname, hrefFor, alvoAmplo = false, recolhid
           `undefined` no browser. */}
       {navSections({
         expedicao: expedicaoHabilitado(process.env.NEXT_PUBLIC_EXPEDICAO_ENABLED),
+        cx: true,
         shopeeFbs: shopeeFbsEnabled(),
         estoqueFull: estoqueFullEnabled(),
         mlFullEstoque: mlFullEstoqueEnabled(),

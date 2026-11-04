@@ -175,8 +175,18 @@ export const PERFORMANCE_CONTAS_NAV: NavPage = {
   label: "Performance das contas",
 };
 
+/**
+ * Aba CX (04/11/2026) — atendimento ao cliente nos marketplaces (chat,
+ * cancelamentos, devolucoes). Primeira versao so' Shopee. Fica em "Operações"
+ * logo depois da Expedicao. Rota de TOPO e nao prefixada por nenhuma rota
+ * existente (`isNavItemActive` casa por prefixo). Sem flag de web: a API
+ * (`cx_api_enabled`) ja' nasce ligada e a tela mostra erro se ela cair.
+ */
+export const CX_NAV: NavPage = { href: "/cx", label: "CX" };
+
 export interface NavFlags {
   expedicao?: boolean;
+  cx?: boolean;
   shopeeFbs?: boolean;
   estoqueFull?: boolean;
   mlFullEstoque?: boolean;
@@ -189,6 +199,7 @@ export function navSections(flags: NavFlags | boolean = {}): NavSection[] {
   const f: NavFlags = typeof flags === "boolean" ? { expedicao: flags } : flags;
   const extras: NavPage[] = [];
   if (f.expedicao) extras.push(EXPEDICAO_NAV);
+  if (f.cx) extras.push(CX_NAV);
   if (f.shopeeFbs) extras.push(SHOPEE_FBS_NAV);
   if (f.estoqueFull) extras.push(ESTOQUE_FULL_NAV);
   if (f.mlFullEstoque) extras.push(ML_FULL_ESTOQUE_NAV);
@@ -228,6 +239,7 @@ export function getRouteTitle(pathname: string): string {
   if (pathname.startsWith(ML_FULL_ESTOQUE_NAV.href)) return ML_FULL_ESTOQUE_NAV.label;
   // T-0014: idem -- quem esta' na rota passou pelo guard da pagina.
   if (pathname.startsWith(PERFORMANCE_CONTAS_NAV.href)) return PERFORMANCE_CONTAS_NAV.label;
+  if (pathname.startsWith(CX_NAV.href)) return CX_NAV.label;
   for (const section of navSections({ expedicao: true, shopeeFbs: true })) {
     for (const page of section.pages) {
       if (page.disabled) continue;

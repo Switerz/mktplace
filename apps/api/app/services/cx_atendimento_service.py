@@ -39,11 +39,11 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 
-from sqlalchemy import text
-
 from app.schemas.account_performance import Cobertura, Indicador, MarcaFora
 from app.schemas.cx_atendimento import (
     AtendimentoResponse,
+    ChatShopee,
+    CxShopeeResponse,
     BlocoMotivos,
     CanalAtendimento,
     Janela,
@@ -240,13 +240,11 @@ SELECT shop_account AS marca, COUNT(*) AS em_devolucao
 
 
 def consultar_datamart(sql: str, params: dict) -> list[dict]:
-    """Execucao real, somente leitura, no engine do Data Mart."""
-    from app.database import datamart_engine  # import tardio: testes injetam `consultar`
+    """Direto no Data Mart; se o banco recusar por permissao, pelo Metabase
+    (ver `datamart_leitura`, a mesma leitura da Performance oficial)."""
+    from app.services import datamart_leitura  # import tardio: testes injetam `consultar`
 
-    if datamart_engine is None:
-        raise RuntimeError("datamart indisponivel")
-    with datamart_engine.connect() as conn:
-        return [dict(r) for r in conn.execute(text(sql), params).mappings()]
+    return datamart_leitura.consultar(sql, params)
 
 
 def _rodar(consultar: Consultar, nome: str, sql: str, params: dict) -> Optional[list[dict]]:
@@ -548,4 +546,47 @@ def montar_atendimento(*, brands: Optional[list[str]] = None, dias: int = JANELA
             _canal_shopee(consultar, marcas, janela, agora),
             _canal_tiktok(marcas),
         ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Aba CX (menu principal) — primeira versao, so' Shopee (04/11/2026)
+# ---------------------------------------------------------------------------
+GRUPO_ATENDIMENTO = "Atendimento"
+
+
+def _chat_shopee(brands: Optional[list[str]], consultar: Consultar, agora: datetime) -> ChatShopee:
+    """Recorte de atendimento da Saude da Conta, a mesma leitura da Performance."""
+    from app.services import performance_oficial_service as po  # import tardio: evita ciclo
+
+    oficial = po.montar_performance_oficial(canal="shopee", brands=brands,
+                                            consultar=consultar, agora=agora)
+    contas = []
+    for conta in oficial.contas:
+        metricas = [m for m in conta.metricas if m.grupo == GRUPO_ATENDIMENTO]
+        fora = sum(1 for m in metricas if m.situacao == "fora")
+        contas.append(conta.model_copy(update={
+            "metricas": metricas,
+            "destaques": [],
+            "resumo": (f"{fora} métrica(s) de atendimento fora da meta" if fora
+                       else "Atendimento dentro da meta da Shopee"),
+            "tom": "atencao" if fora else "bom",
+        }))
+    return ChatShopee(estado=oficial.estado, motivo=oficial.motivo, fonte=oficial.fonte,
+                      contas=contas, sem_foto=oficial.sem_foto)
+
+
+def montar_cx_shopee(*, brands: Optional[list[str]] = None, dias: int = JANELA_PADRAO_DIAS,
+                     consultar: Optional[Consultar] = None,
+                     agora: Optional[datetime] = None) -> CxShopeeResponse:
+    """Aba CX: chat (Saude da Conta) + cancelamentos e devolucoes (pedidos)."""
+    agora = agora or datetime.now(timezone.utc)
+    consultar = consultar or consultar_datamart
+    marcas = [m for m in MARCAS_PERMITIDAS if brands is None or m in brands]
+    janela = calcular_janela(dias, agora)
+    return CxShopeeResponse(
+        gerado_em=agora,
+        janela=janela,
+        chat=_chat_shopee(brands, consultar, agora),
+        atendimento=_canal_shopee(consultar, marcas, janela, agora),
     )
