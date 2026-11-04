@@ -332,7 +332,7 @@ test("atraso 7 dias: % so' com o calculo publicado e base positiva", async () =>
   // EXPEDICAO-ABA-7D: na aba "Agora" o % dos vencidos e' a fatia da fila; o
   // destaque usa atrasados ÷ pedidos do Gerencial (7 dias).
   assert.match(CLIENTE, /pctVencidos: temPrazo \? percentualDaFila\(a\.overdue_count, a\.backlog_count\) : null/);
-  assert.match(CLIENTE, /percentualAtraso7d\(recorte\.totais\?\.late_7d_count, recorte\.totais\?\.orders_7d_count\)/);
+  assert.match(CLIENTE, /percentualAtraso7d\(recorte\.totais\?\.late_7d_count, recorte\.totais\?\.due_7d_count\)/);
   assert.match(CLIENTE, /taxaAtraso7d=\{taxaAtraso7d\}/);
 });
 
@@ -469,24 +469,27 @@ test("tabela por marca: zero vencidos agora ainda mostra a taxa de 7 dias", () =
 });
 
 
-test("aba Ultimos 7 dias: pedidos do Gerencial e % de cada medida sobre eles", async () => {
-  // EXPEDICAO-ABA-7D (03/11/2026).
+test("aba Ultimos 7 dias: % de cada medida sobre a base do LDR, nao sobre os pedidos", async () => {
+  // EXPEDICAO-ABA-7D (03/11/2026); base do LDR desde 04/11/2026.
   const { default: TabelaSeteDias } = await import("../src/components/expedicao/TabelaSeteDias.tsx");
   const html = renderToStaticMarkup(
     h(TabelaSeteDias, {
       linhas: [
-        { conta: "apice", titulo: "ÁPICE", pedidos: 3015, vencidos: 16, acima48h: 30, travados: 60 },
-        { conta: "x", titulo: "X", pedidos: null, vencidos: 2, acima48h: null, travados: null },
+        { conta: "apice", titulo: "ÁPICE", pedidos: 3205, baseLdr: 1187, vencidos: 18, acima48h: 30, travados: 60 },
+        { conta: "x", titulo: "X", pedidos: null, baseLdr: null, vencidos: 2, acima48h: null, travados: null },
       ],
-      total: { conta: "total", titulo: "Total do canal", pedidos: 3015, vencidos: 18, acima48h: 30, travados: 60 },
+      total: { conta: "total", titulo: "Total do canal", pedidos: 3205, baseLdr: 1187, vencidos: 18, acima48h: 30, travados: 60 },
       janela: "27/10 a 02/11",
       comTravados: true,
     }),
   );
   assert.match(html, /Pedidos feitos de 27\/10 a 02\/11/);
-  assert.match(html, /3\.015/);
-  assert.match(html, /0,5%/, "16 de 3.015");
-  assert.match(html, /1,0%/, "30 de 3.015");
+  assert.match(html, /3\.205/);
+  assert.match(html, /1\.187/);
+  assert.match(html, /Prazo vencido/);
+  assert.match(html, /1,5%/, "18 de 1.187, o mesmo do LDR");
+  assert.doesNotMatch(html, /0,6%/, "18 de 3.205 nao aparece mais");
+  assert.match(html, /2,5%/, "30 de 1.187");
   assert.doesNotMatch(html, /Perto de vencer/i);
   assert.match(html, /Total do canal/);
   const semTravados = renderToStaticMarkup(
