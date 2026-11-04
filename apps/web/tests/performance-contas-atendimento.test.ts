@@ -26,7 +26,7 @@ const AQUI = dirname(fileURLToPath(import.meta.url));
 
 function indicador(over: Record<string, unknown> = {}) {
   return {
-    codigo: "ml_taxa_reclamacao", rotulo: "Taxa de pedidos com reclamação", tipo: "torre",
+    codigo: "ml_taxa_cancelamento", rotulo: "Taxa de cancelamento", tipo: "torre",
     estado: "dado", valor: 3.2, unidade: "pct", janela: "30 dias", limiar: null,
     fonte: "Data Mart", atualizado_em: null, aviso_frescor: null, cobertura: null,
     ajuda: "ajuda", motivo_indisponivel: null, ...over,
@@ -56,10 +56,10 @@ function payload(): AtendimentoResponse {
         indicadores: [indicador() as never],
         motivos: motivos(),
         marcas: [
-          { marca: "kokeshi", pedidos: 28095, pedidos_com_reclamacao: 705, taxa_reclamacao_pct: 2.51,
-            cancelamentos: 1030, cancelamentos_comprador: null, em_devolucao: null },
-          { marca: "lescent", pedidos: null, pedidos_com_reclamacao: null, taxa_reclamacao_pct: null,
-            cancelamentos: null, cancelamentos_comprador: null, em_devolucao: null },
+          { marca: "kokeshi", pedidos: 28095, cancelamentos: 1030, taxa_cancelamento_pct: 3.67,
+            cancelamentos_comprador: null, em_devolucao: null },
+          { marca: "lescent", pedidos: null, cancelamentos: null, taxa_cancelamento_pct: null,
+            cancelamentos_comprador: null, em_devolucao: null },
         ],
         pendencias: [{ codigo: "ml_fila_acao", titulo: "Fila", motivo: "Depende da API." }],
         atualizado_em: null,
@@ -126,9 +126,9 @@ test("celula ausente e' travessao, zero medido e' 0", () => {
 test("marca sem dado sai com travessao em todas as colunas", () => {
   const [ml] = montarCanaisAtendimento(payload(), null, (m) => m.toUpperCase());
   const lescent = ml.linhas.find((l) => l.chave === "lescent")!;
-  assert.deepEqual(lescent.celulas, ["—", "—", "—", "—"]);
+  assert.deepEqual(lescent.celulas, ["—", "—", "—"]);
   const kokeshi = ml.linhas.find((l) => l.chave === "kokeshi")!;
-  assert.deepEqual(kokeshi.celulas, ["28.095", "705", "2,5%", "1.030"]);
+  assert.deepEqual(kokeshi.celulas, ["28.095", "1.030", "3,7%"]);
   assert.equal(ml.temAusente, true);
   const semAusencia = payload();
   semAusencia.canais[0].marcas = [semAusencia.canais[0].marcas[0]];

@@ -9,8 +9,8 @@ oficial; ausencia nunca vira zero).
 O QUE ESTA FATIA MOSTRA
 -----------------------
 So' o que ja' existe no Data Mart, sem ingestao nova:
-  * ML: pedidos com reclamacao (`mediations` do pedido) e cancelamentos por
-    motivo (`cancel_detail`);
+  * ML: cancelamentos, taxa e motivo (`cancel_detail`). Reclamacao NAO: a
+    taxa oficial vem da reputacao do ML (aba Performance);
   * Shopee: cancelamentos por motivo e por quem cancelou, e pedidos em
     devolucao agora (`to_return`).
 O resto da aba (fila de acao, motivo das reclamacoes, devolucoes do TikTok e
@@ -75,8 +75,7 @@ class LinhaMarca(BaseModel):
     """Uma linha marca x canal. Coluna ausente na fonte = None, nunca 0."""
     marca: str
     pedidos: Optional[int] = None
-    pedidos_com_reclamacao: Optional[int] = None
-    taxa_reclamacao_pct: Optional[float] = None
+    taxa_cancelamento_pct: Optional[float] = None
     cancelamentos: Optional[int] = None
     cancelamentos_comprador: Optional[int] = None
     em_devolucao: Optional[int] = None

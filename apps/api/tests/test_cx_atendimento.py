@@ -28,9 +28,9 @@ AGORA = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)  # 09:00 em Sao Paulo
 
 def _ml_marcas():
     return [
-        {"marca": "kokeshi", "pedidos": 1000, "com_reclamacao": 40, "cancelados": 30,
+        {"marca": "kokeshi", "pedidos": 1000, "cancelados": 30,
          "atualizado_em": datetime(2026, 11, 4, 11, 50)},
-        {"marca": "barbours", "pedidos": 500, "com_reclamacao": 10, "cancelados": 20,
+        {"marca": "barbours", "pedidos": 500, "cancelados": 20,
          "atualizado_em": datetime(2026, 11, 4, 11, 40)},
     ]
 
@@ -137,9 +137,18 @@ def test_parametros_das_consultas_respeitam_janela_e_cobertura():
 def test_ml_soma_marcas_e_calcula_taxa_torre():
     resp, _ = _montar()
     ml = _canal(resp, "mercado_livre")
-    assert _ind(ml, "ml_pedidos_com_reclamacao").valor == 50
-    assert _ind(ml, "ml_taxa_reclamacao").valor == pytest.approx(3.33, abs=0.01)
     assert _ind(ml, "ml_cancelamentos").valor == 50
+    assert _ind(ml, "ml_taxa_cancelamento").valor == pytest.approx(3.33, abs=0.01)
+    kokeshi = next(m for m in ml.marcas if m.marca == "kokeshi")
+    assert kokeshi.taxa_cancelamento_pct == pytest.approx(3.0)
+
+
+def test_ml_nao_publica_taxa_de_reclamacao_por_mediations():
+    """A contagem por `mediations` diverge da reputacao oficial (2,5% x 0,61%)."""
+    resp, _ = _montar()
+    ml = _canal(resp, "mercado_livre")
+    assert not any("reclamacao" in i.codigo for i in ml.indicadores)
+    assert "mediations" not in svc.SQL_ML_MARCAS
     assert all(i.tipo == "torre" and i.limiar is None for i in ml.indicadores)
     assert [c.marca for c in ml.cobertura.fora] == ["apice"]
 
@@ -148,8 +157,8 @@ def test_marca_sem_linha_na_fonte_fica_none_e_e_avisada_nunca_zero():
     resp, _ = _montar()
     ml = _canal(resp, "mercado_livre")
     lescent = next(m for m in ml.marcas if m.marca == "lescent")
-    assert lescent.pedidos is None and lescent.taxa_reclamacao_pct is None
-    assert "LESCENT" in _ind(ml, "ml_taxa_reclamacao").cobertura.upper()
+    assert lescent.pedidos is None and lescent.taxa_cancelamento_pct is None
+    assert "LESCENT" in _ind(ml, "ml_taxa_cancelamento").cobertura.upper()
 
 
 def test_motivo_ml_novo_aparece_sem_mapa_e_sem_motivo_nao_some():

@@ -96,9 +96,8 @@ export interface BlocoMotivos {
 export interface LinhaMarca {
   marca: string;
   pedidos: number | null;
-  pedidos_com_reclamacao: number | null;
-  taxa_reclamacao_pct: number | null;
   cancelamentos: number | null;
+  taxa_cancelamento_pct: number | null;
   cancelamentos_comprador: number | null;
   em_devolucao: number | null;
 }
@@ -132,8 +131,7 @@ export interface AtendimentoResponse {
 const NATUREZAS: readonly string[] = ["comprador", "reclamacao", "logistica", "vendedor", "plataforma"];
 const ESTADOS_BLOCO: readonly string[] = ["dado", "vazio_legitimo", "sem_fonte", "erro"];
 const CAMPOS_MARCA = [
-  "pedidos", "pedidos_com_reclamacao", "taxa_reclamacao_pct", "cancelamentos",
-  "cancelamentos_comprador", "em_devolucao",
+  "pedidos", "cancelamentos", "taxa_cancelamento_pct", "cancelamentos_comprador", "em_devolucao",
 ] as const;
 
 function numero(v: unknown): v is number {
@@ -289,13 +287,13 @@ export interface ColunaMarca {
 export const COLUNAS_POR_CANAL: Record<Canal, ColunaMarca[]> = {
   mercado_livre: [
     { campo: "pedidos", titulo: "Pedidos", unidade: "contagem" },
-    { campo: "pedidos_com_reclamacao", titulo: "Com reclamação", unidade: "contagem" },
-    { campo: "taxa_reclamacao_pct", titulo: "Taxa", unidade: "pct" },
     { campo: "cancelamentos", titulo: "Cancelamentos", unidade: "contagem" },
+    { campo: "taxa_cancelamento_pct", titulo: "Taxa", unidade: "pct" },
   ],
   shopee: [
     { campo: "pedidos", titulo: "Pedidos", unidade: "contagem" },
     { campo: "cancelamentos", titulo: "Cancelamentos", unidade: "contagem" },
+    { campo: "taxa_cancelamento_pct", titulo: "Taxa", unidade: "pct" },
     { campo: "cancelamentos_comprador", titulo: "Pelo comprador", unidade: "contagem" },
     { campo: "em_devolucao", titulo: "Em devolução agora", unidade: "contagem" },
   ],
