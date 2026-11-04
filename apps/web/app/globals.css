@@ -501,13 +501,22 @@ tbody tr:hover {
 
 /* Fundo: lavanda (claro) ou violeta profundo (escuro) com tres halos. Fixo
    na viewport, para nao "andar" com a rolagem. */
+/* UX-VIDRO-2: `--halo` regula a forca dos halos por tema. No claro os
+   cartoes cobrem quase toda a tela, entao o halo precisa ser mais forte para
+   aparecer nas bordas e tingir o vidro. */
+:root {
+  --halo: 1.45;
+}
+.dark {
+  --halo: 1;
+}
 .tc-fundo,
 .tc-tema-claro {
   background-color: rgb(var(--tc-canvas));
   background-image:
-    radial-gradient(60rem 40rem at 6% -12%, rgb(var(--tc-brilho-1) / 0.36), transparent 62%),
-    radial-gradient(52rem 36rem at 100% 0%, rgb(var(--tc-brilho-2) / 0.24), transparent 60%),
-    radial-gradient(46rem 32rem at 58% 112%, rgb(var(--tc-brilho-3) / 0.16), transparent 62%);
+    radial-gradient(64rem 44rem at 4% -14%, rgb(var(--tc-brilho-1) / calc(0.36 * var(--halo))), transparent 62%),
+    radial-gradient(56rem 38rem at 100% 0%, rgb(var(--tc-brilho-2) / calc(0.24 * var(--halo))), transparent 60%),
+    radial-gradient(48rem 34rem at 58% 112%, rgb(var(--tc-brilho-3) / calc(0.16 * var(--halo))), transparent 62%);
   background-attachment: fixed;
 }
 /* No tema claro a rota nao migrada ja' esta sobre o mesmo fundo: pintar de
@@ -519,7 +528,7 @@ html:not(.dark) .tc-fundo .tc-tema-claro {
 /* Cartao de vidro. */
 .tc-vidro,
 .rounded-xl.border.bg-surface {
-  background-color: rgb(var(--tc-vidro) / 0.74);
+  background-color: rgb(var(--tc-vidro) / 0.7);
   border-radius: 1rem;
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 0.55),
@@ -569,11 +578,13 @@ html:not(.dark) .tc-fundo .tc-tema-claro {
 
 /* Titulo da pagina: degrade violeta -> magenta. Fallback de cor solida para
    quem nao tem `background-clip: text` e para o modo de alto contraste. */
-.tc-titulo-pagina h2 {
+.tc-titulo-pagina h2,
+.tc-titulo-texto {
   color: rgb(var(--tc-titulo-1));
 }
 @supports (background-clip: text) or (-webkit-background-clip: text) {
-  .tc-titulo-pagina h2 {
+  .tc-titulo-pagina h2,
+  .tc-titulo-texto {
     background-image: linear-gradient(
       95deg,
       rgb(var(--tc-titulo-1)),
@@ -622,7 +633,8 @@ html:not(.dark) .tc-fundo .tc-tema-claro {
 }
 
 @media (forced-colors: active) {
-  .tc-titulo-pagina h2 {
+  .tc-titulo-pagina h2,
+  .tc-titulo-texto {
     background: none;
     color: CanvasText;
   }
@@ -631,4 +643,118 @@ html:not(.dark) .tc-fundo .tc-tema-claro {
     background: none;
     box-shadow: none;
   }
+}
+
+/* UX-VIDRO-2 — cartao de KPI com o brilho da propria identidade no canto,
+   alem da borda. A cor vem do token do KPI que o cartao ja' declara na borda
+   (`border-kpi-*`), entao nenhum componente precisa mudar. */
+[class*="border-kpi-gmv"] { --kpi-cor: var(--tc-kpi-gmv); }
+[class*="border-kpi-pedidos"] { --kpi-cor: var(--tc-kpi-pedidos); }
+[class*="border-kpi-ticket"] { --kpi-cor: var(--tc-kpi-ticket); }
+[class*="border-kpi-ads"] { --kpi-cor: var(--tc-kpi-ads); }
+[class*="border-kpi-roas"] { --kpi-cor: var(--tc-kpi-roas); }
+.rounded-xl.border.bg-surface[class*="border-kpi-"] {
+  background-image: radial-gradient(
+    16rem 11rem at 100% 100%,
+    rgb(var(--kpi-cor) / 0.16),
+    transparent 70%
+  );
+}
+.dark .rounded-xl.border.bg-surface[class*="border-kpi-"] {
+  background-image: radial-gradient(
+    16rem 11rem at 100% 100%,
+    rgb(var(--kpi-cor) / 0.22),
+    transparent 70%
+  );
+}
+
+/* UI-ALINHAMENTO-1 — tabela de numero + percentual (Backlog por marca).
+   O % ocupa largura fixa e alinha a' direita; a celula que NAO tem % reserva
+   o mesmo espaco. Assim o numero de todas as linhas cai na mesma vertical,
+   tenha a linha percentual ou nao. 1rem = o `pr-4` da celula. */
+.tc-tabela-num-pct .tc-pct {
+  display: inline-block;
+  min-width: 3.25rem;
+  margin-left: 0.375rem;
+  text-align: right;
+}
+.tc-tabela-num-pct td.tc-num-pct:not(:has(.tc-pct)) {
+  padding-right: calc(1rem + 0.375rem + 3.25rem);
+}
+/* O zero de Vencidos fica com o mesmo recuo da etiqueta vermelha (px-2),
+   para alinhar com os numeros que estao dentro dela. */
+.tc-tabela-num-pct .tc-vencido-zero {
+  padding-left: 0.5rem;
+  padding-right: 0.5rem;
+}
+.tc-tabela-num-pct .tc-vencido-zero .tc-pct {
+  margin-right: -0.5rem;
+}
+/* Variacao da tendencia: caixa de largura fixa ao lado do mini grafico, com
+   o absoluto e o % em colunas. */
+.tc-tabela-num-pct .tc-variacao {
+  display: inline-block;
+  min-width: 7.5rem;
+  text-align: right;
+}
+
+/* UX-VIDRO-4 — brilho no canto do cartao, na cor do TOM (risco) ou do
+   destaque (neutro). `--brilho-cor` vem da classe; o degrade so' pinta em
+   cartao de vidro. `tc-brilho-forte` e' o do cartao em destaque. */
+.tc-brilho-crit { --brilho-cor: var(--tc-crit); }
+.tc-brilho-warn { --brilho-cor: var(--tc-warn); }
+.tc-brilho-neutro { --brilho-cor: var(--tc-kpi-ticket); }
+.rounded-xl.border.bg-surface:is(.tc-brilho-crit, .tc-brilho-warn, .tc-brilho-neutro) {
+  background-image: radial-gradient(18rem 12rem at 100% 100%, rgb(var(--brilho-cor) / 0.16), transparent 70%);
+}
+.rounded-xl.border.bg-surface.tc-brilho-forte {
+  background-image: radial-gradient(30rem 20rem at 78% 22%, rgb(var(--brilho-cor) / 0.2), transparent 68%);
+}
+.dark .rounded-xl.border.bg-surface:is(.tc-brilho-crit, .tc-brilho-warn, .tc-brilho-neutro) {
+  background-image: radial-gradient(18rem 12rem at 100% 100%, rgb(var(--brilho-cor) / 0.22), transparent 70%);
+}
+.dark .rounded-xl.border.bg-surface.tc-brilho-forte {
+  background-image: radial-gradient(30rem 20rem at 78% 22%, rgb(var(--brilho-cor) / 0.26), transparent 68%);
+}
+
+/* UX-VIDRO-4 — tabela em FAIXAS (proposta aprovada): cada linha e' uma faixa
+   arredondada com fundo suave e 6px de respiro entre elas, em vez de linhas
+   finas. Vale para "Backlog por marca" (Agora e Ultimos 7 dias). */
+table.tc-tabela-linhas {
+  border-collapse: separate;
+  border-spacing: 0 6px;
+  margin-top: -6px;
+}
+.tc-tabela-linhas thead th {
+  padding-top: 0.25rem;
+  padding-bottom: 0.25rem;
+  font-weight: 600;
+}
+.tc-tabela-linhas tbody > tr > :is(td, th) {
+  background-color: rgb(var(--tc-accent) / 0.05);
+  padding-top: 0.625rem;
+  padding-bottom: 0.625rem;
+  transition: background-color var(--mov-rapido) var(--mov-ease);
+}
+.dark .tc-tabela-linhas tbody > tr > :is(td, th) {
+  background-color: rgb(255 255 255 / 0.04);
+}
+.tc-tabela-linhas tbody > tr > :first-child {
+  border-top-left-radius: 0.75rem;
+  border-bottom-left-radius: 0.75rem;
+  padding-left: 0.875rem;
+}
+.tc-tabela-linhas tbody > tr > :last-child {
+  border-top-right-radius: 0.75rem;
+  border-bottom-right-radius: 0.75rem;
+}
+.tc-tabela-linhas thead > tr > :first-child {
+  padding-left: 0.875rem;
+}
+.tc-tabela-linhas tbody > tr:hover > :is(td, th) {
+  background-color: rgb(var(--tc-accent) / 0.1);
+}
+/* Linha de total: faixa um tom acima, sem divisor. */
+.tc-tabela-linhas tbody > tr.tc-linha-total > :is(td, th) {
+  background-color: rgb(var(--tc-accent) / 0.1);
 }

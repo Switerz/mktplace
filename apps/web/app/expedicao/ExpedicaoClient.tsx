@@ -910,6 +910,7 @@ export default function ExpedicaoClient({
     return (
       <CartaoDeRisco
         key={k.chave}
+        chave={k.chave}
         rotulo={k.rotulo}
         ajuda={ajudaDaFila(k.chave)}
         valor={k.valorTexto ?? (k.valor === null ? "—" : numero(valor))}
@@ -1185,7 +1186,8 @@ export default function ExpedicaoClient({
           )}
         </div>
       }
-      rodape={legendaDaBarra}
+      // A legenda e' da barra de prazo, que so' existe na aba "Agora".
+      rodape={abaMarcas === "7d" ? undefined : legendaDaBarra}
     >
       {estadoTend === "carregando" && (
         <p role="status" className="mb-2 text-xs text-ink-muted">
