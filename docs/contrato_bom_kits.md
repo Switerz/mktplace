@@ -310,7 +310,7 @@ de motivos continuam os das seções 2 a 6, sem exceção.
 |---|---|---|
 | `protheus` (padrão) | `raw.protheus_kit_components` | comportamento anterior, inalterado |
 | `avoe` | só a da Avoe | diagnóstico isolado da fonte nova |
-| `ambas` | as duas | publicação: soma a Avoe ao que já existia |
+| `ambas` | por oferta: a da Avoe se ela resolve a oferta, senão a do Protheus | publicação: Avoe prioritária, Protheus como fallback |
 
 A publicação apaga e regrava o escopo `(marketplace, observed_date)`:
 `--apply --source avoe` **apagaria** as linhas derivadas do Protheus naquele
@@ -336,7 +336,7 @@ caminho é passado por `--secret-file` ou `AVOE_API_SECRET_FILE`; o valor nunca
 | vigência | sem datas na fonte: bordas abertas, `active = true` |
 | `sku_kit` inválido (vazio, espaço, apóstrofo) | kit recusado — medido: há kit cujo `sku_kit` é o nome |
 | mesma `(marca, sku_kit)` com composições diferentes | as duas recusadas |
-| oferta que alcança kit nas duas fontes | `AMBIGUOUS` pela regra da seção 3; não publica |
+| oferta que alcança kit nas duas fontes | **Avoe vence** (decisão do Mário). A escolha da fonte é feita por oferta em `montar_fontes`, **antes** do contrato, que então vê só uma BOM — nunca `AMBIGUOUS` entre fontes. Sobreposições contadas em `avoe_summary.precedencia` (`sobrepostas`, `identicas`, `divergentes`), com a lista das divergentes. A fonte de cada linha é o prefixo `AVOE:` de `kit_protheus_sku` (sem coluna nova, sem migration) |
 
 ### O que a Avoe **não** substitui
 

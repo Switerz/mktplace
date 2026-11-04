@@ -224,14 +224,9 @@ AVOE = [
 
 
 def _plano(dados):
-    return P.build_plan(
-        scope=P.Scope("tiktok", HOJE), offers=dados["offers"],
-        references=dados["references"], bom_rows=dados["bom_rows"],
-        catalog_rows=dados["catalog_rows"],
-        bridge_brand_code=dados["bridge_brand_code"],
-        bridge_alias=dados["bridge_alias"],
-        kit_brand_rows=dados["kit_brand_rows"], snapshot_id="snap-teste",
-        reference_captured_at=None, source_run_id="t", today=HOJE)
+    """O mesmo caminho de `publish`/`diagnose`: `planejar`, grupo a grupo."""
+    return P.planejar(dados, scope=P.Scope("tiktok", HOJE),
+                      source_run_id="t", today=HOJE)
 
 
 def _por_oferta(plano):
@@ -275,26 +270,73 @@ def test_avoe_resolve_pelo_contrato_e_bloqueia_com_motivo():
     assert dados["avoe_summary"]["kits_aceitos"] == 3
 
 
+def _ambas(dados):
+    return P.montar_fontes(dados, source="ambas", avoe_kits=AVOE, today=HOJE)
+
+
 def test_ambas_soma_as_duas_boms():
-    dados = P.montar_fontes(_dados_protheus(), source="ambas", avoe_kits=AVOE)
+    dados = _ambas(_dados_protheus())
     linhas = _por_oferta(_plano(dados))
     assert set(linhas) == {"O1", "O2", "O3", "O5"}
+    # So' na Avoe: entra pela Avoe.
+    assert linhas["O1"]["kit_protheus_sku"] == "AVOE:LESCENT:KIT001"
+    assert linhas["O3"]["kit_protheus_sku"] == "AVOE:LESCENT:KIT002"
+    # So' no Protheus: continua, com o mesmo valor do modo padrao.
     assert linhas["O5"]["kit_protheus_sku"] == "KPL0009"
     assert linhas["O5"]["kit_reference_amount"] == Decimal("19.00")
+    padrao = _por_oferta(_plano(_dados_protheus()))
+    assert linhas["O5"] == padrao["O5"]
+    prec = dados["avoe_summary"]["precedencia"]
+    assert prec["sobrepostas"] == 0
+    assert prec["ofertas_pela_avoe"] == 3      # O1, O2, O3
+    assert prec["ofertas_pelo_protheus"] == 2  # O4, O5
 
 
-def test_kit_nos_dois_lados_vira_ambiguo_e_nao_publica():
+def _protheus_tambem_tem_kit001(*composicao):
+    """O cadastro tambem leva (lescent, KIT001) a um kit Protheus."""
     dados = _dados_protheus()
-    # O cadastro tambem leva (lescent, KIT001) a um kit Protheus.
-    dados["bom_rows"].append({"kit_sku": "KPL0010", "component_sku": "PL0001",
-                              "qty_per_kit": 1, "valid_from": None,
-                              "valid_to": None, "active": True})
+    for comp, qtd in composicao:
+        dados["bom_rows"].append({"kit_sku": "KPL0010", "component_sku": comp,
+                                  "qty_per_kit": qtd, "valid_from": None,
+                                  "valid_to": None, "active": True})
     dados["bridge_brand_code"].append(
         {"brand": "lescent", "code": "KIT001", "protheus_sku": "KPL0010"})
     dados["kit_brand_rows"].append({"protheus_sku": "KPL0010", "brand": "lescent"})
-    plano = _plano(P.montar_fontes(dados, source="ambas", avoe_kits=AVOE))
-    assert "O1" not in _por_oferta(plano)
-    assert plano.summary["bridge_status"][kb.BRIDGE_AMBIGUOUS] == 1
+    return dados
+
+
+def test_nas_duas_fontes_identica_a_avoe_vence_e_publica():
+    dados = _ambas(_protheus_tambem_tem_kit001(("PL0001", 1), ("PL0002", 1)))
+    plano = _plano(dados)
+    o1 = _por_oferta(plano)["O1"]
+    assert o1["kit_protheus_sku"] == "AVOE:LESCENT:KIT001"
+    assert o1["status"] == "resolved"
+    assert o1["kit_reference_amount"] == Decimal("28.50")
+    assert kb.BRIDGE_AMBIGUOUS not in plano.summary["bridge_status"]
+    prec = dados["avoe_summary"]["precedencia"]
+    assert (prec["sobrepostas"], prec["identicas"], prec["divergentes"]) == (1, 1, 0)
+    assert prec["divergentes_lista"] == []
+
+
+def test_nas_duas_fontes_divergente_a_avoe_vence_e_e_listada():
+    # Protheus diz 2x PL0001; a Avoe diz PL0001 + PL0002.
+    dados = _ambas(_protheus_tambem_tem_kit001(("PL0001", 2)))
+    o1 = _por_oferta(_plano(dados))["O1"]
+    assert o1["kit_protheus_sku"] == "AVOE:LESCENT:KIT001"
+    assert o1["kit_reference_amount"] == Decimal("28.50")
+    prec = dados["avoe_summary"]["precedencia"]
+    assert (prec["sobrepostas"], prec["identicas"], prec["divergentes"]) == (1, 0, 1)
+    assert prec["divergentes_lista"] == [{
+        "offer_key": "O1", "brand": "lescent", "seller_sku": "KIT001",
+        "kit_avoe": "AVOE:LESCENT:KIT001", "kit_protheus": "KPL0010"}]
+
+
+def test_resumo_somado_dos_grupos_fecha_com_as_ofertas():
+    plano = _plano(_ambas(_dados_protheus()))
+    assert plano.summary["offers_in_photo"] == 5
+    assert plano.summary["kit_signal"] == 5
+    assert (plano.summary["published_resolved"]
+            + plano.summary["published_blocked"]) == len(plano.records) == 4
 
 
 @pytest.mark.parametrize("kits", [None, []])
