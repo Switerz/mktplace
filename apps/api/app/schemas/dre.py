@@ -38,6 +38,13 @@ class Componente(BaseModel):
     #: origem e instante da publicacao do lote usado.
     data_as_of: datetime | None = None
     publicado_em: datetime | None = None
+    #: So' CMV (T-0055 C3), opcionais e retrocompativeis. `cobertura` (0..1) =
+    #: receita com custo / receita fiscal, como publicada (NF fiscal, base de
+    #: item); `None` = nao publicada — nunca assumida 100%.
+    cobertura: float | None = None
+    #: CMV / receita COM custo x 100. Denominador diferente de `pct_receita`
+    #: (CMV / receita da DRE = GMV). `None` sem custo ou sem receita com custo.
+    cmv_pct_receita_coberta: float | None = None
 
 
 class Componentes(BaseModel):
@@ -200,7 +207,7 @@ class DREResponse(BaseModel):
     periodo: Periodo
     filtros: dict[str, list[str]]
     fontes: Fontes
-    regras: dict[str, int | str | list[float]]
+    regras: dict[str, int | float | str | list[float]]
     total: CelulaDRE | None = None
     por_canal: list[CelulaDRE]
     por_marca: list[CelulaDRE]

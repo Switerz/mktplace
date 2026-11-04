@@ -94,6 +94,11 @@ CMV_RAZAO_MIN = 0.95
 CMV_RAZAO_MAX = 1.05
 #: CMV integralmente provisorio = mes nao fechado na fonte fiscal (contrato §4.9).
 CMV_PROVISORIO_INTEGRAL = 0.995
+#: Cobertura minima do CMV (T-0055 C3): `cobertura` = receita com custo /
+#: receita fiscal, como o publisher grava. Abaixo dela o CMV sai `parcial`
+#: (fora da margem conhecida); o custo da parte descoberta NUNCA e' extrapolado.
+#: 0,98 e' RECOMENDACAO PENDENTE DE DECISAO DO MARIO (FASE1, decisao E1).
+COBERTURA_CMV_MINIMA = 0.98
 #: Residuo tolerado na identidade settlement = revenue + fee_and_tax + shipping.
 #: Medido: 0,00 em 758.324 transacoes (contrato §6.1, P1).
 RESIDUO_REPASSE_MAX = 1.0
@@ -242,7 +247,37 @@ def _comp(valor=None, status=INDISPONIVEL, motivo=None, fonte=None, somavel=True
     return {
         "valor": valor, "status": status, "motivo": motivo, "fonte": fonte,
         "somavel": somavel, "partes": partes, "data_as_of": data_as_of, "publicado_em": publicado_em,
+        # So' o CMV preenche (T-0055 C3); nos demais componentes ficam nulos.
+        "cobertura": None, "cmv_pct_receita_coberta": None,
     }
+
+
+def _pct_coberto(custo: float | None, receita_com_custo: float | None) -> float | None:
+    """CMV % sobre a receita COM custo: custo / receita_com_custo x 100.
+
+    Denominador proprio, diferente de `pct_receita` (custo / GMV). Nulo quando
+    falta o custo ou a receita com custo e' nula/zero — nunca 0%.
+    """
+    if custo is None or not receita_com_custo:
+        return None
+    return round(custo / receita_com_custo * 100, 2)
+
+
+def _com_cobertura(comp: dict, custo: float | None, receita_fiscal: float | None,
+                   cobertura: float | None) -> dict:
+    """Anexa a cobertura publicada e o CMV % sobre a receita com custo.
+
+    `receita_com_custo` = cobertura x receita fiscal (o publisher grava a razao,
+    nao a receita; erro de arredondamento <= 5e-7 x receita). As chaves `_...`
+    sao internas, para o agregado somar numerador e denominador; o contrato
+    Pydantic as descarta.
+    """
+    rcc = cobertura * receita_fiscal if (cobertura is not None and receita_fiscal is not None) else None
+    comp["cobertura"] = None if cobertura is None else round(cobertura, 6)
+    comp["cmv_pct_receita_coberta"] = _pct_coberto(custo, rcc)
+    comp["_receita_fiscal"] = receita_fiscal
+    comp["_receita_com_custo"] = rcc
+    return comp
 
 
 def _bloqueio_do_insumo(insumo: dict | None, motivo_sem: str, fonte: str, somavel: bool = True) -> dict | None:
@@ -494,24 +529,39 @@ def _cmv(ins: InsumosCelula, receita: float | None, avisos: list[str]) -> dict:
     custo = _num(c["custo"])
     if custo < 0:
         return _comp(status=SINAL_INESPERADO, motivo="CMV negativo", **meta)
+    receita_fiscal = _num(c.get("receita_fiscal"))
+    cobertura = _num(c.get("cobertura"))
+
+    def comp(status, motivo=None) -> dict:
+        # Cobertura e CMV % coberto acompanham TODO estado com custo conhecido.
+        return _com_cobertura(_comp(valor=custo, status=status, motivo=motivo, **meta),
+                              custo, receita_fiscal, cobertura)
+
     if c["status"] != "reconciliado":
-        return _comp(valor=custo, status=NAO_RECONCILIADO, motivo=f"publicacao: {c['motivo']} (pergunta F1/F7)", **meta)
+        return comp(NAO_RECONCILIADO, f"publicacao: {c['motivo']} (pergunta F1/F7)")
     # A publicacao reconciliou contra o GMV DAQUELE instante. O GMV pode ter
     # mudado desde entao: a razao e' conferida de novo com o valor de agora.
-    receita_fiscal = _num(c.get("receita_fiscal"))
     razao = (receita_fiscal / receita) if receita and receita_fiscal is not None else None
     if razao is None or not (CMV_RAZAO_MIN <= razao <= CMV_RAZAO_MAX):
         txt = "sem receita para comparar" if razao is None else f"razao receita fiscal / GMV atual = {razao:.3f}"
-        return _comp(valor=custo, status=NAO_RECONCILIADO,
-                     motivo=f"{txt}; aceito entre {CMV_RAZAO_MIN} e {CMV_RAZAO_MAX} (pergunta F1/F7)", **meta)
+        return comp(NAO_RECONCILIADO, f"{txt}; aceito entre {CMV_RAZAO_MIN} e {CMV_RAZAO_MAX} (pergunta F1/F7)")
     share = _num(c.get("provisorio_share")) or 0.0
     if share >= CMV_PROVISORIO_INTEGRAL:
-        return _comp(valor=custo, status=PROVISORIO,
-                     motivo="CMV integralmente provisorio: mes nao fechado na fonte fiscal (pergunta F2)", **meta)
+        return comp(PROVISORIO, "CMV integralmente provisorio: mes nao fechado na fonte fiscal (pergunta F2)")
     if share > 0:
         avisos.append(f"{share * 100:.0f}% do CMV ainda e' provisorio na fonte fiscal.")
     avisos.append(f"CMV fiscal reconciliado: receita fiscal / GMV = {razao:.3f}.")
-    return _comp(valor=custo, status=DISPONIVEL, **meta)
+    # Cobertura (T-0055 C3): receita sem custo NAO tem custo zero. Abaixo do
+    # minimo o CMV fica fora da margem conhecida, sem extrapolar a parte
+    # descoberta. Cobertura nao publicada mantem o estado de antes (nao e'
+    # tratada como 100%): o campo sai nulo e um aviso diz por que.
+    if cobertura is None:
+        avisos.append("Cobertura do CMV nao publicada: CMV % sobre a receita com custo indisponivel.")
+    elif cobertura < COBERTURA_CMV_MINIMA:
+        return comp(COBERTURA_PARCIAL,
+                    f"CMV cobre {cobertura * 100:.2f}% da receita fiscal (minimo {COBERTURA_CMV_MINIMA * 100:.0f}%); "
+                    "custo ausente nao e' zero nem e' extrapolado")
+    return comp(DISPONIVEL)
 
 
 # ---------------------------------------------------------------------------
@@ -574,6 +624,21 @@ def _finalizar(celula: dict, agregado: dict | None = None) -> dict:
     return celula
 
 
+def _cobertura_agregada(destino: dict, partes: list[dict]) -> None:
+    """Cobertura e CMV % coberto de um agregado: razao das SOMAS, nunca media de razoes.
+
+    So' sai quando TODA celula aplicavel tem custo, receita fiscal e cobertura;
+    senao fica nula — uma celula sem cobertura nao vira 100% nem e' ignorada.
+    """
+    if not partes or any(p["valor"] is None or p.get("_receita_fiscal") is None
+                         or p.get("_receita_com_custo") is None for p in partes):
+        return
+    receita_fiscal = sum(p["_receita_fiscal"] for p in partes)
+    receita_com_custo = sum(p["_receita_com_custo"] for p in partes)
+    destino["cobertura"] = round(receita_com_custo / receita_fiscal, 6) if receita_fiscal else None
+    destino["cmv_pct_receita_coberta"] = _pct_coberto(sum(p["valor"] for p in partes), receita_com_custo)
+
+
 _ORDEM_PIOR = {NAO_CALCULAVEL: 0, PARCIAL: 1, COMPLETA: 2}
 
 
@@ -622,6 +687,8 @@ def agregar(celulas: list[dict], **chave) -> dict | None:
         for chave_data in ("data_as_of", "publicado_em"):
             datas = [p[chave_data] for p, _ in aplic if p.get(chave_data) is not None]
             comps[nome][chave_data] = min(datas) if datas else None
+        if nome == "cmv":
+            _cobertura_agregada(comps[nome], [p for p, _ in aplic])
     rec_status = {c["componentes"]["receita"]["status"] for c in celulas}
     comps["receita"] = _comp(valor=receita_total, status=DISPONIVEL if rec_status == {DISPONIVEL} else COBERTURA_PARCIAL,
                              somavel=False)
@@ -779,7 +846,8 @@ def indexar_insumos(linhas: list[dict], agora: datetime) -> tuple[dict, dict]:
             cmv[k] = {
                 "_estado": estado, "_motivo": motivo,
                 "custo": c["valor"], "receita_fiscal": rf.get("valor"), "sinal": c["sinal_origem"],
-                "provisorio_share": c["provisorio_share"], "status": c["status_reconciliacao"],
+                "provisorio_share": c["provisorio_share"], "cobertura": c.get("cobertura"),
+                "status": c["status_reconciliacao"],
                 "motivo": c["motivo"], "data_as_of": c["data_max_origem"], "publicado_em": c["publicado_em"],
                 "lote_id": c["lote_id"],
             }
@@ -942,6 +1010,9 @@ def montar_dre(
             "maturacao_meses": MESES_MATURACAO,
             "insumo_idade_maxima_horas": int(INSUMO_IDADE_MAXIMA.total_seconds() // 3600),
             "cmv_razao_aceita": [CMV_RAZAO_MIN, CMV_RAZAO_MAX],
+            "cmv_cobertura_minima": COBERTURA_CMV_MINIMA,
+            "cmv_pct_receita_coberta": "CMV / receita com custo; cobertura = receita com custo / receita fiscal "
+                                       "(NF fiscal, base de item). pct_receita do CMV segue CMV / receita (GMV)",
             "afiliado_tiktok": "decomposicao de taxas; nunca somado",
             "rotulo_margem": ROTULO_MARGEM,
             "rotulo_margem_estimada": dre_premissas.ROTULO_MARGEM_ESTIMADA,

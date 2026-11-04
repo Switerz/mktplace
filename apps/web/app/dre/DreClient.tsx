@@ -42,6 +42,7 @@ import DreVertical, { type OpcaoRecorte } from "@/components/dre/DreVertical";
 import DreCanais from "@/components/dre/DreCanais";
 import { DreMarcaCanalMatriz, DreMarcasTabela } from "@/components/dre/DreMarcas";
 import BotaoRecorteCalculavel from "@/components/dre/BotaoRecorteCalculavel";
+import CmvCobertura from "./CmvCobertura";
 import Segmented from "@/components/ui/Segmented";
 import {
   ComparacaoCenarios,
@@ -149,6 +150,8 @@ export default function DreClient() {
       })),
     ];
   }, [resp]);
+  // Mesmo recorte que a DRE vertical exibe (ela cai no primeiro se o valor sumiu).
+  const recorteAtual = opcoes.find((o) => o.valor === recorte) ?? opcoes[0];
 
   const atualizadoEm = resp?.total?.data_maxima.mart_carregado_em ?? null;
   const receitaAte = resp?.total?.data_maxima.receita_ultimo_dia ?? null;
@@ -285,6 +288,8 @@ export default function DreClient() {
           <DreCanais canais={resp.por_canal} total={resp.total} />
 
           <DreVertical opcoes={opcoes} selecionado={recorte} aoEscolher={setRecorte} />
+          {/* T-0055 C3: cobertura do CMV do MESMO recorte da DRE vertical. */}
+          {recorteAtual && <CmvCobertura celula={recorteAtual.celula} rotulo={recorteAtual.rotulo} />}
 
           <DreMarcasTabela
             marcas={resp.por_marca}
