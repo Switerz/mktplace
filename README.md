@@ -108,8 +108,8 @@ Observacao: o backend FastAPI e os pipelines Python nao ficam hospedados automat
 
 ### Publicacao atual (producao)
 
-- URL canonica (endereco operacional da Torre): `https://mktplace-gobeaute.vercel.app`
-- `https://mktplace-blond.vercel.app` e apenas um alias que redireciona (HTTP 307) para o dominio canonico.
+- URL canonica (endereco operacional da Torre): `https://mktplace-ten.vercel.app`
+- `https://mktplace-gobeaute.vercel.app` e `https://mktplace-blond.vercel.app` sao enderecos antigos: hoje respondem HTTP 402 (`DEPLOYMENT_DISABLED`) e nao devem ser usados.
 - As URLs efemeras de deployment da Vercel (padrao `mktplace-<hash>-...vercel.app`) NAO sao o endereco da Torre: alem de serem descartaveis, ficam atras do SSO da Vercel e nao constam na allowlist de CORS do backend, o que faz a Torre cair em modo demonstracao/offline nelas. Use sempre o dominio canonico.
 - `NEXT_PUBLIC_API_URL` deve apontar para o backend publico (FastAPI em `mktplace-api.onrender.com`), nunca para `localhost`/IP local.
-- O CORS do backend precisa autorizar o dominio canonico (`Access-Control-Allow-Origin: https://mktplace-gobeaute.vercel.app`); sem isso o frontend publicado nao consegue consumir a API e exibe o fallback offline.
+- O CORS do backend precisa autorizar o dominio canonico (`Access-Control-Allow-Origin: https://mktplace-ten.vercel.app`); sem isso o frontend publicado nao consegue consumir a API e exibe o fallback offline.
