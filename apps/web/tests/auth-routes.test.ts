@@ -159,3 +159,26 @@ test("me: sem sessao ou sessao invalida -> 401 com clientId", async () => {
     assertNoStore(res);
   }
 });
+
+test("login: content-type text/plain -> 415 sem cookie (anti login-CSRF)", async () => {
+  const req = new Request("http://x/api/auth/google", {
+    method: "POST",
+    headers: { "content-type": "text/plain" },
+    body: JSON.stringify({ credential: "x" }),
+  });
+  const res = await handleGoogleLogin(req, ENV);
+  assert.equal(res.status, 415);
+  assert.deepEqual(await res.json(), { error: "content_type_invalido" });
+  assertNoStore(res);
+  assert.equal(res.headers.get("set-cookie"), null);
+});
+
+test("login: application/json; charset=utf-8 segue o fluxo normal", async () => {
+  const req = new Request("http://x/api/auth/google", {
+    method: "POST",
+    headers: { "content-type": "Application/JSON; charset=utf-8" },
+    body: JSON.stringify({}),
+  });
+  const res = await handleGoogleLogin(req, ENV);
+  assert.equal(res.status, 400); // passou do content-type; falta credential
+});

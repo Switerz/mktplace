@@ -33,6 +33,11 @@ export async function handleGoogleLogin(
 ): Promise<Response> {
   if (!authEnabled(env)) return json({ error: "auth_desligada" }, 404);
 
+  // Anti login-CSRF: um form cross-site so consegue text/plain, nunca application/json.
+  if (!/^application\/json\s*(;|$)/i.test(req.headers.get("content-type") ?? "")) {
+    return json({ error: "content_type_invalido" }, 415);
+  }
+
   const body: unknown = await req.json().catch(() => null);
   const credential =
     body && typeof body === "object" && typeof (body as { credential?: unknown }).credential === "string"

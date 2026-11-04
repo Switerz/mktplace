@@ -177,3 +177,9 @@ def test_segredo_com_quebra_de_linha_e_aparado(monkeypatch):
     c = _cfg(monkeypatch, segredo="s" * 32 + "\n", chave=CHAVE + " ")
     assert c.get("/api/v1/x", cookies={"torre_session": tok()}).json() == {"ator": "joao@gocase.com"}
     assert c.get("/api/v1/x", headers={"x-torre-service-key": CHAVE}).json() == {"ator": "servico:oraculo-mcp"}
+
+
+def test_main_cors_expoe_x_torre_auth():
+    from app.main import app
+    cors = next(m for m in app.user_middleware if m.cls.__name__ == "CORSMiddleware")
+    assert "X-Torre-Auth" in cors.kwargs["expose_headers"]
