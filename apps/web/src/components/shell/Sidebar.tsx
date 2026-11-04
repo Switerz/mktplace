@@ -4,6 +4,7 @@ import { Suspense, useEffect, useState } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import ThemeToggle from "@/components/theme/ThemeToggle";
+import ContaUsuario from "@/components/auth/ContaUsuario";
 import { buildPreservedQuery, hrefForPage } from "@/lib/filters/nav-links";
 import NavList from "./NavList";
 
@@ -172,9 +173,13 @@ function SidebarInner() {
         <div className="border-t border-shell-line px-2 py-2.5">
           <div className={soAberta}>
             <ThemeToggle variante="shell" />
+            <div className="mt-2">
+              <ContaUsuario />
+            </div>
           </div>
           <div className={soRecolhida}>
             <ThemeToggle variante="shell" ciclico />
+            <ContaUsuario compacto />
           </div>
         </div>
       </div>

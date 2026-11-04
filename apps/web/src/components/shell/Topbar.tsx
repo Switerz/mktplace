@@ -4,6 +4,7 @@ import { usePathname } from "next/navigation";
 import type { RefObject } from "react";
 import { Menu } from "lucide-react";
 import ThemeToggle from "@/components/theme/ThemeToggle";
+import ContaUsuario from "@/components/auth/ContaUsuario";
 import { getRouteTitle } from "./nav-config";
 
 interface TopbarProps {
@@ -61,8 +62,9 @@ export default function Topbar({ open, onToggleMenu, menuButtonRef }: TopbarProp
           <p className="truncate text-xs text-shell-muted">{routeTitle}</p>
         </div>
 
-        <div className="ml-auto flex shrink-0 items-center">
+        <div className="ml-auto flex shrink-0 items-center gap-1">
           <ThemeToggle variante="shell" ciclico />
+          <ContaUsuario compacto />
         </div>
       </div>
     </header>

@@ -229,6 +229,7 @@ export async function handleMcpRequest(
     handler = createMcpHandler(() =>
       buildOracleServer({
         backendBaseUrl: decision.backendBaseUrl,
+        serviceKey: decision.backendServiceKey,
         fetchImpl: opts.fetchImpl,
       }),
     );

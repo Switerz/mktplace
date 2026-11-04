@@ -488,6 +488,11 @@ export function montarCanais(
  * `b2b-revenda.ts`): `NEXT_PUBLIC_API_URL`, com o mesmo fallback local.
  * `api-client.ts` nao exporta a constante, por isso ela e' repetida aqui.
  */
+// LIMITACAO: este fetch roda em server component. Com NEXT_PUBLIC_API_URL=/torre-api
+// (caminho relativo) nao resolve no servidor, e sob TORRE_AUTH_MODE=enforce a API
+// responderia 401 (sem cookie de sessao). Nao dar chave de servico ao SSR: isso
+// deixaria render anonimo ler dados. Manter a flag desligada ate a pagina buscar
+// pelo navegador (torreFetch) ou repassar o cookie de sessao.
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
 export const ROTA_API = "/api/v1/performance-contas";

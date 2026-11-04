@@ -229,3 +229,32 @@ test("negacao nao dispara NENHUMA chamada upstream", async () => {
   assert.equal(decision.allowed, false);
   assert.equal(calls, 0, "producao negada nao pode tocar o backend");
 });
+
+// ---------------------------------------------------------------------------
+// Chave de servico do backend (AUTH-GOOGLE-7)
+// ---------------------------------------------------------------------------
+
+test("MCP_BACKEND_SERVICE_KEY preenchida vira backendServiceKey na decisao", () => {
+  const key = "k".repeat(32);
+  const d = evaluateAccess({
+    NODE_ENV: "development",
+    ORACLE_MCP_ENABLED: "1",
+    MCP_BACKEND_API_URL: OK_URL,
+    MCP_BACKEND_SERVICE_KEY: `  ${key}\n`,
+  });
+  assert.equal(d.allowed, true);
+  assert.equal(d.allowed && d.backendServiceKey, key);
+});
+
+test("MCP_BACKEND_SERVICE_KEY vazia, so espacos ou ausente -> undefined", () => {
+  for (const v of [undefined, "", "   \n"]) {
+    const d = evaluateAccess({
+      NODE_ENV: "development",
+      ORACLE_MCP_ENABLED: "1",
+      MCP_BACKEND_API_URL: OK_URL,
+      MCP_BACKEND_SERVICE_KEY: v,
+    });
+    assert.equal(d.allowed, true);
+    assert.equal(d.allowed && d.backendServiceKey, undefined);
+  }
+});

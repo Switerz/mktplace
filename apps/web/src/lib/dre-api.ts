@@ -8,6 +8,7 @@
  * A URL da requisicao sai de `dreApiUrl`, a mesma funcao que escreve a barra
  * de endereco (ver `dreQuery`).
  */
+import { torreFetch } from "./torre-fetch.ts";
 import {
   classificarFalha,
   dreApiUrl,
@@ -32,7 +33,7 @@ export class DreErro extends Error {
 export async function fetchDre(filtros: DreFiltros, signal?: AbortSignal): Promise<DreResponse> {
   let res: Response;
   try {
-    res = await fetch(dreApiUrl(API_URL, filtros), { signal });
+    res = await torreFetch(dreApiUrl(API_URL, filtros), { signal });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;
     throw new DreErro(classificarFalha(null, null));

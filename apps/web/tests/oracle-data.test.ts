@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 
 import { buildOracleServer } from "../src/server/oracle/server.ts";
+import { TorreClient } from "../src/server/oracle/torre-client.ts";
 import { SlidingWindowRateLimiter } from "../src/server/oracle/rate-limit.ts";
 import {
   BRANDS, CANAIS, FIXED_NOW, HEALTH, jsonFetch, OVERVIEW, PRODUTOS_ML,
@@ -443,4 +444,68 @@ test("produtos do ML declaram escopo cumulativo e recusam filtro de mes", async 
     arguments: { canal: "ml", mes: "2026-07" },
   });
   assert.equal(res.isError, true);
+});
+
+// ---------------------------------------------------------------------------
+// Chave de servico (AUTH-GOOGLE-7): o MCP chama a API sem cookie de usuario.
+// ---------------------------------------------------------------------------
+
+const SERVICE_KEY = "k".repeat(32);
+
+function capturingFetch(status = 200) {
+  const seen: Array<Record<string, string>> = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    seen.push({ ...(init?.headers as Record<string, string>) });
+    return new Response("{}", {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+  return { seen, fetchImpl };
+}
+
+test("TorreClient envia x-torre-service-key quando serviceKey esta definida", async () => {
+  const { seen, fetchImpl } = capturingFetch();
+  const client = new TorreClient({
+    baseUrl: "https://mktplace-api.onrender.com",
+    serviceKey: SERVICE_KEY,
+    fetchImpl,
+  });
+  await client.get("overview");
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]["x-torre-service-key"], SERVICE_KEY);
+  assert.equal(seen[0].accept, "application/json");
+});
+
+test("TorreClient sem serviceKey (ou so com espacos) nao envia header extra", async () => {
+  for (const serviceKey of [undefined, "", "   "]) {
+    const { seen, fetchImpl } = capturingFetch();
+    const client = new TorreClient({
+      baseUrl: "https://mktplace-api.onrender.com",
+      serviceKey,
+      fetchImpl,
+    });
+    await client.get("overview");
+    assert.deepEqual(Object.keys(seen[0]), ["accept"]);
+  }
+});
+
+test("a chave de servico nunca aparece nos erros do TorreClient", async () => {
+  const leaky = (async () => {
+    throw new Error(`falha com ${SERVICE_KEY}`);
+  }) as typeof fetch;
+  for (const fetchImpl of [leaky, capturingFetch(401).fetchImpl, capturingFetch(500).fetchImpl]) {
+    const client = new TorreClient({
+      baseUrl: "https://mktplace-api.onrender.com",
+      serviceKey: SERVICE_KEY,
+      fetchImpl,
+    });
+    await assert.rejects(client.get("overview"), (err: unknown) => {
+      const e = err as Error;
+      assert.ok(!JSON.stringify(e).includes(SERVICE_KEY));
+      assert.ok(!String(e.message).includes(SERVICE_KEY));
+      assert.ok(!String(e.stack).includes(SERVICE_KEY));
+      return true;
+    });
+  }
 });
