@@ -152,7 +152,7 @@ export default function NavList({ pathname, hrefFor, alvoAmplo = false, recolhid
                   recolhido ? "justify-center px-0" : "gap-2.5 px-2.5"
                 } ${
                   active
-                    ? "bg-shell-active text-shell-ink"
+                    ? "tc-nav-ativo bg-shell-active text-shell-ink"
                     : "text-shell-muted hover:bg-shell-raised hover:text-shell-ink"
                 }`}
               >

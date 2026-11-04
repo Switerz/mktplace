@@ -23,7 +23,7 @@
     color-scheme: light;
 
     /* superficies */
-    --tc-canvas: 247 246 251; /* fundo da pagina — lavanda quase branco */
+    --tc-canvas: 241 237 252; /* fundo da pagina — lavanda (UX-VIDRO-1: um tom acima, para os halos) */
     --tc-surface: 255 255 255; /* cartao */
     --tc-raised: 244 242 251; /* superficie elevada / faixa interna */
     --tc-line: 231 227 245; /* borda padrao */
@@ -92,18 +92,34 @@
     --tc-shell-faint: 134 130 176;
     --tc-shell-accent: 167 139 250;
     --tc-shell-active: 44 34 96;
+
+    /* UX-VIDRO-1 — a camada de vidro. `vidro` e' a base do cartao fosco (o
+       alfa vem da regra `.tc-vidro`), `vidro-borda` a borda de 1px que separa
+       o vidro do fundo, `brilho-*` os tres halos do fundo da pagina e
+       `titulo-*` as tres paradas do degrade do titulo. Tudo em canais RGB,
+       como os demais tokens. */
+    --tc-vidro: 255 255 255;
+    --tc-vidro-borda: 124 58 237;
+    --tc-brilho-1: 167 139 250;
+    --tc-brilho-2: 240 171 252;
+    --tc-brilho-3: 103 232 249;
+    --tc-titulo-1: 91 33 182;
+    --tc-titulo-2: 126 34 206;
+    --tc-titulo-3: 162 28 175;
   }
 
   .dark {
     color-scheme: dark;
 
     /* Violeta profundo, nao carvao: a Torre rejeita o cinza generico de BI
-       tambem no escuro. */
-    --tc-canvas: 14 11 24;
-    --tc-surface: 23 19 39;
-    --tc-raised: 31 26 51;
-    --tc-line: 44 37 68;
-    --tc-line-strong: 61 52 89;
+       tambem no escuro. UX-VIDRO-1 puxou o campo para um violeta mais
+       saturado, que e' o que faz o vidro e os halos aparecerem. Contraste
+       medido sobre --tc-surface: faint 5,4:1 · muted 8,0:1 · ink 15:1. */
+    --tc-canvas: 13 8 34;
+    --tc-surface: 30 21 64;
+    --tc-raised: 41 30 82;
+    --tc-line: 56 44 98;
+    --tc-line-strong: 76 62 128;
 
     --tc-ink: 242 239 250; /* 15,3:1 sobre --tc-surface */
     --tc-muted: 184 176 208; /*  8,4:1 sobre --tc-surface */
@@ -152,6 +168,15 @@
     --tc-shell-faint: 138 130 170;
     --tc-shell-accent: 167 139 250;
     --tc-shell-active: 38 30 78;
+
+    --tc-vidro: 34 24 74;
+    --tc-vidro-borda: 196 181 253;
+    --tc-brilho-1: 124 58 237;
+    --tc-brilho-2: 192 38 211;
+    --tc-brilho-3: 56 189 248;
+    --tc-titulo-1: 237 233 254;
+    --tc-titulo-2: 196 181 253;
+    --tc-titulo-3: 240 171 252;
   }
 
   /* Rotas ainda nao migradas para os tokens (ver docs/design-system-torre.md):
@@ -193,11 +218,13 @@
   @media (hover: hover) {
     .card-hover:hover {
       transform: translateY(-2px);
-      /* Preto nos DOIS temas: a cor de texto e' quase branca no escuro e, como
-         sombra, virava um halo claro em volta do card. */
+      /* Nunca a cor do TEXTO (quase branca no escuro, virava halo claro).
+         UX-VIDRO-1: a sombra leva o violeta do destaque — e' o brilho que diz
+         "este cartao abre" — sobre uma base preta que segura o volume. */
       box-shadow:
+        0 18px 36px -18px rgb(var(--tc-accent) / 0.45),
         0 12px 24px -14px rgb(0 0 0 / 0.35),
-        0 2px 6px rgb(0 0 0 / 0.08);
+        0 2px 6px rgb(0 0 0 / 0.06);
     }
     .card-hover:active {
       transform: translateY(0);
@@ -454,5 +481,154 @@ tbody tr:hover {
   .tc-revela,
   .tc-ping {
     animation: none !important;
+  }
+}
+
+/* ===========================================================================
+ * UX-VIDRO-1 — a Torre em vidro violeta.
+ *
+ * Tres camadas: um FUNDO com halos de luz, CARTOES de vidro fosco por cima
+ * e uma MOLDURA escura com brilho na lateral. O degrade e o brilho ficam so'
+ * no que esta selecionado ou identifica a tela (item ativo do menu, marca,
+ * titulo da pagina, sombra do hover); dado nunca ganha degrade.
+ *
+ * As regras ficam FORA de `@layer` de proposito: precisam vencer as
+ * utilidades (`bg-surface`, `md:bg-shell`) que os componentes ja' declaram,
+ * sem reescrever cinquenta arquivos. O seletor composto
+ * `.rounded-xl.border.bg-surface` e' o "cartao" da Torre (Panel, StatCard,
+ * cartao da Gerencial) e nao pega campo, botao nem celula.
+ * ======================================================================== */
+
+/* Fundo: lavanda (claro) ou violeta profundo (escuro) com tres halos. Fixo
+   na viewport, para nao "andar" com a rolagem. */
+.tc-fundo,
+.tc-tema-claro {
+  background-color: rgb(var(--tc-canvas));
+  background-image:
+    radial-gradient(60rem 40rem at 6% -12%, rgb(var(--tc-brilho-1) / 0.36), transparent 62%),
+    radial-gradient(52rem 36rem at 100% 0%, rgb(var(--tc-brilho-2) / 0.24), transparent 60%),
+    radial-gradient(46rem 32rem at 58% 112%, rgb(var(--tc-brilho-3) / 0.16), transparent 62%);
+  background-attachment: fixed;
+}
+/* No tema claro a rota nao migrada ja' esta sobre o mesmo fundo: pintar de
+   novo dobraria os halos. */
+html:not(.dark) .tc-fundo .tc-tema-claro {
+  background: transparent;
+}
+
+/* Cartao de vidro. */
+.tc-vidro,
+.rounded-xl.border.bg-surface {
+  background-color: rgb(var(--tc-vidro) / 0.74);
+  border-radius: 1rem;
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.55),
+    0 1px 2px rgb(49 24 110 / 0.05),
+    0 14px 34px -20px rgb(76 29 149 / 0.3);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  backdrop-filter: blur(18px) saturate(150%);
+}
+.dark .tc-vidro,
+.dark .rounded-xl.border.bg-surface {
+  background-color: rgb(var(--tc-vidro) / 0.62);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.06),
+    0 18px 40px -20px rgb(0 0 0 / 0.6);
+}
+/* So' a borda NEUTRA vira a borda do vidro; a borda de identidade do KPI
+   (`border-kpi-*`) e a de estado continuam como estao. */
+.tc-vidro,
+.rounded-xl.border.border-line.bg-surface {
+  border-color: rgb(var(--tc-vidro-borda) / 0.16);
+}
+.dark .tc-vidro,
+.dark .rounded-xl.border.border-line.bg-surface {
+  border-color: rgb(var(--tc-vidro-borda) / 0.18);
+}
+/* Menu flutuante e dialogo leem SOBRE conteudo: vidro quase opaco, para o
+   texto de baixo nao vazar na leitura. */
+.rounded-xl.border.bg-surface[class*="shadow-"],
+[role="dialog"].bg-surface,
+[role="dialog"] > .rounded-xl.border.bg-surface {
+  background-color: rgb(var(--tc-surface) / 0.96);
+}
+/* Sem suporte a blur, o vidro translucido ficaria lavado: volta a opaco. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .tc-vidro,
+  .rounded-xl.border.bg-surface {
+    background-color: rgb(var(--tc-surface));
+  }
+}
+
+/* Barra fixa de filtros e de cabecalho: vidro fino que deixa o halo passar. */
+.tc-barra-vidro {
+  background-color: rgb(var(--tc-canvas) / 0.62);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  backdrop-filter: blur(20px) saturate(150%);
+}
+
+/* Titulo da pagina: degrade violeta -> magenta. Fallback de cor solida para
+   quem nao tem `background-clip: text` e para o modo de alto contraste. */
+.tc-titulo-pagina h2 {
+  color: rgb(var(--tc-titulo-1));
+}
+@supports (background-clip: text) or (-webkit-background-clip: text) {
+  .tc-titulo-pagina h2 {
+    background-image: linear-gradient(
+      95deg,
+      rgb(var(--tc-titulo-1)),
+      rgb(var(--tc-titulo-2)) 55%,
+      rgb(var(--tc-titulo-3))
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    letter-spacing: -0.015em;
+  }
+}
+
+/* Moldura: o navy ganha profundidade (degrau de cima para baixo) e um halo
+   violeta no canto da marca. */
+.tc-shell-fundo {
+  background-color: rgb(var(--tc-shell));
+  background-image:
+    radial-gradient(26rem 18rem at 0% 0%, rgb(124 58 237 / 0.32), transparent 70%),
+    linear-gradient(180deg, rgb(var(--tc-shell-raised)), rgb(var(--tc-shell)));
+}
+
+/* Marca "TC": degrade da marca com brilho. Branco nos dois temas, porque o
+   fundo e' o mesmo degrade escuro nos dois. */
+.tc-marca {
+  background-image: linear-gradient(135deg, rgb(139 92 246), rgb(192 38 211));
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.2),
+    0 6px 18px -4px rgb(168 85 247 / 0.7);
+}
+.tc-marca span {
+  color: rgb(255 255 255);
+}
+
+/* Item ativo do menu: pilula em degrade com brilho. Os tres sinais do
+   UX-TORRE-B2B-1 continuam (superficie, tinta clara, barra a esquerda). */
+.tc-nav-ativo {
+  background-image: linear-gradient(90deg, rgb(139 92 246 / 0.95), rgb(167 139 250 / 0.72));
+  color: rgb(255 255 255);
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.16),
+    0 8px 22px -8px rgb(139 92 246 / 0.85);
+}
+.tc-nav-ativo svg {
+  color: rgb(255 255 255);
+}
+
+@media (forced-colors: active) {
+  .tc-titulo-pagina h2 {
+    background: none;
+    color: CanvasText;
+  }
+  .tc-nav-ativo,
+  .tc-marca {
+    background: none;
+    box-shadow: none;
   }
 }

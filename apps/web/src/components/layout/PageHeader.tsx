@@ -76,7 +76,8 @@ export default function PageHeader({ title, subtitle, icon: Icon, meta, scopeLin
                 <Icon className="h-5 w-5" strokeWidth={1.75} />
               </span>
             )}
-            <div className="min-w-0">
+            {/* UX-VIDRO-1: `tc-titulo-pagina` pinta o degrade no <h2> por CSS. */}
+            <div className="tc-titulo-pagina min-w-0">
               <h2 className="text-xl font-bold text-ink">{title}</h2>
               {subtitle && <p className="text-sm text-ink-muted">{subtitle}</p>}
               {!meta && scopeLine && <p className="text-xs text-ink-muted mt-0.5 tabular-nums">{scopeLine}</p>}
@@ -97,7 +98,7 @@ export default function PageHeader({ title, subtitle, icon: Icon, meta, scopeLin
         // leitura. `z-30` fica abaixo do dialogo (portalizado no body) e acima
         // de todo o conteudo da pagina. UX-TORRE-2: fundo em token, que
         // acompanha o tema (e volta ao claro nas rotas ainda nao migradas).
-        <div className="sticky top-0 z-30 -mx-4 px-4 py-2 bg-canvas/95 backdrop-blur supports-[backdrop-filter]:bg-canvas/80 border-b border-line">
+        <div className="sticky top-0 z-30 -mx-4 px-4 py-2 tc-barra-vidro border-b border-line">
           <div className="flex items-start justify-between gap-3 flex-wrap">{filters}</div>
         </div>
       )}

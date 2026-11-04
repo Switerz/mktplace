@@ -118,12 +118,12 @@ function SidebarInner() {
     // Duas camadas de proposito: a EXTERNA estica com o flex do shell e pinta
     // a faixa ate o rodape; a INTERNA gruda no topo e rola sozinha.
     <aside
-      className={`hidden md:block md:shrink-0 md:border-r md:border-shell-line md:bg-shell ${animar ? "transition-[width] duration-200" : ""} ${largura}`}
+      className={`tc-shell-fundo hidden md:block md:shrink-0 md:border-r md:border-shell-line md:bg-shell ${animar ? "transition-[width] duration-200" : ""} ${largura}`}
     >
       <div className="sticky top-0 flex h-screen flex-col">
         {/* Identidade + botao de recolher */}
         <div className="flex items-center gap-2.5 border-b border-shell-line px-3 py-3">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent">
+          <div className="tc-marca flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent">
             <span className="text-xs font-bold tracking-tight text-accent-on">TC</span>
           </div>
           <div className={`min-w-0 flex-1 ${soAberta}`}>
