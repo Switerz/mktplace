@@ -13,8 +13,9 @@
  * LACUNA e a linha se interrompe — nunca e' costurado como se houvesse dado.
  */
 import {
-  Area,
+  Bar,
   CartesianGrid,
+  Cell,
   ComposedChart,
   Line,
   ResponsiveContainer,
@@ -177,6 +178,11 @@ export default function EvolutionChart({
   const dim = (channel: Marketplace) => isolating && channel !== highlightedChannel;
   // SVG nao le classe de token: a cor resolvida vem da paleta do tema.
   const tema = temaDoGrafico(useTema().resolvido);
+  // UX-VIDRO-5: o dia de hoje ainda esta' em andamento — a barra dele sai
+  // listrada, para nao ser lida como um dia fechado mais fraco.
+  const hoje = new Date();
+  const hojeIso = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, "0")}-${String(hoje.getDate()).padStart(2, "0")}`;
+  const parcial = (b: MergedBucket) => b.date === hojeIso;
 
   return (
     <ResponsiveContainer width="100%" height="100%">
@@ -191,6 +197,16 @@ export default function EvolutionChart({
           if (point?.date) onSelectBucket(point.date);
         }}
       >
+        <defs>
+          <linearGradient id="evolucao-barra" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stopColor={tema.barraTopo} />
+            <stop offset="1" stopColor={tema.barraBase} />
+          </linearGradient>
+          <pattern id="evolucao-parcial" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <rect width="8" height="8" fill={tema.barraTopo} />
+            <rect width="4" height="8" fill={tema.barraParcial} fillOpacity={0.55} />
+          </pattern>
+        </defs>
         <CartesianGrid strokeDasharray="3 3" stroke={tema.grade} vertical={false} />
         <XAxis
           dataKey="label"
@@ -211,40 +227,31 @@ export default function EvolutionChart({
           width={metric === "gmv" ? 78 : 56}
         />
         <Tooltip
+          cursor={{ fill: tema.grade, fillOpacity: 0.5 }}
           content={
             <ChartTooltip metric={metric} showTotal={showTotal} showComparisonTotal={showComparisonTotal} />
           }
         />
-        {/* UI-DENSIDADE-1: o TOTAL e' a leitura principal — area suave por baixo
-            da linha mais grossa. Canais ficam finos e claros, de apoio. */}
+        {/* UX-VIDRO-5 (proposta aprovada): o TOTAL e' a leitura principal e
+            vira BARRA arredondada em degrade violeta; o dia em andamento sai
+            listrado. Isolar um canal recua o total (`isolating`), como antes.
+            Bucket sem total (lacuna) nao desenha barra nenhuma. */}
         {showTotal && (
-          <Area animationDuration={450} animationEasing="ease-out"
-            type="monotone"
+          <Bar
             dataKey="total"
             name="Total"
-            fill={tema.total}
-            fillOpacity={isolating ? 0.03 : 0.12}
+            fill="url(#evolucao-barra)"
+            fillOpacity={isolating ? 0.18 : 1}
             stroke="none"
-            activeDot={false}
-            legendType="none"
-            tooltipType="none"
-            connectNulls={false}
-            isAnimationActive={false}
-          />
-        )}
-        {showTotal && (
-          <Line animationDuration={450} animationEasing="ease-out"
-            type="monotone"
-            dataKey="total"
-            name="Total"
-            stroke={tema.total}
-            strokeWidth={2.75}
             strokeOpacity={isolating ? 0.18 : 1}
-            dot={false}
-            activeDot={{ r: 4 }}
-            connectNulls={false}
+            radius={[10, 10, 6, 6]}
+            maxBarSize={56}
             isAnimationActive={false}
-          />
+          >
+            {buckets.map((b) => (
+              <Cell key={b.date} fill={parcial(b) ? "url(#evolucao-parcial)" : "url(#evolucao-barra)"} />
+            ))}
+          </Bar>
         )}
         {/* Periodo anterior: UMA linha (o total), tracejada e neutra. Fica atras
             das series atuais na ordem de render e nao concorre com a leitura
@@ -273,10 +280,11 @@ export default function EvolutionChart({
             stroke={tema.canais[channel]}
             strokeWidth={dim(channel) ? 1 : isolating ? 2.5 : showTotal ? 1.25 : 2}
             strokeOpacity={dim(channel) ? 0.2 : 1}
-            // De apoio quando o total aparece: fino, solido e mais claro.
-            opacity={!isolating && showTotal ? 0.55 : 1}
+            // UX-VIDRO-5: com as barras do total, os canais saem da tela (o
+            // mix aparece no tooltip) e voltam ao isolar um canal na legenda.
+            opacity={!isolating && showTotal ? 0 : 1}
             dot={false}
-            activeDot={{ r: 4 }}
+            activeDot={!isolating && showTotal ? false : { r: 4 }}
             // Lacuna interrompe a linha: nunca costura buckets ausentes.
             connectNulls={false}
             isAnimationActive={false}

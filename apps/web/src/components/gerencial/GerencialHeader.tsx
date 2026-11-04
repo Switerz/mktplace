@@ -34,7 +34,7 @@ export default function GerencialHeader({ periodLabel, refreshedAt, live, loadin
       {/* `-mx-4 -mt-4` + `px-4`: a barra sangra ate a borda do container (que
           tem 16px de respiro) e cola no topo sem faixa acima. Fundo em token,
           quase opaco, para o conteudo passar por baixo sem vazar leitura. */}
-      <div className="sticky top-0 z-30 -mx-4 -mt-4 px-4 py-1.5 bg-canvas/95 backdrop-blur supports-[backdrop-filter]:bg-canvas/80 border-b border-line">
+      <div className="sticky top-0 z-30 -mx-4 -mt-4 px-4 py-1.5 tc-barra-vidro border-b border-line">
         <div className="flex items-center justify-between gap-x-3 gap-y-1.5 flex-wrap">
           <h1 className="flex shrink-0 items-center gap-2 text-lg font-bold text-ink">
             <span
@@ -43,7 +43,8 @@ export default function GerencialHeader({ periodLabel, refreshedAt, live, loadin
             >
               <LayoutDashboard className="h-4 w-4" strokeWidth={1.75} />
             </span>
-            Visão Gerencial
+            {/* UX-VIDRO-2: o degrade fica no texto, nao no <h1> inteiro (o icone tem fundo proprio). */}
+            <span className="tc-titulo-texto">Visão Gerencial</span>
             <span className="sr-only"> · {periodLabel}</span>
           </h1>
           <div className="flex min-w-0 flex-1 items-start gap-x-3 gap-y-1.5 flex-wrap">{children}</div>
