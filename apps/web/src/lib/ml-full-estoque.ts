@@ -11,6 +11,12 @@
  * `fmtOpcional`; `0` medido continua "0". Quando ha' ausencia no escopo, o
  * total e' rotulado PARCIAL com os motivos que a API enviou.
  *
+ * "SEM ESTOQUE FULL" NAO E' AUSENCIA (T-0051)
+ * -------------------------------------------
+ * `marcas[].estado = "sem_estoque_full"`: fotografia publicada com 0
+ * inventarios. E' zero MEDIDO, conta 0 no total e nao o torna parcial.
+ * Estado desconhecido e' erro de contrato (`validarPayloadML`), nunca zero.
+ *
  * GRAO: INVENTARIO
  * ----------------
  * Estoque aparece uma vez por inventario. `anuncios` e' contagem de
@@ -106,9 +112,22 @@ export interface Leitura {
   inventarios_sem_leitura: number;
 }
 
+/**
+ * Estado da marca (T-0051). Dominio FECHADO, espelhando `EstadoMarca` da API.
+ * Ausencia (sem fotografia no dia) NAO e' um estado daqui: e' `null`.
+ *   - "com_inventario"   -> ha' inventario; disponivel 0 = "saldo disponivel 0"
+ *   - "sem_estoque_full" -> fotografia publicada com 0 inventarios: zero medido
+ */
+export const ESTADOS_MARCA_ML = ["com_inventario", "sem_estoque_full"] as const;
+export type EstadoMarcaML = (typeof ESTADOS_MARCA_ML)[number];
+
+export const ROTULO_SEM_ESTOQUE_FULL_ML = "Sem estoque Full";
+
 export interface MarcaML {
   brand: string;
   tem_fotografia_no_dia: boolean;
+  /** `null` = sem fotografia no dia (ausencia). Normalizado por `validarPayloadML`. */
+  estado: EstadoMarcaML | null;
   ultima_fotografia: string | null;
   published_at: string | null;
   inventarios: number | null;
@@ -208,6 +227,88 @@ export function isIndisponivelML(
   p: MLFullEstoqueResponse,
 ): p is MLFullEstoqueIndisponivel {
   return p.status === "unavailable";
+}
+
+// ---------------------------------------------------------------------------
+// Contrato do estado da marca (T-0051)
+// ---------------------------------------------------------------------------
+
+/** Payload fora do contrato: a tela mostra erro, nunca um numero escolhido. */
+export class ContratoMLError extends Error {
+  constructor() {
+    super(
+      "A API devolveu um estado de marca fora do contrato. Os números não " +
+        "foram exibidos — isto não significa estoque zero.",
+    );
+    this.name = "ContratoMLError";
+  }
+}
+
+function estadoValidado(m: MarcaML): EstadoMarcaML | null {
+  const bruto: unknown = (m as { estado?: unknown }).estado;
+  // API anterior a' T-0051 nao manda o campo. Ela nunca publicava "sem
+  // estoque Full" (respondia 503), entao com fotografia = com inventario.
+  if (bruto === undefined) return m.tem_fotografia_no_dia ? "com_inventario" : null;
+  if (bruto === null) {
+    if (m.tem_fotografia_no_dia) throw new ContratoMLError();
+    return null;
+  }
+  if (!(ESTADOS_MARCA_ML as readonly unknown[]).includes(bruto)) {
+    throw new ContratoMLError();
+  }
+  const estado = bruto as EstadoMarcaML;
+  if (!m.tem_fotografia_no_dia) throw new ContratoMLError();
+  // "Sem estoque Full" e' zero MEDIDO: fonte sem numero nao vira zero aqui.
+  if (estado === "sem_estoque_full" && m.disponivel_full !== 0) {
+    throw new ContratoMLError();
+  }
+  return estado;
+}
+
+/**
+ * Valida e normaliza `marcas[].estado`. Estado desconhecido, ou incoerente com
+ * a fotografia, levanta `ContratoMLError` -- nunca vira zero nem ausencia.
+ */
+export function validarPayloadML(p: MLFullEstoqueResponse): MLFullEstoqueResponse {
+  if (isIndisponivelML(p)) return p;
+  return { ...p, marcas: p.marcas.map((m) => ({ ...m, estado: estadoValidado(m) })) };
+}
+
+export type EstadoExibicaoMarcaML = EstadoMarcaML | "sem_fotografia";
+
+export function estadoExibicaoMarcaML(m: MarcaML): EstadoExibicaoMarcaML {
+  return m.estado === null ? "sem_fotografia" : m.estado;
+}
+
+/**
+ * Estado 2: ha' inventario, so' o disponivel e' 0. O fisico nao disponivel
+ * aparece junto, para nao parecer que nao ha' estoque nenhum.
+ */
+export function subtextoSaldoZeroML(m: MarcaML): string | null {
+  if (m.estado !== "com_inventario" || m.disponivel_full !== 0) return null;
+  return m.nao_disponivel_full === null
+    ? "saldo disponível 0"
+    : `saldo disponível 0 · ${fmtInt(m.nao_disponivel_full)} não disponível`;
+}
+
+export function marcasSemEstoqueFullML(marcas: MarcaML[]): string[] {
+  return marcas.filter((m) => m.estado === "sem_estoque_full").map((m) => m.brand);
+}
+
+/** Todas as marcas do escopo publicadas com 0 inventarios (nenhuma ausente). */
+export function todasSemEstoqueFullML(marcas: MarcaML[]): boolean {
+  return marcas.length > 0 && marcas.every((m) => m.estado === "sem_estoque_full");
+}
+
+/** Subtitulo do card "Disponivel Full". Parcial sempre vence. */
+export function subvalorDisponivelTotalML(args: {
+  parcial: boolean;
+  marcas: MarcaML[];
+  inventariosFullLidos: number;
+}): string {
+  if (args.parcial) return PREFIXO_PARCIAL_ML;
+  if (todasSemEstoqueFullML(args.marcas)) return ROTULO_SEM_ESTOQUE_FULL_ML;
+  return `${fmtInt(args.inventariosFullLidos)} inventários Full lidos`;
 }
 
 export const TITULO_INDISPONIVEL_ML: Record<MotivoIndisponivelML, string> = {
@@ -326,8 +427,16 @@ export function textoVazioML(args: {
   refDate: string;
   inventarios: number;
   filtroAtivo: boolean;
+  /** Todas as marcas do escopo em "sem estoque Full" (ver `todasSemEstoqueFullML`). */
+  semEstoqueFull?: boolean;
 }): string {
   const dia = fmtData(args.refDate);
+  if (args.semEstoqueFull && args.inventarios === 0) {
+    return (
+      `${ROTULO_SEM_ESTOQUE_FULL_ML} na fotografia de ${dia}: a leitura ` +
+      "terminou sem nenhum inventário."
+    );
+  }
   if (args.filtroAtivo) {
     return (
       `A fotografia de ${dia} tem ${fmtInt(args.inventarios)} inventários; ` +
