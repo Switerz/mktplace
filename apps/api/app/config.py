@@ -183,6 +183,11 @@ class Settings(BaseSettings):
     # (`NEXT_PUBLIC_PERFORMANCE_CONTAS_ENABLED`).
     performance_contas_api_enabled: bool = Field(default=False)
 
+    # CX-MKT-2 — secao "Performance" da Expedicao (`/api/v1/expedicao/performance`):
+    # nota OFICIAL de cada conta (reputacao ML, Saude da Conta Shopee), lida das
+    # fotografias diarias no Data Mart. Nasce desligada (404 antes de consultar).
+    expedicao_performance_api_enabled: bool = Field(default=False)
+
     # ------------------------------------------------------------------
     # Gate TORRE-B2B-OCTAPRICE — revendedores B2B x PMA do OctaPrice
     # ------------------------------------------------------------------

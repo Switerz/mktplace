@@ -423,6 +423,7 @@ export default function ExpedicaoClient({
   aoTrocarVisao,
   marca,
   aoTrocarMarca,
+  faixaTopo,
 }: {
   /** Canal da fila ja' sanitizado pela casca (flag do ML aplicada la'). */
   canal: Canal;
@@ -432,6 +433,8 @@ export default function ExpedicaoClient({
   /** EXPEDICAO-UX-3: marca escolhida na casca (`?marca=`), ou nenhuma. */
   marca?: string | null;
   aoTrocarMarca?: (m: string | null) => void;
+  /** CX-MKT-3: faixa de LDR da casca, repassada ao esqueleto. */
+  faixaTopo?: ReactNode;
 }) {
   const marcaAtiva = marca ?? null;
   // A casca so' monta este componente depois de ler a URL, entao o canal da
@@ -1597,6 +1600,7 @@ export default function ExpedicaoClient({
       aoFechar={() => setAlvoTravados(null)}
     />
     <LayoutExpedicao
+      destaque={faixaTopo}
       // 1-2. CABECALHO, FOTOGRAFIA, FRESCOR E FILTROS (compartilhado). O canal
       // fica NO TITULO, nao so' no seletor: numeros de uma loja sob o titulo de
       // outra foi o defeito que o EXP-3C2-R/V corrigiu.
