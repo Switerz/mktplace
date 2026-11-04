@@ -40,7 +40,7 @@ As vendas seguem o mesmo contrato do `sync_ml_fulfillment_daily`:
 
 | Situação | Como chega ao mart (029) | API | Tela | Total |
 |---|---|---|---|---|
-| **Sem estoque Full**: a enumeração foi completa e deu zero | Linha em `fact_ml_full_stock_brand_daily` com `inventarios = 0`, `inventarios_full_lidos = 0`, `inventarios_compartilhados = 0`, `disponivel_full`, `nao_disponivel_full` e `transfer_full` **NULL**, `source_run_id` não vazio e `published_at` presente. **Nenhuma** linha em `fact_ml_full_stock_inventory_daily` no dia. | `estado = "sem_estoque_full"`, `tem_fotografia_no_dia = true`, `disponivel_full = 0` (e não disponível e transferência 0). A marca fica em `marcas_com_fotografia`. | "Sem estoque Full", em tom neutro | Conta 0 e **não** torna o total parcial |
+| **Sem estoque Full**: a enumeração foi completa e deu zero | Linha em `fact_ml_full_stock_brand_daily` com `inventarios = 0`, `inventarios_full_lidos = 0`, `inventarios_compartilhados = 0`, `disponivel_full`, `nao_disponivel_full` e `transfer_full` **NULL**, `source_run_id` não vazio e `published_at` presente. **Nenhuma** linha em `fact_ml_full_stock_inventory_daily` nem em `fact_ml_full_stock_status_daily` no dia. Não há `captured_at`. O 0 da API vem da regra de contrato, não da coluna, que continua NULL. | `estado = "sem_estoque_full"`, `tem_fotografia_no_dia = true`, `disponivel_full = 0` (e não disponível e transferência 0). A marca fica em `marcas_com_fotografia`. | "Sem estoque Full", em tom neutro | Conta 0 e **não** torna o total parcial |
 | **Saldo disponível 0**: há inventário, mas nada disponível | Linhas de inventário com `disponivel = 0`; na marca, `disponivel_full = 0` e `inventarios_full_lidos > 0` | `estado = "com_inventario"`, `disponivel_full = 0` e `nao_disponivel_full` medido | "0" com "saldo disponível 0 · N não disponível" | Soma normal |
 | **Ausência ou falha**: não coletada, não publicada ou stale | Nenhuma linha da marca no dia | `estado = null`, números `null`; a marca fica em `cobertura.marcas_sem_fotografia` | "—" e chip âmbar | **Parcial** |
 
@@ -53,7 +53,7 @@ As vendas seguem o mesmo contrato do `sync_ml_fulfillment_daily`:
   - `source_run_id` e `published_at` são NOT NULL.
 - Toda outra divergência entre marca e inventário continua sendo **contrato quebrado (503)**. Exemplos:
   - a marca diz N > 0 inventários e não há nenhuma linha;
-  - a marca diz 0 e há linhas;
+  - a marca diz 0 e há linhas de inventário ou de status;
   - a marca diz 0, mas tem lidos, compartilhados ou alguma quantidade preenchida (inclusive 0 em vez de NULL);
   - a marca diz 0 e não tem linhagem.
 - **Total do escopo:**
