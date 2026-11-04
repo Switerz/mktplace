@@ -3,7 +3,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import readiness
-from app.routers import account_performance, b2b_revenda, dre, expedicao, metas, performance, regioes
+from app.routers import (
+    account_performance,
+    alertas,
+    b2b_revenda,
+    dre,
+    expedicao,
+    metas,
+    performance,
+    regioes,
+)
 
 app = FastAPI(
     title="Torre de Controle de Marketplaces — GoBeauté",
@@ -29,6 +38,7 @@ app.include_router(b2b_revenda.router)
 # `performance_contas_api_enabled` estiver desligada (padrao).
 app.include_router(account_performance.router)
 app.include_router(metas.router)
+app.include_router(alertas.router)
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])

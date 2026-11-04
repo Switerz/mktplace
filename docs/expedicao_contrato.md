@@ -34,7 +34,7 @@ permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
 | MCP | nao iniciado |
 | ML / TikTok / calendario | fora deste gate |
 | Airflow | **ATIVO desde 21/10/2026** — DAG `marketplace_tower_expedicao_refresh`, a cada 2 h, tres canais (a API ainda nao reflete: ver pendencia do modo de publicacao) |
-| Alerta de vencidos da Shopee no Slack | **implementado** (EXPEDICAO-ALERTA-VENCIDOS-1), falta o agendamento no Airflow — ver a secao propria |
+| Alerta de vencidos da Shopee no Slack | **implementado** (EXPEDICAO-ALERTA-VENCIDOS-1): rota na API + gatilho no GoDeploy a cada 15 min, sem Airflow — ver a secao propria |
 
 A `018` e' a proxima revisao linear depois da `017` (PMA). Cadeia: `001 -> ... ->
 016 -> 017 -> 018`, raiz unica, head unico.
@@ -1631,45 +1631,99 @@ consultar o banco.
 
 ## Alerta de vencidos da Shopee no Slack (EXPEDICAO-ALERTA-VENCIDOS-1, 03/11/2026)
 
-`python -m pipelines.expedicao.alerta_vencidos --enviar` le a fila servida no
-Neon (read-only) e manda, por DM do bot "Torre" (app do Slack em
-`infra/slack/torre-bot`), um aviso quando a razao
-`overdue_count / backlog_count` da **Shopee** passa de **3%** — a mesma razao
-do "% vencidos" da tabela por marca, sobre o resumo por conta do lote servido.
-A mensagem traz o %, "N de M", o instante da fotografia, as marcas acima de 3%
-e o link da aba.
+A API avisa, por DM do bot "Torre" (app do Slack em `infra/slack/torre-bot`),
+quando a razao `overdue_count / backlog_count` da **Shopee** passa de **3%** —
+a mesma razao do "% vencidos" da tabela por marca, sobre o resumo por conta do
+lote servido. A mensagem traz o %, "N de M", o instante da fotografia, as
+marcas acima de 3% e o link da aba.
 
 Substitui o alerta de travados (EXPEDICAO-ALERTA-TRAVADOS-1, 29/10/2026, nunca
 agendado): os travados ficaram acima de 3% em todas as leituras de 21 a
 29/10/2026 e o alerta viraria ruido. **So' a Shopee**: o Mercado Livre nao
 publica prazo de despacho (`vencido` = `null`), entao precisa de regra propria.
 
+### Como roda (sem Airflow)
+
+```
+GoDeploy, app torre-alerta-gatilho: cron */15 * * * * (UTC)
+  -> POST /cron/alerta-vencidos   (confere a assinatura X-Godeploy-Cron)
+  -> POST https://mktplace-api.onrender.com/api/v1/alertas/expedicao-vencidos
+       header X-Alerta-Token
+  -> app/services/alerta_vencidos.py (regra) + app/services/slack_dm.py (DM)
+```
+
+O agendamento ficou fora do Airflow de proposito: a DAG vive em outro
+repositorio (`goca-se/airflow`), e o alerta nao precisa de nada da publicacao
+alem do que ja' esta' no Neon. A regra era um CLI em `pipelines/` e mudou para
+`apps/api` porque a API do Render sobe so' `apps/api`. O gatilho
+(`infra/godeploy/torre-alerta-gatilho`) nao tem regra nenhuma: so' repassa.
+
+### Regra
+
 - **Quando avisa:** ao passar de 3% ("entrou"); enquanto continua acima, um
   lembrete quando o relogio de Brasilia atravessa 9h, 13h ou 17h desde a
-  fotografia anterior; UM aviso quando volta para 3% ou menos. Sem estado
-  gravado: a fotografia anterior vem do proprio resumo.
+  fotografia anterior; UM aviso quando volta para 3% ou menos. A fotografia
+  anterior vem do proprio resumo.
 - **Volume medido** (regra aplicada ao resumo de 25/10 a 03/11/2026): 15
   mensagens em 9 dias, em 4 episodios (25, 28, 29 e 30/10). Os episodios
   comecam a meia-noite, quando os pedidos com prazo 23:59 viram vencidos.
-- **Fotografia velha nao avisa:** mais velha que `--max-idade-min` (padrao 45),
-  o canal nao e' avaliado. Sem isso, uma publicacao que falhou repetiria o
-  aviso da hora anterior.
+- **Fotografia velha nao avisa:** mais velha que **60 min**
+  (`MAX_IDADE_MIN`), o canal nao e' avaliado. Era 45 quando o alerta rodaria
+  logo depois da publicacao; com o cron a cada 15 min, a idade maxima precisa
+  ser >= atraso da publicacao + cadencia, senao uma fotografia passaria
+  inteira entre dois disparos.
 - **Shopee inclui FBS** na base, como a tabela por marca.
-- **Sem `--enviar`**, so' imprime o que enviaria. Exit `1` em falha de leitura,
-  token ou destinatarios ausentes, ou Slack recusando; o token nunca aparece
-  na saida. Sem retry automatico: repetir manda a mensagem de novo.
+- **Leitura:** sessao `READ ONLY` + `REPEATABLE READ`; a API nao grava nada.
 
-Configuracao do envio:
+### Uma mensagem por fotografia, sem estado gravado
 
-- `DATABASE_URL`: Neon; basta `SELECT` em `marts.expedicao_fila_atual` e
-  `marts.expedicao_refresh_run` (a sessao e' aberta read-only);
+O cron avalia a mesma fotografia ate' quatro vezes, e o GoDeploy repete o
+disparo apos um 5xx (ate' 3 tentativas, 30 s de intervalo). Cada DM leva
+`metadata` (`event_type = torre_alerta_vencidos`, `event_payload.chave =
+"shopee:<effective_at em UTC>"`); antes de postar, a API le as 20 mensagens
+mais recentes da DM (`conversations.history` com `include_all_metadata`) e
+pula quem ja' tem a chave. Uma nova tentativa depois de envio parcial so' manda
+para quem faltou. Se o historico nao puder ser lido, NADA e' postado para
+aquela pessoa. Cada destinatario e' independente: um e-mail invalido (quem saiu
+da empresa) nao impede os demais; a rota responde 502 e o GoDeploy tenta de
+novo so' para quem faltou. Gatilho quebrado aparece em `listCronJobs` e
+`getAppLogs` do app no GoDeploy.
+
+Nao ha tabela de controle no Neon: uma migration `036` exigiria trocar o pin da
+imagem do Airflow, cuja cadeia do PMA recusa head desconhecido (ver a `035`).
+
+### Rota
+
+`POST /api/v1/alertas/expedicao-vencidos` (`app/routers/alertas.py`, fora do
+router da Expedicao, que e' so' GET). Checagens em ordem; nada e' lido antes:
+
+| Condicao | Status | `detail` |
+|---|---|---|
+| `ALERTA_WEBHOOK_SECRET` vazio | 503 | `Alerta nao configurado.` |
+| `X-Alerta-Token` ausente ou diferente | 401 | `Nao autorizado.` |
+| banco indisponivel | 503 | `Banco de dados indisponivel.` |
+| sem `simular` e sem token do Slack ou destinatarios | 503 | `Envio nao configurado.` |
+| Slack recusou | 502 | `Slack recusou o envio.` |
+| ok | 200 | `{canal, situacao, evento, enviados, ja_tinham}` |
+
+`situacao` e' `sem_fotografia`, `fotografia_velha`, `sem_evento` ou `evento`.
+`?simular=true` avalia, devolve tambem `mensagem` e nao chama o Slack (serve
+para conferir a regra em producao sem mandar nada).
+
+### Configuracao
+
+No Render (`mktplace-api`):
+
+- `ALERTA_WEBHOOK_SECRET`: o mesmo valor do segredo do app no GoDeploy;
 - `SLACK_BOT_TOKEN`: token `xoxb-` do bot, em app settings → OAuth & Permissions;
 - `EXPEDICAO_ALERTA_DESTINATARIOS`: e-mails do Slack, separados por virgula.
-  Cada um recebe a mensagem no privado (`users.lookupByEmail` +
-  `chat.postMessage`).
 
-Agendamento: uma task na DAG `marketplace_tower_expedicao_refresh`, logo
-depois de `publicar_shopee`, para o aviso sair minutos depois da fotografia.
+No GoDeploy (`torre-alerta-gatilho`, `authenticated`): segredo
+`ALERTA_WEBHOOK_SECRET` (`setAppSecret`) e o cron `*/15 * * * *` na rota
+`/cron/alerta-vencidos`.
+
+Escopos do bot usados: `users:read.email`, `im:write`, `im:history`,
+`chat:write` (todos ja' no manifest).
 
 ## Atraso de 7 dias (regra oficial da Shopee)
 
