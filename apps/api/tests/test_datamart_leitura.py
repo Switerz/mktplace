@@ -129,3 +129,27 @@ def test_sql_real_dos_servicos_renderiza_completo():
     for sql, params in casos:
         saida = dl.renderizar(sql, params)
         assert not dl._PARAM.search(saida), sql[:40]
+
+
+class OperationalError(Exception):
+    """Mesmo nome da classe do SQLAlchemy/psycopg2 (falha de conexao)."""
+
+
+def test_falha_de_conexao_com_chave_vai_pelo_metabase(monkeypatch):
+    def cai(sql, p):
+        raise OperationalError("could not connect to server")
+    chamadas = _troca(monkeypatch, cai)
+    monkeypatch.setattr(settings, "metabase_api_key", "chave")
+    dl.consultar("SELECT :x", {"x": 1})
+    assert chamadas == ["SELECT 1"]
+
+
+def test_falha_de_conexao_sem_chave_sobe_o_erro(monkeypatch):
+    def cai(sql, p):
+        raise OperationalError("could not connect to server")
+    chamadas = _troca(monkeypatch, cai)
+    monkeypatch.setattr(settings, "metabase_api_key", "")
+    with pytest.raises(OperationalError):
+        dl.consultar("SELECT 1", {})
+    assert chamadas == []
+

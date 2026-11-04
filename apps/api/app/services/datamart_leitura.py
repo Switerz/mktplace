@@ -4,7 +4,8 @@ A API le o Data Mart direto (`datamart_engine`), com o usuario de banco dela.
 Tabelas fora do que esse usuario enxerga (ex.: `raw.*`) respondem
 "permission denied". Nesse caso, e SO' nesse (ou sem engine configurado), a
 MESMA consulta e' refeita pelo Metabase (`/api/dataset`, banco
-`metabase_database_id`), que le o Data Mart com a conexao dele — desde que
+`metabase_database_id`), que le o Data Mart com a conexao dele. O mesmo vale
+para falha de CONEXAO (`OperationalError`/`InterfaceError`) — desde que
 `METABASE_API_KEY` esteja configurada. Sem a chave, o erro original sobe e o
 servico o transforma em estado `erro` com motivo fixo (nunca zero).
 
@@ -117,6 +118,16 @@ def _recusa_de_permissao(exc: Exception) -> bool:
     return "permission denied" in texto or "insufficientprivilege" in texto
 
 
+#: Falha de CONEXAO com o Data Mart (rede, timeout, servidor fora). Medido em
+#: producao em 04/11/2026: do Render, a leitura direta dessas consultas caiu
+#: em `OperationalError` ate' no `to_regclass`, enquanto o Metabase lia normal.
+_CLASSES_DE_CONEXAO = ("OperationalError", "InterfaceError")
+
+
+def _falha_de_conexao(exc: Exception) -> bool:
+    return type(exc).__name__ in _CLASSES_DE_CONEXAO
+
+
 def _ler_direto(sql: str, params: dict) -> list[dict]:
     from app.database import datamart_engine  # import tardio: testes substituem
 
@@ -133,13 +144,14 @@ def _ler_metabase(sql: str) -> list[dict]:
 
 
 def consultar(sql: str, params: dict) -> list[dict]:
-    """Direto no Data Mart; pelo Metabase so' se o banco recusar por permissao
-    (ou nao houver engine) E houver `METABASE_API_KEY`."""
+    """Direto no Data Mart; pelo Metabase so' se o banco recusar por permissao,
+    a conexao falhar (ou nao houver engine) E houver `METABASE_API_KEY`."""
     try:
         return _ler_direto(sql, params)
     except Exception as exc:  # noqa: BLE001 — decide abaixo; o texto nunca sai
         sem_engine = isinstance(exc, RuntimeError) and str(exc) == "datamart indisponivel"
-        if not (sem_engine or _recusa_de_permissao(exc)) or not settings.metabase_api_key:
+        motivo_valido = sem_engine or _recusa_de_permissao(exc) or _falha_de_conexao(exc)
+        if not motivo_valido or not settings.metabase_api_key:
             raise
         logger.info("datamart_leitura: leitura direta recusada (%s); usando o Metabase", type(exc).__name__)
     return normalizar(_ler_metabase(renderizar(sql, params)))
