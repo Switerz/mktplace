@@ -58,7 +58,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const tematizada = rotaTematizada(pathname);
 
   return (
-    <div id="app-shell-root" className="min-h-screen bg-canvas md:flex">
+    <div id="app-shell-root" className="tc-fundo min-h-screen bg-canvas md:flex">
       {/* UX-TORRE-B2B-1 — o `<h1>` do shell no DESKTOP. A topbar (que carrega o
           `<h1>` visivel no mobile) fica `display: none` a partir de `md`, e a
           tela nao pode perder o titulo de nivel 1 na troca. `hidden md:block`

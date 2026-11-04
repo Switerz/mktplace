@@ -109,12 +109,12 @@ export default function Segmented<T extends string>({
       aria-label={rotuladoPor ? undefined : rotulo}
       aria-labelledby={rotuladoPor}
       ref={trilho}
-      className={`relative inline-flex items-center gap-0.5 rounded-lg border p-0.5 ${pele.trilho} ${className}`}
+      className={`relative inline-flex items-center gap-0.5 rounded-full border p-0.5 ${pele.trilho} ${className}`}
     >
       {polegar && (
         <span
           aria-hidden="true"
-          className={`pointer-events-none absolute bottom-0.5 left-0 top-0.5 rounded-md ${pele.superficie} [transition:transform_200ms_var(--mov-ease),width_200ms_var(--mov-ease)]`}
+          className={`pointer-events-none absolute bottom-0.5 left-0 top-0.5 rounded-full ${pele.superficie} [transition:transform_200ms_var(--mov-ease),width_200ms_var(--mov-ease)]`}
           style={{ width: polegar.w, transform: `translateX(${polegar.x}px)` }}
         />
       )}
@@ -148,7 +148,7 @@ export default function Segmented<T extends string>({
                 andar(0, -1);
               }
             }}
-            className={`relative inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-md px-3 text-sm transition-colors ${
+            className={`relative inline-flex min-h-11 min-w-11 items-center justify-center gap-1.5 rounded-full px-3.5 text-sm transition-colors ${
               ativo ? `${pele.ativo} ${polegar ? "" : pele.superficie}` : pele.inativo
             }`}
           >
