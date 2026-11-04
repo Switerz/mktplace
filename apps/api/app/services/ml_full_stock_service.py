@@ -41,7 +41,8 @@ SEM ESTOQUE FULL (T-0051) NAO E' AUSENCIA
 ------------------------------------------
 Linha na fato de marca com `inventarios = 0` (contagens 0, quantidades NULL,
 linhagem `source_run_id`/`published_at` presente) e NENHUMA linha de
-inventario no dia: a enumeracao terminou e deu zero. A marca sai com
+inventario nem de status no dia: a enumeracao terminou e deu zero. A coluna
+NULL nao e' lida como zero: o 0 vem da regra de contrato. A marca sai com
 `estado = "sem_estoque_full"`, quantidades 0, conta como coberta e nao torna
 o total parcial. Qualquer outra divergencia marca x inventario continua 503.
 A 029 ja' admite essa linha (CHECK `(inventarios_full_lidos > 0) =
@@ -269,6 +270,16 @@ SQL_STATUS = text(f"""
      ORDER BY s.brand, quantidade DESC, s.status_raw
 """)
 
+#: Linhas de status por marca SEM o JOIN com inventario: uma marca "sem
+#: estoque Full" nao pode ter nenhuma. Contagem so', nenhum ID.
+SQL_STATUS_POR_MARCA = text(f"""
+    SELECT brand, COUNT(*) AS linhas
+      FROM {STATUS_TABLE}
+     WHERE ref_date = :ref_date
+       AND brand = ANY(CAST(:brands AS text[]))
+     GROUP BY brand
+""")
+
 _FILTRO_LISTAGEM = """
      WHERE ref_date = :ref_date
        AND brand = ANY(CAST(:brands AS text[]))
@@ -425,7 +436,8 @@ def _conferir_sem_estoque_full(marca: str, fato: dict) -> None:
             f"marca {marca}: agregado com 0 inventarios sem linhagem")
 
 
-def _reconciliar(marca: str, fato: dict, contagem: Optional[dict]) -> str:
+def _reconciliar(marca: str, fato: dict, contagem: Optional[dict],
+                 linhas_status: int = 0) -> str:
     """A fato de marca e a de inventario descrevem o MESMO dia. Se divergem,
     nenhuma das duas e' escolhida em silencio. Devolve o estado da marca."""
     if contagem is None:
@@ -433,6 +445,9 @@ def _reconciliar(marca: str, fato: dict, contagem: Optional[dict]) -> str:
             raise MLFullEstoqueContractError(
                 f"marca {marca}: agregado sem inventarios no dia")
         _conferir_sem_estoque_full(marca, fato)
+        if linhas_status:
+            raise MLFullEstoqueContractError(
+                f"marca {marca}: agregado com 0 inventarios e status no dia")
         return ESTADO_SEM_ESTOQUE_FULL
     pares = (
         ("inventarios", int(fato["inventarios"]), contagem["inventarios"]),
@@ -511,7 +526,10 @@ def get_ml_full_estoque_block(
     if orfas:
         raise MLFullEstoqueContractError(
             "inventarios sem agregado de marca no dia: " + ", ".join(orfas))
-    estados = {marca: _reconciliar(marca, fato, contagens.get(marca))
+    status_brutos = {r["brand"]: int(r["linhas"]) for r in
+                     db.execute(SQL_STATUS_POR_MARCA, p).mappings().all()}
+    estados = {marca: _reconciliar(marca, fato, contagens.get(marca),
+                                   status_brutos.get(marca, 0))
                for marca, fato in fatos_marca.items()}
     sem_estoque = {m for m, e in estados.items()
                    if e == ESTADO_SEM_ESTOQUE_FULL}

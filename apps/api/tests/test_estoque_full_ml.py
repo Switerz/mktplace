@@ -258,6 +258,13 @@ class SessaoFalsa:
             return _Resultado([
                 {"brand": b, "status_raw": st, "quantidade": q, "inventarios": n}
                 for (b, st), (q, n) in agg.items()])
+        if nome == "SQL_STATUS_POR_MARCA":
+            por_marca: dict = defaultdict(int)
+            for s in self.status:
+                if s["ref_date"] == dia and s["brand"] in marcas:
+                    por_marca[s["brand"]] += 1
+            return _Resultado([{"brand": b, "linhas": n}
+                               for b, n in por_marca.items()])
         listaveis = [i for i in do_dia if p["incluir_fora_do_full"]
                      or i["classificacao_torre"] != "FORA_DO_FULL"]
         if nome == "SQL_TOTAL_NO_FILTRO":
@@ -691,6 +698,23 @@ def test_sem_estoque_full_e_estado_proprio_que_conta_zero():
         "lescent": "com_inventario", "rituaria": "com_inventario"}
 
 
+def test_fixture_sem_estoque_tem_o_formato_do_publicador():
+    """Formato confirmado pelo publicador (T-0052): contagens 0, quantidades
+    NULL (o CHECK proibe 0 com lidos = 0), linhagem presente, sem captured_at,
+    e nenhuma linha de inventario nem de status. O 0 da API vem da REGRA."""
+    sessao = _cenario(kokeshi="sem_estoque")
+    linha = next(m for m in sessao.marcas if m["brand"] == "kokeshi")
+    assert (linha["inventarios"], linha["inventarios_full_lidos"],
+            linha["inventarios_compartilhados"]) == (0, 0, 0)
+    assert (linha["disponivel_full"], linha["nao_disponivel_full"],
+            linha["transfer_full"]) == (None, None, None)
+    assert linha["source_run_id"] and linha["published_at"] is not None
+    assert "captured_at" not in linha
+    assert not [i for i in sessao.inventarios if i["brand"] == "kokeshi"]
+    assert not [s for s in sessao.status if s["brand"] == "kokeshi"]
+    assert _m(_bloco_falso(sessao), "kokeshi").disponivel_full == 0
+
+
 def test_saldo_disponivel_zero_e_com_inventario():
     """Estado 2: ha inventario fisico, so' o disponivel e' 0."""
     r = _bloco_falso(_cenario(barbours="medida", kokeshi="saldo_zero",
@@ -775,6 +799,7 @@ def _sem_estoque_com(**campos):
     "zero_com_compartilhados",
     "zero_sem_source_run_id",
     "zero_sem_published_at",
+    "zero_com_status",
 ])
 def test_divergencia_marca_x_inventario_continua_503(cliente_factory, caso):
     sessao = _cenario(barbours="medida", lescent="medida", rituaria="medida")
@@ -797,6 +822,12 @@ def test_divergencia_marca_x_inventario_continua_503(cliente_factory, caso):
         sessao.marcas.append(_sem_estoque_com(source_run_id=""))
     elif caso == "zero_sem_published_at":
         sessao.marcas.append(_sem_estoque_com(published_at=None))
+    elif caso == "zero_com_status":
+        # Status orfao: o JOIN de SQL_STATUS o esconderia; a contagem bruta nao.
+        sessao.marcas.append(_sem_estoque_com())
+        sessao.status = [{"ref_date": REF, "brand": "kokeshi", "seller_id": "S-K",
+                          "inventory_id": "INV-K9", "status_raw": "damaged",
+                          "quantidade": 1, "source_run_id": "run-ficticio"}]
     with pytest.raises(svc.MLFullEstoqueContractError):
         _bloco_falso(sessao)
     r = cliente_factory(sessao).get(ROTA)
