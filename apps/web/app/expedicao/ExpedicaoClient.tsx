@@ -43,6 +43,7 @@ import type { LinhaDaFila } from "@/components/expedicao/EvolucaoPorMarca";
 import LdrShopeePanel, { useLdrShopee } from "@/components/expedicao/LdrShopeePanel";
 import {
   AVISO_FILA_COM_FBS,
+  DIAS_LDR_SHOPEE,
   divisaoDaFila,
   textoDaReconciliacao,
   type DivisaoDaFila,
@@ -622,7 +623,9 @@ export default function ExpedicaoClient({
   // a jornada e' buscada nos dois canais; o `days` so' vai onde ha coorte.
   const jornada = useJornada(API, filtros.channel, marcaAtiva, { dias: janela });
 
-  const ldr = useLdrShopee(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros.channel === "shopee", janela);
+  // O LDR e' sempre dos ultimos 7 dias (regra da Shopee), nao do periodo do
+  // topo: com 3 dias no topo o painel mostrava uma taxa que nao e' a do canal.
+  const ldr = useLdrShopee(API, marcaAtiva, LDR_SHOPEE_LIGADA && filtros.channel === "shopee", DIAS_LDR_SHOPEE);
 
   const temFiltro =
     filtros.brands.length > 0 || filtros.accounts.length > 0 || filtros.situacao.length > 0;
@@ -1602,7 +1605,6 @@ export default function ExpedicaoClient({
       aoFechar={() => setAlvoTravados(null)}
     />
     <LayoutExpedicao
-      destaque={faixaTopo}
       // 1-2. CABECALHO, FOTOGRAFIA, FRESCOR E FILTROS (compartilhado). O canal
       // fica NO TITULO, nao so' no seletor: numeros de uma loja sob o titulo de
       // outra foi o defeito que o EXP-3C2-R/V corrigiu.
@@ -1671,6 +1673,7 @@ export default function ExpedicaoClient({
           // ordem e' do esqueleto, a mesma dos tres canais.
           <CorpoGestor
             risco={secaoRisco}
+            ldr={faixaTopo}
             prazo={secaoPrazo}
             // Compacta: a fila aberta so' com etapa real (sem repetir o
             // "Risco atual") e a coorte do periodo quando existe.

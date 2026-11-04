@@ -14,6 +14,14 @@ from app.config import settings
 from app.services import datamart_leitura as dl
 
 
+@pytest.fixture(autouse=True)
+def _sem_pausa(monkeypatch):
+    monkeypatch.setattr(dl, "_direto_suspenso_ate", 0.0)
+    dl.limpar_cache()
+    yield
+    dl.limpar_cache()
+
+
 class Recusado(Exception):
     """Imita o ProgrammingError do SQLAlchemy com InsufficientPrivilege."""
     def __init__(self):
@@ -152,4 +160,63 @@ def test_falha_de_conexao_sem_chave_sobe_o_erro(monkeypatch):
     with pytest.raises(OperationalError):
         dl.consultar("SELECT 1", {})
     assert chamadas == []
+
+
+def test_falha_de_conexao_pula_o_direto_por_um_tempo(monkeypatch):
+    tentativas = []
+
+    def cai(sql, p):
+        tentativas.append(sql)
+        raise OperationalError("timeout expired")
+    relogio = [1000.0]
+    monkeypatch.setattr(dl, "_agora", lambda: relogio[0])
+    chamadas = _troca(monkeypatch, cai)
+    monkeypatch.setattr(settings, "metabase_api_key", "chave")
+    dl.consultar("SELECT 1", {})
+    dl.consultar("SELECT 2", {})          # dentro da pausa: nem tenta o direto
+    assert tentativas == ["SELECT 1"] and chamadas == ["SELECT 1", "SELECT 2"]
+    relogio[0] += dl.PAUSA_DIRETO_S + 1   # passou a pausa: tenta o direto de novo
+    dl.consultar("SELECT 3", {})
+    assert tentativas == ["SELECT 1", "SELECT 3"]
+
+
+def test_permissao_negada_nao_suspende_o_direto(monkeypatch):
+    tentativas = []
+
+    def recusa(sql, p):
+        tentativas.append(sql)
+        raise Recusado()
+    _troca(monkeypatch, recusa)
+    monkeypatch.setattr(settings, "metabase_api_key", "chave")
+    dl.consultar("SELECT 1", {})
+    dl.consultar("SELECT 2", {})
+    assert tentativas == ["SELECT 1", "SELECT 2"]
+
+
+def test_resultado_guardado_por_um_tempo(monkeypatch):
+    leituras = []
+    relogio = [500.0]
+    monkeypatch.setattr(dl, "_agora", lambda: relogio[0])
+    monkeypatch.setattr(dl, "_ler_direto", lambda sql, p: leituras.append(sql) or [{"x": 1}])
+    assert dl.consultar("SELECT :a", {"a": 1}) == [{"x": 1}]
+    dl.consultar("SELECT :a", {"a": 1})
+    assert leituras == ["SELECT :a"]
+    dl.consultar("SELECT :a", {"a": 2})          # outro parametro: outra leitura
+    assert len(leituras) == 2
+    relogio[0] += dl.CACHE_TTL_S + 1
+    dl.consultar("SELECT :a", {"a": 1})
+    assert len(leituras) == 3
+
+
+def test_falha_nao_e_guardada(monkeypatch):
+    chamadas = []
+
+    def cai(sql, p):
+        chamadas.append(sql)
+        raise ValueError("x")
+    monkeypatch.setattr(dl, "_ler_direto", cai)
+    for _ in range(2):
+        with pytest.raises(ValueError):
+            dl.consultar("SELECT 1", {})
+    assert len(chamadas) == 2
 

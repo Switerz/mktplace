@@ -143,9 +143,45 @@ def _ler_metabase(sql: str) -> list[dict]:
     return metabase_client.query(sql)
 
 
+#: Depois de uma falha de CONEXAO, por quanto tempo ir direto ao Metabase. A
+#: conexao direta so' desiste no `datamart_connect_timeout_seconds` (10 s):
+#: sem isto, TODA chamada pagava 10 s antes da reserva (medido: 11-14 s).
+PAUSA_DIRETO_S = 3600.0
+_direto_suspenso_ate = 0.0
+
+
+def _agora() -> float:
+    import time
+    return time.monotonic()
+
+
+#: Resultado guardado por consulta+parametros. Os dados lidos aqui (fotografia
+#: diaria da reputacao, LDR por dia fechado) mudam no maximo 1x por dia; sem
+#: isto, uma chamada no fim da pausa ou depois de reinicio pagava ~10 s.
+CACHE_TTL_S = 600.0
+_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+def limpar_cache() -> None:
+    _cache.clear()
+
+
 def consultar(sql: str, params: dict) -> list[dict]:
+    chave = sql + "" + repr(sorted(params.items(), key=lambda kv: kv[0]))
+    guardado = _cache.get(chave)
+    if guardado and _agora() - guardado[0] < CACHE_TTL_S:
+        return [dict(linha) for linha in guardado[1]]
+    linhas = _consultar_sem_cache(sql, params)
+    _cache[chave] = (_agora(), linhas)
+    return [dict(linha) for linha in linhas]
+
+
+def _consultar_sem_cache(sql: str, params: dict) -> list[dict]:
     """Direto no Data Mart; pelo Metabase so' se o banco recusar por permissao,
     a conexao falhar (ou nao houver engine) E houver `METABASE_API_KEY`."""
+    global _direto_suspenso_ate
+    if settings.metabase_api_key and _agora() < _direto_suspenso_ate:
+        return normalizar(_ler_metabase(renderizar(sql, params)))
     try:
         return _ler_direto(sql, params)
     except Exception as exc:  # noqa: BLE001 — decide abaixo; o texto nunca sai
@@ -153,5 +189,7 @@ def consultar(sql: str, params: dict) -> list[dict]:
         motivo_valido = sem_engine or _recusa_de_permissao(exc) or _falha_de_conexao(exc)
         if not motivo_valido or not settings.metabase_api_key:
             raise
+        if _falha_de_conexao(exc) or sem_engine:
+            _direto_suspenso_ate = _agora() + PAUSA_DIRETO_S
         logger.info("datamart_leitura: leitura direta recusada (%s); usando o Metabase", type(exc).__name__)
     return normalizar(_ler_metabase(renderizar(sql, params)))

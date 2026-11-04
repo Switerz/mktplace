@@ -42,6 +42,13 @@ export const META_TETO: Record<CanalLdr, MetaTeto> = {
   tiktokshop: { meta: 0.02, teto: 0.04, origemTeto: "referência TikTok usada pela Torre (sem fonte oficial)" },
 };
 
+/** Texto do "ⓘ" da seção: a regra fica aqui, fora do caminho do número. */
+export const DICA_LDR =
+  "Pedidos com prazo vencendo nos últimos 7 dias fechados que foram coletados depois do prazo (ou ainda não " +
+  "coletados) ÷ total desses pedidos. Shopee: prazo da Shopee, sem FBS. Mercado Livre: prazo oficial do ML, " +
+  "coletado até o fim do dia conta no prazo. TikTok: 2 dias úteis após o pagamento. Traço verde = meta, traço " +
+  "vermelho = teto. Cálculo da Torre, não é a nota oficial da plataforma.";
+
 export const CANAIS_LDR: readonly { canal: CanalLdr; titulo: string; regra: string }[] = [
   { canal: "shopee", titulo: "Shopee", regra: "prazo Shopee × coleta" },
   { canal: "mercadolivre", titulo: "Mercado Livre", regra: "prazo oficial ML × coleta até o fim do dia" },
@@ -67,8 +74,8 @@ export function classificar(taxa: number, mt: MetaTeto): Faixa {
 }
 
 export const ROTULO_FAIXA: Record<Faixa, string> = {
-  dentro: "Dentro da meta",
-  entre: "Entre meta e teto",
+  dentro: "Na meta",
+  entre: "Atenção",
   acima: "Acima do teto",
 };
 
@@ -211,3 +218,25 @@ export function urlLdr(api: string, canal: CanalLdr, marca: string | null): stri
   }
   return `${api}/api/v1/expedicao/ml/ldr?${qs.toString()}`;
 }
+
+/**
+ * Shopee: enquanto a publicação oficial da Torre (`/expedicao/shopee/ldr`) não
+ * existir, a faixa usa a MESMA regra calculada direto no Data Mart
+ * (`/expedicao/shopee/ldr-datamart`). Só a Shopee tem reserva.
+ */
+export function urlLdrReserva(api: string, canal: CanalLdr, marca: string | null): string | null {
+  if (canal !== "shopee") return null;
+  const qs = new URLSearchParams({ days: String(DIAS_LDR_TOPO) });
+  if (marca) qs.set("brands", marca);
+  return `${api}/api/v1/expedicao/shopee/ldr-datamart?${qs.toString()}`;
+}
+
+const SEM_PUBLICACAO = ["no_series_published", "disabled", "table_not_migrated"];
+
+/** A resposta oficial diz que não há série publicada (e não um erro de dado)? */
+export function precisaReserva(json: unknown): boolean {
+  if (typeof json !== "object" || json === null) return false;
+  const j = json as Record<string, unknown>;
+  return j.availability !== "available" && SEM_PUBLICACAO.includes(String(j.unavailable_reason));
+}
+

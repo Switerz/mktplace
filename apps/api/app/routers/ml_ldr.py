@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.config import settings
 from app.services import ml_ldr_service as svc
+from app.services import shopee_ldr_dm_service as shopee_dm
 from app.services.gold_service import ML_BRANDS
 
 
@@ -41,3 +42,20 @@ def ldr_ml(
     if days < 1 or days > svc.JANELA_MAX_DIAS:
         raise HTTPException(422, f"Janela invalida. Informe entre 1 e {svc.JANELA_MAX_DIAS} dias.")
     return svc.obter_ldr_ml(dias=days, brands=brands)
+
+
+#: Reserva da coluna Shopee da faixa do topo (ver `shopee_ldr_dm_service`).
+#: Fora do prefixo `/ml`, mas na mesma flag e no mesmo arquivo de rotas da faixa.
+router_shopee = APIRouter(prefix="/api/v1/expedicao/shopee", tags=["expedicao"],
+                          dependencies=[Depends(exigir_flag)])
+
+
+@router_shopee.get("/ldr-datamart")
+def ldr_shopee_datamart(
+    days: int = Query(7, description="Dias fechados ate' ontem (1 a 30)."),
+    brands: Optional[list[str]] = Depends(brands_query),
+):
+    if days < 1 or days > shopee_dm.JANELA_MAX_DIAS:
+        raise HTTPException(422, f"Janela invalida. Informe entre 1 e {shopee_dm.JANELA_MAX_DIAS} dias.")
+    return shopee_dm.obter_ldr_shopee_dm(dias=days, brands=brands)
+

@@ -789,7 +789,6 @@ export default function TikTokDispatchPanel({
     // `div`, nao `main`: o landmark `main` e' do AppShell (um por pagina).
     <div className={CLASSE_RAIZ_EXPEDICAO} aria-busy={estado === "carregando"}>
     <LayoutExpedicao
-      destaque={faixaTopo}
       // 1-2. CABECALHO, FOTOGRAFIA, FRESCOR E FILTROS (compartilhado)
       cabecalho={
         <CabecalhoExpedicao
@@ -855,6 +854,7 @@ export default function TikTokDispatchPanel({
           // a ordem e' do esqueleto, a mesma dos tres canais.
           <CorpoGestor
             risco={secaoRisco}
+            ldr={faixaTopo}
             prazo={secaoLdr}
             jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} marca={marca} />}
             evolucao={painelEvolucao}
