@@ -1602,7 +1602,6 @@ export default function ExpedicaoClient({
       aoFechar={() => setAlvoTravados(null)}
     />
     <LayoutExpedicao
-      destaque={faixaTopo}
       // 1-2. CABECALHO, FOTOGRAFIA, FRESCOR E FILTROS (compartilhado). O canal
       // fica NO TITULO, nao so' no seletor: numeros de uma loja sob o titulo de
       // outra foi o defeito que o EXP-3C2-R/V corrigiu.
@@ -1671,6 +1670,7 @@ export default function ExpedicaoClient({
           // ordem e' do esqueleto, a mesma dos tres canais.
           <CorpoGestor
             risco={secaoRisco}
+            ldr={faixaTopo}
             prazo={secaoPrazo}
             // Compacta: a fila aberta so' com etapa real (sem repetir o
             // "Risco atual") e a coorte do periodo quando existe.

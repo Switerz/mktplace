@@ -16,7 +16,9 @@ import {
   lerRespostaLdr,
   montarMatriz,
   pct,
+  precisaReserva,
   urlLdr,
+  urlLdrReserva,
   type FonteCanal,
 } from "../src/lib/expedicao-ldr-topo.ts";
 import {
@@ -178,11 +180,23 @@ test("casca: LDR no topo e Performance so' com a flag, Performance so' na visao 
   assert.match(fonte, /visao === "gestor" \? \(\s*<div[^>]*>\s*<PerformanceOficial/);
 });
 
-test("esqueleto: LDR logo abaixo do cabecalho, nos dois corpos de canal", () => {
+test("esqueleto: LDR logo abaixo de Risco atual, nos dois corpos de canal", () => {
   const layout = readFileSync(join(AQUI, "..", "src", "components", "expedicao", "LayoutExpedicao.tsx"), "utf-8");
-  assert.match(layout, /\{cabecalho\}\s*\{destaque\}/);
+  assert.match(layout, /\{risco\}\s*\{ldr\}\s*\{prazo\}/);
   for (const arq of [["app", "expedicao", "ExpedicaoClient.tsx"], ["src", "components", "expedicao", "TikTokDispatchPanel.tsx"]]) {
-    assert.match(readFileSync(join(AQUI, "..", ...arq), "utf-8"), /destaque=\{faixaTopo\}/);
+    const fonte = readFileSync(join(AQUI, "..", ...arq), "utf-8");
+    assert.match(fonte, /risco=\{secaoRisco\}\s*ldr=\{faixaTopo\}/);
+    assert.doesNotMatch(fonte, /destaque=\{faixaTopo\}/);
   }
+});
+
+test("Shopee usa a reserva do Data Mart so' sem publicacao oficial", () => {
+  assert.equal(urlLdrReserva("http://api", "shopee", "apice"),
+    "http://api/api/v1/expedicao/shopee/ldr-datamart?days=7&brands=apice");
+  assert.equal(urlLdrReserva("http://api", "mercadolivre", null), null);
+  assert.equal(precisaReserva({ availability: "unavailable", unavailable_reason: "no_series_published" }), true);
+  assert.equal(precisaReserva({ availability: "unavailable", unavailable_reason: "disabled" }), true);
+  assert.equal(precisaReserva({ availability: "unavailable", unavailable_reason: "source_error" }), false);
+  assert.equal(precisaReserva({ availability: "available", brands: [] }), false);
 });
 
