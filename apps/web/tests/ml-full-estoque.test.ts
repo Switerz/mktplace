@@ -54,10 +54,6 @@ import {
   type MotivoIndisponivelML,
 } from "../src/lib/ml-full-estoque.ts";
 import {
-  ML_FULL_ESTOQUE_FLAG,
-  mlFullEstoqueEnabled,
-} from "../src/lib/ml-full-estoque-flag.ts";
-import {
   ESTOQUE_FULL_NAV,
   ML_FULL_ESTOQUE_NAV,
   getRouteTitle,
@@ -95,26 +91,10 @@ function frescor(over: Partial<FrescorML> = {}): FrescorML {
 // Flag e navegacao
 // ---------------------------------------------------------------------------
 
-test("flag e' fail-closed e propria", () => {
-  const liga = (v: string | undefined) =>
-    mlFullEstoqueEnabled({ NEXT_PUBLIC_ML_FULL_STOCK_ENABLED: v } as NodeJS.ProcessEnv);
-  assert.equal(liga("true"), true);
-  for (const v of ["", "1", "TRUE", "yes", "false", undefined]) {
-    assert.equal(liga(v), false, `"${v}" nao pode ligar a tela`);
-  }
-  assert.equal(ML_FULL_ESTOQUE_FLAG, "NEXT_PUBLIC_ML_FULL_STOCK_ENABLED");
-  // Ligar o estoque Shopee nao liga o estoque ML.
-  assert.equal(
-    mlFullEstoqueEnabled({
-      NEXT_PUBLIC_SHOPEE_FBS_STOCK_ENABLED: "true",
-    } as NodeJS.ProcessEnv),
-    false,
-  );
-});
-
-test("a rota tem guard no servidor", () => {
-  assert.match(PAGE_SRC, /mlFullEstoqueEnabled\(\)/);
-  assert.match(PAGE_SRC, /notFound\(\)/);
+test("a rota nao depende de flag de build: quem decide e' a API", () => {
+  assert.doesNotMatch(PAGE_SRC, /notFound\(\)/);
+  assert.doesNotMatch(PAGE_SRC, /process\.env/);
+  assert.match(PAGE_SRC, /<MLFullEstoqueClient \/>/);
 });
 
 test("o menu responde so' a propria flag e nao colide com /full-ml nem /estoque-full", () => {

@@ -1,24 +1,18 @@
-import { notFound } from "next/navigation";
-
-import { estoqueFullEnabled } from "@/lib/estoque-full-flag";
 import EstoqueFullClient from "./EstoqueFullClient";
 
 /**
  * Tela "Estoque Full Shopee" — Gate FULL-SOURCE-3.
  *
- * GUARD NO SERVIDOR, e nao apenas no menu.
+ * SEM FLAG DE WEB (04/11/2026). A tela ficava atras de
+ * `NEXT_PUBLIC_SHOPEE_FBS_STOCK_ENABLED`, flag de BUILD: um projeto novo na
+ * Vercel sem a variavel sumia com a aba em silencio. Quem decide se ha' dado
+ * e' a API (`SHOPEE_FBS_STOCK_ENABLED`): desligada, ela responde
+ * `status="unavailable"` com o motivo e a tela desenha "indisponivel" -- nunca
+ * zero. O acesso ja' passa pelo login Google.
  *
- * Com `NEXT_PUBLIC_SHOPEE_FBS_STOCK_ENABLED` diferente de "true" esta rota
- * devolve 404 e o componente cliente NUNCA e' montado -- logo nenhuma
- * requisicao ao endpoint acontece. Esconder so' o item de navegacao deixaria a
- * URL direta acessivel, e nem a aplicacao nem a API tem autenticacao.
- *
- * Rota SEPARADA de `/full-shopee`. As duas telas falam de coisas diferentes:
- * aquela mede DESEMPENHO de venda por modalidade, esta mede ESTOQUE FISICO no
- * CD da Shopee. Fundi-las numa abstracao de "Full" acoplaria uma fato
- * publicada (019) a duas que ainda nem existem no banco produtivo (021).
+ * Rota SEPARADA de `/full-shopee`: aquela mede DESEMPENHO de venda por
+ * modalidade, esta mede ESTOQUE FISICO no CD da Shopee.
  */
 export default function EstoqueFullPage() {
-  if (!estoqueFullEnabled()) notFound();
   return <EstoqueFullClient />;
 }
