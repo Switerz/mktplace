@@ -31,6 +31,11 @@ export interface TemaGrafico {
   tooltipFundo: string;
   tooltipBorda: string;
   tooltipTinta: string;
+  /** UX-VIDRO-5 — barra do total: degrade do topo (claro) a' base (cheio). */
+  barraTopo: string;
+  barraBase: string;
+  /** Listra do bucket em andamento (hoje, parcial). */
+  barraParcial: string;
 }
 
 const CLARO: TemaGrafico = {
@@ -43,6 +48,9 @@ const CLARO: TemaGrafico = {
   tooltipFundo: "#ffffff",
   tooltipBorda: "#d6d0ec",
   tooltipTinta: "#171226",
+  barraTopo: "#c4b5fd",
+  barraBase: "#7c3aed",
+  barraParcial: "#c026d3",
 };
 
 const ESCURO: TemaGrafico = {
@@ -55,6 +63,9 @@ const ESCURO: TemaGrafico = {
   tooltipFundo: "#1f1a33",
   tooltipBorda: "#3d3459",
   tooltipTinta: "#f2effa",
+  barraTopo: "#e2d4ff",
+  barraBase: "#7c5cf0",
+  barraParcial: "#e879f9",
 };
 
 export function temaDoGrafico(resolvido: TemaResolvido): TemaGrafico {
