@@ -689,14 +689,15 @@ export default function ExpedicaoClient({
   // ou da marca (recorte). Nao usa a divisao vendedor x FBS: o pipeline ja'
   // calcula a base do vendedor (sem FBS) na Shopee.
   const taxaAtraso7d = temPrazo
-    ? percentualAtraso7d(recorte.totais?.late_7d_count, recorte.totais?.orders_7d_count)
+    ? percentualAtraso7d(recorte.totais?.late_7d_count, recorte.totais?.due_7d_count)
     : null;
   // EXPEDICAO-ABA-7D: linhas da aba "Ultimos 7 dias". O % de cada medida e'
-  // sobre os pedidos feitos (Gerencial), calculado na tabela.
+  // sobre a base do LDR (`due_7d_count`), o mesmo do topo (04/11/2026).
   const linhaSeteDias = (conta: string, titulo: string, t: Partial<Totais> | null | undefined): LinhaSeteDias => ({
     conta,
     titulo,
     pedidos: t?.orders_7d_count ?? null,
+    baseLdr: t?.due_7d_count ?? null,
     vencidos: t?.late_7d_count ?? null,
     acima48h: t?.over_48h_7d_count ?? null,
     travados: t?.stalled_7d_count ?? null,
