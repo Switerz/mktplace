@@ -87,7 +87,7 @@ export default function RiscoEmDestaque({
   const qtdAlerta = marcasAlerta?.valor ?? 0;
 
   return (
-    <div className="grid gap-3 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]" data-testid="exp-risco-destaque">
+    <div className="grid gap-3 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]" data-testid="exp-risco-destaque">
       <section
         aria-label={`${principal.rotulo}: ${formatarInteiro(valor)}`}
         className={`group relative flex flex-col gap-3 rounded-xl border p-5 ${fundo} ${
@@ -144,11 +144,12 @@ export default function RiscoEmDestaque({
           </p>
         ) : null}
       </section>
-      {/* Os cartoes ESTICAM ate' a altura do destaque: sem faixa vazia embaixo.
-          As colunas seguem a quantidade (3 na Shopee, 1 no ML). */}
+      {/* UX-VIDRO-4 (print aprovado): destaque maior e mais quadrado a'
+          esquerda, demais cartoes em grade 2x2 que ESTICA ate' a altura dele.
+          Numero impar de cartoes: o ultimo ocupa a linha inteira (sem buraco). */}
       <section
         aria-label="Demais indicadores de risco"
-        className="grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-2 lg:auto-rows-fr [&>*]:h-full"
+        className="grid auto-rows-fr grid-cols-1 gap-3 sm:grid-cols-2 [&>*]:h-full sm:[&>*:last-child:nth-child(odd)]:col-span-2"
       >
         {secundarios}
       </section>
