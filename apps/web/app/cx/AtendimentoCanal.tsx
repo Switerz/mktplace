@@ -67,7 +67,7 @@ export default function AtendimentoCanal({ canal }: { canal: VisaoCanalAtendimen
   );
 }
 
-function Motivos({ m, cor }: { m: VisaoMotivos; cor: string }) {
+export function Motivos({ m, cor }: { m: VisaoMotivos; cor: string }) {
   return (
     <section aria-label={m.titulo} className="flex min-w-0 flex-col gap-3 rounded-lg border border-line bg-surface p-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2">

@@ -12,10 +12,14 @@
 import {
   JANELA_PADRAO,
   JANELAS_DIAS,
+  montarMotivos,
   problemaNoPayloadAtendimento,
   type AtendimentoResponse,
+  type BlocoMotivos,
   type CanalAtendimento,
+  type EstadoBloco,
   type JanelaDias,
+  type VisaoMotivos,
 } from "./performance-contas-atendimento.ts";
 import { MOTIVO_TIMEOUT, TIMEOUT_API_MS } from "./performance-contas.ts";
 import {
@@ -30,12 +34,42 @@ export { JANELAS_DIAS, JANELA_PADRAO, type JanelaDias };
 
 type ParamBruto = string | string[] | undefined;
 
+export interface NaoLidas {
+  marca: string;
+  valor: number | null;
+  capturado_em: string | null;
+}
+
 export interface ChatShopee {
   estado: "dado" | "sem_fonte" | "erro";
   motivo?: string | null;
   fonte: string;
   contas: ContaOficial[];
   sem_foto: { marca: string; motivo: string }[];
+  /** Coleta propria (`shopee_cx_coleta`), a cada 2 h. Ausente na API antiga. */
+  nao_lidas_estado?: EstadoBloco;
+  nao_lidas?: NaoLidas[];
+}
+
+export interface DevolucoesShopee {
+  estado: EstadoBloco;
+  fonte: string;
+  motivo_indisponivel?: string | null;
+  total?: number | null;
+  aceitas?: number | null;
+  em_andamento?: number | null;
+  canceladas?: number | null;
+  /** So' das aceitas. */
+  reembolsado?: number | null;
+  motivos?: BlocoMotivos | null;
+  marcas: {
+    marca: string;
+    devolucoes: number | null;
+    aceitas?: number | null;
+    em_andamento?: number | null;
+    canceladas?: number | null;
+    reembolsado: number | null;
+  }[];
 }
 
 export interface CxShopeeResponse {
@@ -43,6 +77,8 @@ export interface CxShopeeResponse {
   janela: AtendimentoResponse["janela"];
   chat: ChatShopee;
   atendimento: CanalAtendimento;
+  /** Ausente na API antiga: a pagina mostra "sem fonte". */
+  devolucoes?: DevolucoesShopee;
 }
 
 // ---------------------------------------------------------------------------
@@ -91,7 +127,11 @@ export interface VisaoChat {
   estado: ChatShopee["estado"];
   motivo: string | null;
   colunas: { codigo: string; rotulo: string }[];
-  linhas: { marca: string; dia: string; tom: Tom; celulas: (CelulaChat | null)[] }[];
+  linhas: { marca: string; dia: string; tom: Tom; naoLidas: string | null; celulas: (CelulaChat | null)[] }[];
+  /** Coluna "Conversas não lidas": so' quando a coleta ja' publicou. */
+  comNaoLidas: boolean;
+  /** Por que a coluna nao aparece (sem coleta, erro), dito na tela. */
+  motivoNaoLidas: string | null;
   semFoto: string[];
   /** Lojas com alguma metrica fora da meta da Shopee. */
   foraDaMeta: string[];
@@ -104,10 +144,13 @@ export function montarChat(chat: ChatShopee, rotuloMarca: (m: string) => string)
       if (!colunas.some((c) => c.codigo === m.codigo)) colunas.push({ codigo: m.codigo, rotulo: m.rotulo });
     }
   }
+  const naoLidas = new Map((chat.nao_lidas ?? []).map((n) => [n.marca, n]));
+  const comNaoLidas = chat.nao_lidas_estado === "dado";
   const linhas = chat.contas.map((conta) => ({
     marca: rotuloMarca(conta.marca),
     dia: diaCurto(conta.dia),
     tom: conta.tom,
+    naoLidas: comNaoLidas ? celulaNaoLidas(naoLidas.get(conta.marca)) : null,
     celulas: colunas.map((col) => {
       const m = conta.metricas.find((x) => x.codigo === col.codigo);
       if (!m) return null;
@@ -124,6 +167,12 @@ export function montarChat(chat: ChatShopee, rotuloMarca: (m: string) => string)
     motivo: chat.motivo ?? null,
     colunas,
     linhas,
+    comNaoLidas,
+    motivoNaoLidas: comNaoLidas
+      ? null
+      : chat.nao_lidas_estado === "erro"
+        ? "Conversas não lidas indisponíveis nesta carga."
+        : "Conversas não lidas: aguardando a primeira coleta no Airflow (shopee_cx_coleta).",
     semFoto: chat.sem_foto.map((s) => `${rotuloMarca(s.marca)}: ${s.motivo}`),
     foraDaMeta: chat.contas
       .filter((c) => c.metricas.some((m) => m.situacao === "fora"))
@@ -198,14 +247,6 @@ export async function carregarCxShopee(
 /** Fontes que ainda faltam na aba CX, ditas na tela (ausencia nunca vira zero). */
 export const PROXIMAS_FONTES: readonly { titulo: string; motivo: string }[] = [
   {
-    titulo: "Conversas não respondidas (Shopee)",
-    motivo: "A API do chat da Shopee responde (testado em 04/11); falta a coleta diária no Airflow.",
-  },
-  {
-    titulo: "Devoluções com motivo e valor reembolsado (Shopee)",
-    motivo: "A API de devoluções responde (testado em 04/11); falta a coleta diária no Airflow.",
-  },
-  {
     titulo: "Funil do chat (visitantes, CSAT, conversão)",
     motivo: "Só existe no painel da Shopee (Informações Gerenciais → Chat); depende de exportação.",
   },
@@ -214,3 +255,74 @@ export const PROXIMAS_FONTES: readonly { titulo: string; motivo: string }[] = [
     motivo: "ML: falta a permissão “Comunicação pré e pós-venda” no app. TikTok: falta o escopo Customer Service.",
   },
 ];
+
+const FMT_INT = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 0 });
+const FMT_BRL = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
+
+function celulaNaoLidas(n: NaoLidas | undefined): string {
+  if (!n || n.valor == null) return "—";
+  return FMT_INT.format(n.valor);
+}
+
+export function reais(v: number | null | undefined): string {
+  return v == null || !Number.isFinite(v) ? "—" : FMT_BRL.format(v);
+}
+
+// ---------------------------------------------------------------------------
+// Devolucoes (`raw.shopee_returns`)
+// ---------------------------------------------------------------------------
+export interface VisaoDevolucoes {
+  estado: EstadoBloco;
+  motivo: string | null;
+  total: string;
+  aceitas: string;
+  emAndamento: string;
+  canceladas: string;
+  reembolsado: string;
+  motivos: VisaoMotivos | null;
+  linhas: {
+    chave: string;
+    marca: string;
+    devolucoes: string;
+    aceitas: string;
+    emAndamento: string;
+    canceladas: string;
+    reembolsado: string;
+  }[];
+}
+
+function inteiro(v: number | null | undefined): string {
+  return v == null ? "—" : FMT_INT.format(v);
+}
+
+export function montarDevolucoes(
+  d: DevolucoesShopee | undefined,
+  rotuloMarca: (m: string) => string,
+): VisaoDevolucoes {
+  if (!d) {
+    return {
+      estado: "sem_fonte", total: "—", aceitas: "—", emAndamento: "—", canceladas: "—",
+      reembolsado: "—", motivos: null, linhas: [],
+      motivo: "Aguardando a primeira coleta de CX da Shopee no Airflow (shopee_cx_coleta).",
+    };
+  }
+  return {
+    estado: d.estado,
+    motivo: d.motivo_indisponivel ?? null,
+    total: inteiro(d.total),
+    aceitas: inteiro(d.aceitas),
+    emAndamento: inteiro(d.em_andamento),
+    canceladas: inteiro(d.canceladas),
+    reembolsado: reais(d.reembolsado),
+    motivos: d.estado === "dado" ? montarMotivos(d.motivos) : null,
+    linhas: d.marcas.map((m) => ({
+      chave: m.marca,
+      marca: rotuloMarca(m.marca),
+      devolucoes: inteiro(m.devolucoes),
+      aceitas: inteiro(m.aceitas),
+      emAndamento: inteiro(m.em_andamento),
+      canceladas: inteiro(m.canceladas),
+      reembolsado: reais(m.reembolsado),
+    })),
+  };
+}
