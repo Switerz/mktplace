@@ -1,7 +1,7 @@
 // AUTH-GOOGLE-5 — rewrite same-origin do navegador para a API.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { TORRE_API_PREFIX, torreApiRewrites } from "../src/lib/torre-api-proxy.ts";
+import { TORRE_API_PREFIX, assertTorreApiConfig, torreApiRewrites } from "../src/lib/torre-api-proxy.ts";
 
 test("prefixo fixo", () => {
   assert.equal(TORRE_API_PREFIX, "/torre-api");
@@ -24,4 +24,15 @@ test("origens invalidas lancam erro", () => {
   for (const o of ["http://mktplace-api.onrender.com", "https://x.com/path", "ftp://x.com", "lixo", "http://localhost"]) {
     assert.throws(() => torreApiRewrites(o), /TORRE_API_ORIGIN invalida/, o);
   }
+});
+
+test("assertTorreApiConfig: base relativa sem origem lanca", () => {
+  assert.throws(() => assertTorreApiConfig("/torre-api", undefined), /TORRE_API_ORIGIN obrigatoria quando NEXT_PUBLIC_API_URL e relativa/);
+  assert.throws(() => assertTorreApiConfig("/torre-api", ""), /obrigatoria/);
+});
+
+test("assertTorreApiConfig: demais combinacoes passam", () => {
+  assert.doesNotThrow(() => assertTorreApiConfig("/torre-api", "https://x.onrender.com"));
+  assert.doesNotThrow(() => assertTorreApiConfig("https://api.exemplo.com", undefined));
+  assert.doesNotThrow(() => assertTorreApiConfig(undefined, undefined));
 });

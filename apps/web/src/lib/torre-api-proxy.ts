@@ -15,3 +15,10 @@ export function torreApiRewrites(
   if (!ORIGEM_VALIDA.test(o)) throw new Error("TORRE_API_ORIGIN invalida");
   return [{ source: `${TORRE_API_PREFIX}/:path*`, destination: `${o.replace(/\/$/, "")}/:path*` }];
 }
+
+/** Base relativa sem origem do proxy = toda chamada 404 (e a tela cai em demo). Falha alto no build. */
+export function assertTorreApiConfig(publicApiUrl: string | undefined, origin: string | undefined): void {
+  if ((publicApiUrl ?? "").startsWith("/") && !(origin ?? "").trim()) {
+    throw new Error("TORRE_API_ORIGIN obrigatoria quando NEXT_PUBLIC_API_URL e relativa");
+  }
+}
