@@ -17,6 +17,9 @@ from app.services import datamart_leitura as dl
 @pytest.fixture(autouse=True)
 def _sem_pausa(monkeypatch):
     monkeypatch.setattr(dl, "_direto_suspenso_ate", 0.0)
+    dl.limpar_cache()
+    yield
+    dl.limpar_cache()
 
 
 class Recusado(Exception):
@@ -188,4 +191,32 @@ def test_permissao_negada_nao_suspende_o_direto(monkeypatch):
     dl.consultar("SELECT 1", {})
     dl.consultar("SELECT 2", {})
     assert tentativas == ["SELECT 1", "SELECT 2"]
+
+
+def test_resultado_guardado_por_um_tempo(monkeypatch):
+    leituras = []
+    relogio = [500.0]
+    monkeypatch.setattr(dl, "_agora", lambda: relogio[0])
+    monkeypatch.setattr(dl, "_ler_direto", lambda sql, p: leituras.append(sql) or [{"x": 1}])
+    assert dl.consultar("SELECT :a", {"a": 1}) == [{"x": 1}]
+    dl.consultar("SELECT :a", {"a": 1})
+    assert leituras == ["SELECT :a"]
+    dl.consultar("SELECT :a", {"a": 2})          # outro parametro: outra leitura
+    assert len(leituras) == 2
+    relogio[0] += dl.CACHE_TTL_S + 1
+    dl.consultar("SELECT :a", {"a": 1})
+    assert len(leituras) == 3
+
+
+def test_falha_nao_e_guardada(monkeypatch):
+    chamadas = []
+
+    def cai(sql, p):
+        chamadas.append(sql)
+        raise ValueError("x")
+    monkeypatch.setattr(dl, "_ler_direto", cai)
+    for _ in range(2):
+        with pytest.raises(ValueError):
+            dl.consultar("SELECT 1", {})
+    assert len(chamadas) == 2
 
