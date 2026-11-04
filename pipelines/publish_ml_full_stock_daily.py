@@ -23,12 +23,23 @@ CONTRATO DO APPLY
 -----------------
 - A fonte e' FILTRADA para as marcas pedidas antes de montar o pacote. Marca
   com fotografia que nao foi pedida e' ignorada e reportada; nunca e' gravada.
-  Marca pedida sem fotografia = recusa.
 - Linhagem RAW: toda linha lida (snapshot, ponte e status) da marca/data tem
   o `run_id` informado, e em `raw.ml_full_stock_runs` esse run pediu a marca,
   comecou na data (fuso de Sao Paulo, mesmo relogio do `ref_date` do
-  airflow), terminou (`completo`/`parcial`) e registrou `PUBLICADA` para ela.
-  Qualquer divergencia = recusa ANTES de qualquer DELETE/INSERT.
+  airflow), terminou (`finished_at` preenchido e `completo`/`parcial`) e
+  registrou `PUBLICADA` para ela. Qualquer divergencia = recusa ANTES de
+  qualquer DELETE/INSERT.
+- FULL ZERO COMPROVADO (T-0052): marca pedida com 0 linhas de snapshot na data
+  so' e' publicavel com `--raw-run` e a MESMA linhagem acima (o produtor so'
+  grava `PUBLICADA` depois de coleta completa; marca publicada com 0
+  inventarios nao deixa linha na fotografia). Ponte do run com >= 1 linha, so'
+  de anuncio sem inventario, com UMA conta que nao aparece em outra marca na
+  data. Vira UMA linha em `fact_ml_full_stock_brand_daily` com
+  `inventarios = 0` e nenhuma linha de inventario/status. Sem essa prova =
+  recusa `marca_pedida_sem_fotografia: ...; full zero nao comprovado: <causa>`
+  (ausencia nunca vira zero). O RAW nao grava a conta por marca no run: marca
+  sem nenhum anuncio (sem ponte) nao prova a conta e e' RECUSADA
+  (`conta_sem_evidencia_no_raw`), ficando ausente.
 - Coerencia da fotografia do run, por marca pedida (`conferir_coerencia`,
   invariantes do produtor para marca PUBLICADA): snapshot sem duplicata,
   inventarios do snapshot == `inventory_id` nao nulos da ponte (nas duas
@@ -50,7 +61,9 @@ PUBLICACAO
 - So' as marcas pedidas. DELETE do (ref_date, marca) + INSERT: reexecutar
   substitui, nunca duplica, e nunca toca marca nao pedida.
 - Reconciliacao PRE-COMMIT: linhas e soma do disponivel no destino tem de
-  bater com o calculado; qualquer diferenca aborta.
+  bater com o calculado e, POR MARCA pedida, `inventarios` da fato de marca e
+  as linhas de inventario e de status tambem (marca zero: 0, 0, 0 e a linha
+  da fato de marca presente); qualquer diferenca aborta.
 - Auditoria em `audit.source_sync_run` numa conexao PROPRIA: o rollback das
   fatos nao apaga o registro de que a execucao existiu e falhou. As DUAS
   conexoes da auditoria conferem a mesma identidade ANTES do INSERT/UPDATE:
@@ -150,10 +163,25 @@ COLS_MARCA = ("ref_date", "brand", "inventarios", "inventarios_full_lidos",
 
 SQL_RUNS_PRESENCA = text("SELECT to_regclass('raw.ml_full_stock_runs') IS NOT NULL")
 SQL_RUNS = text("""
-SELECT run_id, started_at, brands_requested, status, outcome_by_brand
+SELECT run_id, started_at, finished_at, brands_requested, status, outcome_by_brand
   FROM raw.ml_full_stock_runs
  WHERE run_id = ANY(:runs)
 """)
+#: Reconciliacao pre-COMMIT POR MARCA pedida (inclusive a marca zero, que nao
+#: tem linha de inventario): linha da fato de marca + contagens das outras duas.
+SQL_RECONCILIA_POR_MARCA = text(f"""
+SELECT m.brand,
+       (SELECT b.inventarios FROM {FACT_MARCA} b WHERE b.ref_date = :ref_date AND b.brand = m.brand)
+           AS inventarios_marca,
+       (SELECT count(*) FROM {FACT_INVENTARIO} i WHERE i.ref_date = :ref_date AND i.brand = m.brand)
+           AS linhas_inventario,
+       (SELECT count(*) FROM {FACT_STATUS} s WHERE s.ref_date = :ref_date AND s.brand = m.brand)
+           AS linhas_status
+  FROM unnest(CAST(:marcas AS text[])) AS m(brand)
+ ORDER BY m.brand
+""")
+#: Rotulos da evidencia de conta de uma marca Full zero (sem ids no resumo).
+CONTA_UNICA_NA_PONTE = "conta_unica_na_ponte_do_run"
 #: Id de publicacao ja' usado em QUALQUER data/marca/fato.
 SQL_PUBLISH_RUN_ID_EM_USO = text("SELECT " + " OR ".join(
     f"EXISTS (SELECT 1 FROM {t} WHERE source_run_id = :publish_run_id)" for t in TABELAS))
@@ -396,34 +424,94 @@ def _outcome(valor) -> dict:
     return valor if isinstance(valor, dict) else {}
 
 
-def conferir_linhagem(fonte, ref_date: date, raw_runs: dict) -> None:
-    """Recusa se a fonte lida nao e' exatamente a linhagem publicada informada."""
+def _recusa_zero(m, ref_date, motivo) -> PublicacaoRecusada:
+    """Marca pedida sem fotografia cujo zero NAO foi comprovado: o prefixo antigo + a causa."""
+    return PublicacaoRecusada(f"marca_pedida_sem_fotografia: {m} em {ref_date}; full zero nao comprovado: {motivo}")
+
+
+def conferir_linhagem(fonte, ref_date: date, raw_runs: dict, zero=frozenset()) -> None:
+    """Recusa se a fonte lida nao e' exatamente a linhagem publicada informada.
+
+    `zero`: marcas pedidas sem nenhuma linha de snapshot na data. Para elas a
+    linhagem do run e' a UNICA prova de que o zero e' coleta completa: a
+    recusa sai com o prefixo `marca_pedida_sem_fotografia` e a causa precisa.
+    """
     runs = fonte.get("runs")
     if runs is None:
         raise PublicacaoRecusada("runs_raw_inexistente: raw.ml_full_stock_runs ausente; linhagem nao verificavel")
     for m, esperado in sorted(raw_runs.items()):
-        for k in ("snapshot", "status", "ponte"):
-            vistos = {r.get("run_id") for r in fonte[k] if r["brand"] == m}
-            if vistos - {esperado}:
-                raise PublicacaoRecusada(
-                    f"linhagem_divergente: {m} em {k} tem run(s) {sorted(vistos, key=str)}; esperado {esperado}")
-        reg = runs.get(esperado)
-        if reg is None:
-            raise PublicacaoRecusada(f"run_raw_nao_registrado: {esperado} ausente de raw.ml_full_stock_runs")
-        pedidas = [b.strip() for b in (reg.get("brands_requested") or "").split(",") if b.strip()]
-        if m not in pedidas:
-            raise PublicacaoRecusada(f"run_raw_de_outra_marca: {esperado} nao pediu {m}")
-        inicio = reg.get("started_at")
-        if inicio is None or inicio.astimezone(fonte_mod.OPERATIONAL_TZ).date() != ref_date:
-            raise PublicacaoRecusada(f"run_raw_de_outra_data: {esperado} nao e' de {ref_date}")
-        if reg.get("status") not in RUN_STATUS_TERMINADO:
-            raise PublicacaoRecusada(f"run_raw_nao_terminado: {esperado} status={reg.get('status')!r}")
-        desfecho = _outcome(reg.get("outcome_by_brand")).get(m)
-        if desfecho != DESFECHO_PUBLICADA:
-            raise PublicacaoRecusada(f"run_raw_nao_publicado: {esperado} desfecho de {m}={desfecho!r}")
+        try:
+            _conferir_linhagem_da_marca(fonte, runs, ref_date, m, esperado)
+        except PublicacaoRecusada as exc:
+            if m in zero:
+                raise _recusa_zero(m, ref_date, exc) from None
+            raise
 
 
-def conferir_coerencia(fonte, raw_runs: dict) -> None:
+def _conferir_linhagem_da_marca(fonte, runs, ref_date, m, esperado) -> None:
+    for k in ("snapshot", "status", "ponte"):
+        vistos = {r.get("run_id") for r in fonte[k] if r["brand"] == m}
+        if vistos - {esperado}:
+            raise PublicacaoRecusada(
+                f"linhagem_divergente: {m} em {k} tem run(s) {sorted(vistos, key=str)}; esperado {esperado}")
+    reg = runs.get(esperado)
+    if reg is None:
+        raise PublicacaoRecusada(f"run_raw_nao_registrado: {esperado} ausente de raw.ml_full_stock_runs")
+    pedidas = [b.strip() for b in (reg.get("brands_requested") or "").split(",") if b.strip()]
+    if m not in pedidas:
+        raise PublicacaoRecusada(f"run_raw_de_outra_marca: {esperado} nao pediu {m}")
+    inicio = reg.get("started_at")
+    if inicio is None or inicio.astimezone(fonte_mod.OPERATIONAL_TZ).date() != ref_date:
+        raise PublicacaoRecusada(f"run_raw_de_outra_data: {esperado} nao e' de {ref_date}")
+    # Terminal = passou pelo `registrar_fim` do produtor: grava status E finished_at juntos.
+    if reg.get("status") not in RUN_STATUS_TERMINADO or reg.get("finished_at") is None:
+        raise PublicacaoRecusada(f"run_raw_nao_terminado: {esperado} status={reg.get('status')!r} "
+                                 f"finished_at={'preenchido' if reg.get('finished_at') else 'nulo'}")
+    desfecho = _outcome(reg.get("outcome_by_brand")).get(m)
+    if desfecho != DESFECHO_PUBLICADA:
+        raise PublicacaoRecusada(f"run_raw_nao_publicado: {esperado} desfecho de {m}={desfecho!r}")
+
+
+def contas_por_marca(fonte) -> dict:
+    """{marca: {seller_id}} visto em snapshot, status e ponte da data, TODAS as marcas lidas."""
+    out: dict = {}
+    for k in ("snapshot", "status", "ponte"):
+        for r in fonte[k]:
+            if r.get("seller_id") not in (None, ""):
+                out.setdefault(r["brand"], set()).add(r["seller_id"])
+    return out
+
+
+def conferir_conta_zero(zero, contas: dict, ref_date: date) -> dict:
+    """Prova de conta mais forte que o RAW permite para cada marca Full zero.
+
+    O run nao grava a conta por marca. A unica evidencia e' a ponte do run
+    (anuncios sem inventario), que carrega `seller_id`. Regras:
+    - mais de uma conta na ponte da marca = recusa (`conta_ambigua`);
+    - a conta da ponte aparece em OUTRA marca na data (fonte sem filtro) =
+      recusa (`conta_em_outra_marca`): o zero teria sido coletado na conta errada;
+    - sem ponte = sem evidencia de conta no RAW = recusa
+      (`conta_sem_evidencia_no_raw`): sem provar a conta, o zero nao e'
+      comprovado e a marca fica AUSENTE (sem fotografia), nunca zero.
+    Mensagens e resumo levam contagens, nunca ids. Devolve {marca: rotulo}.
+    """
+    evidencia = {}
+    for m in sorted(zero):
+        proprias = contas.get(m, set())
+        if not proprias:
+            raise _recusa_zero(m, ref_date, "conta_sem_evidencia_no_raw: nenhuma linha de ponte do run "
+                                            "prova a conta da marca")
+        if len(proprias) > 1:
+            raise _recusa_zero(m, ref_date, f"conta_ambigua: {len(proprias)} contas na ponte do run")
+        outras = sorted(k for k, v in contas.items() if k != m and v & proprias)
+        if outras:
+            raise _recusa_zero(m, ref_date, f"conta_em_outra_marca: a conta da ponte aparece em "
+                                            f"{len(outras)} outra(s) marca(s) na data")
+        evidencia[m] = CONTA_UNICA_NA_PONTE
+    return evidencia
+
+
+def conferir_coerencia(fonte, raw_runs: dict, zero=frozenset()) -> None:
     """Fotografia do run esperado coerente por marca, ou `fonte_incoerente` (antes de qualquer escrita).
 
     `conferir_linhagem` so' recusa run ALHEIO: conjunto vazio passa. As regras
@@ -441,6 +529,10 @@ def conferir_coerencia(fonte, raw_runs: dict) -> None:
     linhas): snapshot com >= 1 linha do run, a mesma recusa de
     `marca_pedida_sem_fotografia`; com a igualdade acima, a ponte tambem tem
     >= 1 linha. A mensagem leva contagens, nunca ids.
+    Excecao (T-0052): marca em `zero` (sem snapshot na data, linhagem ja'
+    conferida) e' o zero legitimo do produtor e dispensa o ">= 1 linha"; as
+    demais regras continuam e, com snapshot vazio, exigem ponte so' com
+    anuncio sem inventario e nenhum status.
     """
     def recusa(m, rid, msg):
         raise PublicacaoRecusada(f"fonte_incoerente: {m} {msg} do run {rid}")
@@ -448,9 +540,11 @@ def conferir_coerencia(fonte, raw_runs: dict) -> None:
     for m, rid in sorted(raw_runs.items()):
         do_run = {k: [r for r in fonte[k] if r["brand"] == m and r.get("run_id") == rid]
                   for k in ("snapshot", "status", "ponte")}
-        for k in ("snapshot", "ponte"):
+        for k in (() if m in zero else ("snapshot", "ponte")):
             if not do_run[k]:
                 raise PublicacaoRecusada(f"fonte_incoerente: {m} sem linha do run {rid} em {k}")
+        if m in zero and do_run["snapshot"]:     # cinto: `zero` so' recebe marca sem snapshot
+            recusa(m, rid, "marcada como zero tem snapshot")
         chaves = [(r["seller_id"], r["inventory_id"]) for r in do_run["snapshot"]]
         snap = set(chaves)
         if len(chaves) != len(snap):
@@ -477,17 +571,37 @@ def conferir_coerencia(fonte, raw_runs: dict) -> None:
 # ---------------------------------------------------------------------------
 # Pacote e escrita
 # ---------------------------------------------------------------------------
-def montar(fonte, ref_date: date, run_id: str) -> dict:
-    """Linhas prontas para as tres fatos. So' marcas com fotografia na fonte (ja' filtrada)."""
+#: Linha da fato de marca para Full zero comprovado sem venda na janela. Os
+#: NULL de `*_full` sao exigidos pelo CHECK `ck_fmlfsb_disponivel_exige_leitura`
+#: da 029 (0 inventario Full lido => disponivel_full NULL); o que distingue o
+#: zero comprovado e' `inventarios = 0`, valor que nenhuma outra publicacao grava.
+RESUMO_FULL_ZERO = {"inventarios": 0, "inventarios_full_lidos": 0, "inventarios_compartilhados": 0,
+                    "disponivel_full": None, "nao_disponivel_full": None, "transfer_full": None,
+                    "unidades_28d_alocadas": 0, "unidades_28d_nao_alocadas": {},
+                    "cobertura_da_alocacao": None}
+
+
+def montar(fonte, ref_date: date, run_id: str, zero=frozenset()) -> dict:
+    """Linhas prontas para as tres fatos: marcas com fotografia + marcas Full zero comprovado.
+
+    Marca em `zero` vira so' a linha da fato de marca (`inventarios = 0`); venda
+    Full da janela, se houver, fica nos contadores de nao alocada (o transform
+    nao rateia). Nenhuma linha de inventario/status.
+    """
     linhas, resumo = T.indicadores(fonte["snapshot"], fonte["status"], fonte["ponte"], fonte["vendas"])
-    marcas = sorted({l["brand"] for l in linhas})
+    com_foto = {l["brand"] for l in linhas}
+    if com_foto & set(zero):
+        raise PublicacaoRecusada(f"fonte_incoerente: marca(s) {sorted(com_foto & set(zero))} com inventario "
+                                 "e marcada(s) como zero")
+    marcas = sorted(com_foto | set(zero))
     ok = {(l["brand"], l["seller_id"], l["inventory_id"]) for l in linhas if l["read_status"] == "OK"}
     inv = [tuple({**l, "ref_date": ref_date, "source_run_id": run_id}[c] for c in COLS_INV) for l in linhas]
     st = [(ref_date, s["brand"], s["seller_id"], s["inventory_id"], s["status_raw"], int(s["quantity"]), run_id)
           for s in fonte["status"] if (s["brand"], s["seller_id"], s["inventory_id"]) in ok]
     mar = []
     for m in marcas:
-        r = resumo[m]
+        # Marca zero com venda na janela ja' vem do transform com inventarios=0 e *_full NULL.
+        r = resumo.get(m, RESUMO_FULL_ZERO)
         na = r["unidades_28d_nao_alocadas"]
         mar.append((ref_date, m, r["inventarios"], r["inventarios_full_lidos"],
                     r["inventarios_compartilhados"], r["disponivel_full"], r["nao_disponivel_full"],
@@ -495,8 +609,12 @@ def montar(fonte, ref_date: date, run_id: str) -> dict:
                     na.get("item_com_varios_inventarios", 0), na.get("anuncio_sem_inventory_id", 0),
                     na.get("anuncio_fora_da_ponte", 0), r["cobertura_da_alocacao"], run_id))
     soma_disp = sum(l["disponivel"] or 0 for l in linhas if l["read_status"] == "OK")
+    # (inventarios da fato de marca, linhas de inventario, linhas de status) por marca
+    por_marca = {b[1]: (b[2], sum(1 for x in inv if x[1] == b[1]), sum(1 for x in st if x[1] == b[1]))
+                 for b in mar}
     return {"marcas": marcas, "inventario": inv, "status": st, "marca": mar,
-            "esperado": {"inventarios": len(inv), "soma_disponivel": soma_disp}}
+            "marcas_full_zero": sorted(zero),
+            "esperado": {"inventarios": len(inv), "soma_disponivel": soma_disp, "por_marca": por_marca}}
 
 
 def _inserir(conn, tabela, cols, linhas):
@@ -522,8 +640,18 @@ def publicar_em_transacao(conn, pacote, ref_date: date) -> dict:
         raise ReconciliacaoFalhou(
             f"destino n={destino['n']} soma={destino['soma']}; esperado n={esp['inventarios']} "
             f"soma={esp['soma_disponivel']}")
+    # Por marca: (inventarios da fato de marca, linhas de inventario, linhas de status).
+    # A marca zero tem de estar como (0, 0, 0): linha da fato de marca presente, nada mais.
+    por_marca = {r[0]: (None if r[1] is None else int(r[1]), int(r[2]), int(r[3]))
+                 for r in conn.execute(SQL_RECONCILIA_POR_MARCA, p).fetchall()}
+    if por_marca != esp["por_marca"]:
+        div = sorted(m for m in set(por_marca) | set(esp["por_marca"])
+                     if por_marca.get(m) != esp["por_marca"].get(m))
+        raise ReconciliacaoFalhou(f"destino por marca diverge do esperado em {div} "
+                                  "(inventarios da fato de marca, linhas de inventario, linhas de status)")
     return {"inventarios_publicados": esp["inventarios"], "status_publicados": len(pacote["status"]),
-            "marcas_publicadas": pacote["marcas"], "disponivel_publicado": esp["soma_disponivel"]}
+            "marcas_publicadas": pacote["marcas"], "disponivel_publicado": esp["soma_disponivel"],
+            "marcas_full_zero_publicadas": pacote.get("marcas_full_zero", [])}
 
 
 def _marcar(exc, **atributos):
@@ -658,8 +786,9 @@ def run(apply: bool = False, ref_date: date | None = None, agora: datetime | Non
     esperado_neon = carregar_destino_esperado(destino_esperado) if (apply or destino_esperado) else None
     run_id = publish_run_id or uuid.uuid4().hex
     fonte = _ler_fonte(ref_date, tuple(sorted(set(raw_runs.values()))))
-    ignoradas, sem_foto = [], []
+    ignoradas, sem_foto, contas = [], [], {}
     if fonte is not None and marcas:
+        contas = contas_por_marca(fonte)          # ANTES do filtro: conta de marca nao pedida tambem conta
         fonte, ignoradas, sem_foto = filtrar_fonte(fonte, marcas)
     resumo = fonte_mod.resumir(fonte, ref_date, marcas=tuple(marcas) or fonte_mod.MARCAS)
     resumo.update(run_id=run_id, applied=False)
@@ -667,11 +796,22 @@ def run(apply: bool = False, ref_date: date | None = None, agora: datetime | Non
         resumo["linhagem_raw"] = linhagem(fonte)
     if marcas:
         resumo.update(marcas_pedidas=marcas, marcas_ignoradas=ignoradas)
-    if fonte is not None and sem_foto:
-        raise PublicacaoRecusada(f"marca_pedida_sem_fotografia: {sem_foto} em {ref_date}")
+    zero = frozenset(sem_foto)
+    if fonte is not None and sem_foto and not raw_runs:
+        raise PublicacaoRecusada(f"marca_pedida_sem_fotografia: {sem_foto} em {ref_date}; "
+                                 "sem --raw-run o full zero nao e' comprovavel")
     if fonte is not None and raw_runs:
-        conferir_linhagem(fonte, ref_date, raw_runs)     # dry-run com --raw-run: mesma conferencia
-        conferir_coerencia(fonte, raw_runs)
+        # dry-run com --raw-run: mesma conferencia. Marca sem fotografia so' passa
+        # como Full zero comprovado (linhagem + coerencia + conta); senao recusa.
+        conferir_linhagem(fonte, ref_date, raw_runs, zero)
+        conferir_coerencia(fonte, raw_runs, zero)
+        evidencia = conferir_conta_zero(zero, contas, ref_date)
+        if zero:
+            resumo.update(marcas_full_zero_comprovado=sorted(zero), evidencia_conta_full_zero=evidencia,
+                          estado="medido")
+            for m in zero:
+                resumo["por_marca"][m] = {"estado": "full_zero_comprovado", "inventarios": 0,
+                                          "evidencia_conta": evidencia[m]}
     if not apply:
         return resumo
     # --- travas: qualquer uma ausente = recusa explicita, nada gravado -----
@@ -681,7 +821,7 @@ def run(apply: bool = False, ref_date: date | None = None, agora: datetime | Non
         raise PublicacaoRecusada("fato_inexistente: migration 029 nao aplicada")
     if publish_run_id_em_uso(run_id):
         raise PublicacaoRecusada(f"publish_run_id_reutilizado: {run_id} ja' existe no destino")
-    pacote = montar(fonte, ref_date, run_id)
+    pacote = montar(fonte, ref_date, run_id, zero=zero)
     if pacote["marcas"] != sorted(marcas):
         raise PublicacaoRecusada(f"pacote_fora_do_pedido: {pacote['marcas']} != {sorted(marcas)}")
     resumo.update(modo="apply", source_run_id=run_id)
