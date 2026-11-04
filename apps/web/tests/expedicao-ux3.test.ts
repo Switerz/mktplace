@@ -111,7 +111,13 @@ test("a marca vai para a API como `brands` — a tela nao filtra serie sozinha",
 test("a casca le a marca na montagem e no voltar/avancar e a repassa aos dois corpos", () => {
   assert.match(CASCA, /setMarca\(lerMarca\(window\.location\.search\)\)/);
   assert.match(CASCA, /urlComMarca\(window\.location\.href, nova\)/);
-  assert.equal((CASCA.match(/marca=\{marca\}/g) ?? []).length, 2);
+  // Os dois corpos de canal + (CX-MKT-2/3) a faixa de LDR e a Performance oficial,
+  // que seguem a mesma marca.
+  assert.equal((CASCA.match(/marca=\{marca\}/g) ?? []).length, 4);
+  assert.match(CASCA, /<ExpedicaoClient[\s\S]*?marca=\{marca\}[\s\S]*?\/>/);
+  assert.match(CASCA, /<TikTokDispatchPanel[\s\S]*?marca=\{marca\}[\s\S]*?\/>/);
+  assert.match(CASCA, /<LdrTopo api=\{API\} marca=\{marca\} \/>/);
+  assert.match(CASCA, /<PerformanceOficial api=\{API\} canal=\{canal\} marca=\{marca\} \/>/);
 });
 
 // ===========================================================================

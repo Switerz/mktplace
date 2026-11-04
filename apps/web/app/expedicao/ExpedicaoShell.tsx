@@ -35,6 +35,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import ExpedicaoClient from "./ExpedicaoClient";
+import LdrTopo from "@/components/expedicao/LdrTopo";
+import PerformanceOficial from "@/components/expedicao/PerformanceOficial";
 import TikTokDispatchPanel from "@/components/expedicao/TikTokDispatchPanel";
 import Note from "@/components/ui/Note";
 import Segmented from "@/components/ui/Segmented";
@@ -67,6 +69,13 @@ const ML_LIGADO = process.env.NEXT_PUBLIC_EXPEDICAO_ML_ENABLED === "true";
 const TIKTOK_LIGADO = process.env.NEXT_PUBLIC_EXPEDICAO_TIKTOK_ENABLED === "true";
 
 const FLAGS = { ml: ML_LIGADO, tiktok: TIKTOK_LIGADO };
+
+/**
+ * CX-MKT-2/3: faixa de LDR no topo + secao "Performance" (nota oficial).
+ * INLINE pelo mesmo motivo das flags de canal. Desligada, nada monta nem busca.
+ */
+const PERFORMANCE_LIGADA = process.env.NEXT_PUBLIC_EXPEDICAO_PERFORMANCE_ENABLED === "true";
+const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
 /** Identidade do canal: ponto com a cor do canal, nunca cor de estado. */
 const PONTO_DO_CANAL: Record<CanalExpedicao, string> = {
@@ -179,7 +188,9 @@ export default function ExpedicaoShell() {
       </p>
     );
   }
-  const corpo = ehCanalDaFila(canal) ? (
+  // CX-MKT-3: o LDR entra no esqueleto logo abaixo do cabecalho (slot `destaque`).
+  const destaque = PERFORMANCE_LIGADA ? <LdrTopo api={API} marca={marca} /> : undefined;
+  const corpoDoCanal = ehCanalDaFila(canal) ? (
     <ExpedicaoClient
       canal={canal}
       seletorCanal={seletorCanal}
@@ -187,6 +198,7 @@ export default function ExpedicaoShell() {
       aoTrocarVisao={trocarVisao}
       marca={marca}
       aoTrocarMarca={trocarMarca}
+      faixaTopo={destaque}
     />
   ) : (
     <TikTokDispatchPanel
@@ -195,7 +207,21 @@ export default function ExpedicaoShell() {
       aoTrocarVisao={trocarVisao}
       marca={marca}
       aoTrocarMarca={trocarMarca}
+      faixaTopo={destaque}
     />
+  );
+  // Performance oficial do canal escolhido no FIM da visao do gestor; segue a marca.
+  const corpo = PERFORMANCE_LIGADA ? (
+    <>
+      {corpoDoCanal}
+      {visao === "gestor" ? (
+        <div className="w-full px-4 pb-4">
+          <PerformanceOficial api={API} canal={canal} marca={marca} />
+        </div>
+      ) : null}
+    </>
+  ) : (
+    corpoDoCanal
   );
   if (!demo) return corpo;
   // T-0010: modo de demonstracao (so' fora de producao). A faixa e' ESCRITA:

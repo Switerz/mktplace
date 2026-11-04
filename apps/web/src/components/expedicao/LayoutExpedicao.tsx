@@ -54,12 +54,15 @@ export const TEXTO_ESTADO = {
 
 export default function LayoutExpedicao({
   cabecalho,
+  destaque,
   avisos,
   qualidade,
   estado,
   children,
 }: {
   cabecalho: ReactNode;
+  /** CX-MKT-3: faixa de LDR logo abaixo do cabecalho, igual nos tres canais. */
+  destaque?: ReactNode;
   avisos?: ReactNode;
   qualidade?: ReactNode;
   estado?: ReactNode;
@@ -68,6 +71,7 @@ export default function LayoutExpedicao({
   return (
     <>
       {cabecalho}
+      {destaque}
       {avisos}
       {qualidade}
       {estado}

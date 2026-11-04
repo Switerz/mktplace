@@ -266,6 +266,7 @@ export default function TikTokDispatchPanel({
   aoTrocarVisao,
   marca = null,
   aoTrocarMarca,
+  faixaTopo,
 }: {
   seletorCanal?: ReactNode;
   visao?: Visao;
@@ -273,6 +274,8 @@ export default function TikTokDispatchPanel({
   /** EXPEDICAO-UX-3: marca da casca; vai para a API como `brands`. */
   marca?: string | null;
   aoTrocarMarca?: (m: string | null) => void;
+  /** CX-MKT-3: faixa de LDR da casca, repassada ao esqueleto. */
+  faixaTopo?: ReactNode;
 }) {
   const [evento, setEvento] = useState<Evento>(EVENTO_PADRAO);
   const [inicial] = useState(janelaInicial);
@@ -786,6 +789,7 @@ export default function TikTokDispatchPanel({
     // `div`, nao `main`: o landmark `main` e' do AppShell (um por pagina).
     <div className={CLASSE_RAIZ_EXPEDICAO} aria-busy={estado === "carregando"}>
     <LayoutExpedicao
+      destaque={faixaTopo}
       // 1-2. CABECALHO, FOTOGRAFIA, FRESCOR E FILTROS (compartilhado)
       cabecalho={
         <CabecalhoExpedicao
