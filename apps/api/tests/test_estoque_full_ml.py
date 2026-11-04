@@ -628,6 +628,220 @@ def test_resposta_ok_nao_expoe_id_de_inventario(cliente_factory, fora_do_full):
 
 
 # ===========================================================================
+# 3b. T-0051 — "Sem estoque Full" x "saldo disponivel 0" x ausencia
+# ===========================================================================
+#
+# Cenario LIMPO (sem SEM_LEITURA), para que o total parcial so' dependa da
+# marca em teste. Cada marca entra num de quatro estados:
+#   "medida"      -> 1 inventario Full lido, disponivel 100;
+#   "saldo_zero"  -> 2 inventarios Full lidos, disponivel 0, nao disponivel 15;
+#   "sem_estoque" -> linha de marca com 0 inventarios, NULLs e linhagem; e
+#                    nenhuma linha de inventario (enumeracao completa, zero);
+#   "ausente"     -> nenhuma linha (nao coletada / nao publicada / stale).
+
+def _cenario(**estados):
+    inventarios, marcas = [], []
+    for brand, estado in estados.items():
+        seller = f"S-{brand}"
+        if estado == "medida":
+            inventarios.append(_inv(brand, seller, f"INV-{brand}-1", disp=100,
+                                    nao=0, tr=0, un=28, media="1.00",
+                                    cob="100.0", classe="EXCESSO_CANDIDATO"))
+            marcas.append(_marca(brand, REF, 1, 1, 0, 100, 0, 0, 28,
+                                 cob_aloc="1.0000"))
+        elif estado == "saldo_zero":
+            inventarios.append(_inv(brand, seller, f"INV-{brand}-1", disp=0,
+                                    nao=12, tr=4, un=28, media="1.00",
+                                    cob="0.0", classe="RUPTURA_CANDIDATA"))
+            inventarios.append(_inv(brand, seller, f"INV-{brand}-2", disp=0,
+                                    nao=3, tr=0))
+            marcas.append(_marca(brand, REF, 2, 2, 0, 0, 15, 4, 28,
+                                 cob_aloc="1.0000"))
+        elif estado == "sem_estoque":
+            marcas.append(_marca(brand, REF, 0, 0, 0, None, None, None, 0))
+        else:
+            assert estado == "ausente", estado
+    return SessaoFalsa(inventarios=inventarios, marcas=marcas, status=[])
+
+
+def _m(resposta, brand):
+    return next(m for m in resposta.marcas if m.brand == brand)
+
+
+def test_sem_estoque_full_e_estado_proprio_que_conta_zero():
+    """Estado 1. CONTRAPROVA: no codigo antigo isto levantava
+    `MLFullEstoqueContractError("... agregado sem inventarios no dia")` e a
+    tela inteira caia em 503."""
+    r = _bloco_falso(_cenario(barbours="medida", kokeshi="sem_estoque",
+                              lescent="medida", rituaria="medida"))
+    kok = _m(r, "kokeshi")
+    assert kok.estado == "sem_estoque_full"
+    assert kok.tem_fotografia_no_dia is True
+    assert kok.disponivel_full == 0, "enumeracao completa e zero: 0 medido"
+    assert (kok.nao_disponivel_full, kok.transfer_full) == (0, 0)
+    assert kok.inventarios == 0 and kok.inventarios_full_lidos == 0
+    assert kok.leitura.inventarios == 0
+    assert "kokeshi" in r.cobertura.marcas_com_fotografia
+    assert r.cobertura.marcas_sem_fotografia == []
+    assert r.indicadores.total_parcial is False
+    assert r.indicadores.motivos_total_parcial == []
+    assert r.indicadores.disponivel_full == 300
+    assert {m.brand: m.estado for m in r.marcas} == {
+        "barbours": "com_inventario", "kokeshi": "sem_estoque_full",
+        "lescent": "com_inventario", "rituaria": "com_inventario"}
+
+
+def test_saldo_disponivel_zero_e_com_inventario():
+    """Estado 2: ha inventario fisico, so' o disponivel e' 0."""
+    r = _bloco_falso(_cenario(barbours="medida", kokeshi="saldo_zero",
+                              lescent="medida", rituaria="medida"))
+    kok = _m(r, "kokeshi")
+    assert kok.estado == "com_inventario"
+    assert kok.disponivel_full == 0
+    assert kok.nao_disponivel_full == 15 and kok.transfer_full == 4
+    assert kok.inventarios_full_lidos == 2
+    assert r.indicadores.total_parcial is False
+    assert r.indicadores.disponivel_full == 300
+    assert r.indicadores.nao_disponivel_full == 15
+
+
+def test_marca_ausente_continua_ausencia_sem_estado():
+    """Estado 3: igual a antes -- None, sem fotografia e total parcial."""
+    r = _bloco_falso(_cenario(barbours="medida", lescent="medida",
+                              rituaria="medida"))
+    kok = _m(r, "kokeshi")
+    assert kok.estado is None
+    assert kok.tem_fotografia_no_dia is False
+    assert kok.disponivel_full is None
+    assert r.cobertura.marcas_sem_fotografia == ["kokeshi"]
+    assert r.indicadores.total_parcial is True
+    assert r.indicadores.motivos_total_parcial == [
+        "Sem fotografia no dia: kokeshi."]
+
+
+def test_todas_sem_estoque_full_total_zero_nao_parcial():
+    r = _bloco_falso(_cenario(barbours="sem_estoque", kokeshi="sem_estoque",
+                              lescent="sem_estoque", rituaria="sem_estoque"))
+    assert {m.estado for m in r.marcas} == {"sem_estoque_full"}
+    assert r.cobertura.marcas_com_fotografia == list(svc.EXPECTED_BRANDS)
+    assert r.cobertura.marcas_sem_fotografia == []
+    i = r.indicadores
+    assert (i.disponivel_full, i.nao_disponivel_full, i.transfer_full) == (0, 0, 0)
+    assert i.total_parcial is False and i.motivos_total_parcial == []
+    assert i.inventarios == 0
+    assert r.total_no_filtro == 0 and r.inventarios == []
+
+
+def test_uma_ausente_e_outra_sem_estoque_e_parcial():
+    """A marca sem estoque Full NAO entra no motivo do parcial; a ausente sim."""
+    r = _bloco_falso(_cenario(kokeshi="sem_estoque", lescent="medida",
+                              rituaria="medida"))
+    assert _m(r, "kokeshi").estado == "sem_estoque_full"
+    assert _m(r, "barbours").estado is None
+    assert r.cobertura.marcas_sem_fotografia == ["barbours"]
+    assert r.indicadores.total_parcial is True
+    assert r.indicadores.motivos_total_parcial == [
+        "Sem fotografia no dia: barbours."]
+    assert r.indicadores.disponivel_full == 200
+
+    # So' sem estoque + ausente: o total e' o que foi medido, e PARCIAL.
+    r2 = _bloco_falso(_cenario(kokeshi="sem_estoque", lescent="sem_estoque"))
+    assert r2.indicadores.disponivel_full == 0
+    assert r2.indicadores.total_parcial is True
+    assert r2.indicadores.motivos_total_parcial == [
+        "Sem fotografia no dia: barbours, rituaria."]
+
+
+def test_filtro_so_da_marca_sem_estoque_full():
+    r = _bloco_falso(_cenario(kokeshi="sem_estoque", lescent="medida"),
+                     brands=["kokeshi"])
+    assert r.indicadores.disponivel_full == 0
+    assert r.indicadores.total_parcial is False
+    assert r.marcas[0].estado == "sem_estoque_full"
+
+
+def _sem_estoque_com(**campos):
+    marca = _marca("kokeshi", REF, 0, 0, 0, None, None, None, 0)
+    marca.update(campos)
+    return marca
+
+
+@pytest.mark.parametrize("caso", [
+    "agregado_n_sem_linhas",
+    "agregado_zero_com_linhas",
+    "zero_com_full_lidos",
+    "zero_com_nao_disponivel",
+    "zero_com_transfer",
+    "zero_com_compartilhados",
+    "zero_sem_source_run_id",
+    "zero_sem_published_at",
+])
+def test_divergencia_marca_x_inventario_continua_503(cliente_factory, caso):
+    sessao = _cenario(barbours="medida", lescent="medida", rituaria="medida")
+    if caso == "agregado_n_sem_linhas":
+        sessao.marcas.append(_marca("kokeshi", REF, 2, 2, 0, 9, 0, 0, 0))
+    elif caso == "agregado_zero_com_linhas":
+        sessao.marcas.append(_sem_estoque_com())
+        sessao.inventarios.append(_inv("kokeshi", "S-K", "INV-K9", disp=5,
+                                       nao=0, tr=0))
+    elif caso == "zero_com_full_lidos":
+        sessao.marcas.append(_sem_estoque_com(inventarios_full_lidos=1,
+                                              disponivel_full=5))
+    elif caso == "zero_com_nao_disponivel":
+        sessao.marcas.append(_sem_estoque_com(nao_disponivel_full=0))
+    elif caso == "zero_com_transfer":
+        sessao.marcas.append(_sem_estoque_com(transfer_full=0))
+    elif caso == "zero_com_compartilhados":
+        sessao.marcas.append(_sem_estoque_com(inventarios_compartilhados=1))
+    elif caso == "zero_sem_source_run_id":
+        sessao.marcas.append(_sem_estoque_com(source_run_id=""))
+    elif caso == "zero_sem_published_at":
+        sessao.marcas.append(_sem_estoque_com(published_at=None))
+    with pytest.raises(svc.MLFullEstoqueContractError):
+        _bloco_falso(sessao)
+    r = cliente_factory(sessao).get(ROTA)
+    assert r.status_code == 503
+
+
+def test_estado_pelo_endpoint(cliente_factory):
+    r = cliente_factory(_cenario(kokeshi="sem_estoque", lescent="medida",
+                                 rituaria="saldo_zero")).get(ROTA)
+    assert r.status_code == 200
+    estados = {m["brand"]: m["estado"] for m in r.json()["marcas"]}
+    assert estados == {"barbours": None, "kokeshi": "sem_estoque_full",
+                       "lescent": "com_inventario",
+                       "rituaria": "com_inventario"}
+    assert "source_run_id" not in r.text and "run-ficticio" not in r.text
+
+
+def test_estado_tem_default_seguro_e_dominio_fechado():
+    from pydantic import ValidationError
+    from app.schemas.ml_full_stock import MarcaEstoque
+    assert MarcaEstoque(brand="kokeshi", tem_fotografia_no_dia=False).estado is None
+    with pytest.raises(ValidationError):
+        MarcaEstoque(brand="kokeshi", tem_fotografia_no_dia=True,
+                     estado="nao_opera_full")
+
+
+def test_fixture_antigo_marca_sem_full_lido_continua_com_inventario():
+    """Inventario presente mas nenhum Full lido NAO e' "sem estoque Full"."""
+    r = _bloco_falso()
+    assert _m(r, "rituaria").estado == "com_inventario"
+    assert _m(r, "rituaria").disponivel_full is None
+    assert _m(r, "kokeshi").estado is None
+
+
+def test_029_admite_a_linha_de_marca_sem_estoque_full_sem_migration():
+    """O sinal do estado 1 e' `inventarios = 0` com disponivel NULL: o CHECK
+    `(inventarios_full_lidos > 0) = (disponivel_full IS NOT NULL)` fica
+    FALSE = FALSE. Nenhuma coluna nova e' necessaria."""
+    assert "inventarios                      INTEGER NOT NULL CHECK (inventarios >= 0)" in MIGRATION_SRC
+    assert "(inventarios_full_lidos > 0) = (disponivel_full IS NOT NULL)" in MIGRATION_SRC
+    assert "nao_disponivel_full              BIGINT  CHECK" in MIGRATION_SRC
+    assert "source_run_id                    TEXT    NOT NULL" in MIGRATION_SRC
+
+
+# ===========================================================================
 # 4. Integracao contra PostgreSQL real, com o DDL da migration 029
 # ===========================================================================
 
@@ -785,6 +999,20 @@ def test_pg_transacao_e_read_only(engine, sessao):
     with pytest.raises(Exception) as exc:
         sessao.execute(_t(f"DELETE FROM {svc.BRAND_TABLE}"))
     assert "read-only" in str(exc.value).lower()
+
+
+@pg
+def test_pg_029_admite_sem_estoque_full(engine, sessao):
+    """A linha de marca com 0 inventarios e NULLs passa nos CHECKs reais."""
+    marcas = [dict(m) for m in MARCAS if m["brand"] != "kokeshi"]
+    marcas.append(_marca("kokeshi", REF, 0, 0, 0, None, None, None, 0))
+    inventarios = [i for i in INVENTARIOS if i["brand"] != "kokeshi"]
+    _recriar(engine, inventarios=inventarios, marcas=marcas)
+    r = _bloco(sessao)
+    kok = next(m for m in r.marcas if m.brand == "kokeshi")
+    assert kok.estado == "sem_estoque_full" and kok.disponivel_full == 0
+    assert "kokeshi" not in r.cobertura.marcas_sem_fotografia
+    assert r.indicadores.disponivel_full == 570
 
 
 @pg
