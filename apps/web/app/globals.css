@@ -667,3 +667,33 @@ html:not(.dark) .tc-fundo .tc-tema-claro {
     transparent 70%
   );
 }
+
+/* UI-ALINHAMENTO-1 — tabela de numero + percentual (Backlog por marca).
+   O % ocupa largura fixa e alinha a' direita; a celula que NAO tem % reserva
+   o mesmo espaco. Assim o numero de todas as linhas cai na mesma vertical,
+   tenha a linha percentual ou nao. 1rem = o `pr-4` da celula. */
+.tc-tabela-num-pct .tc-pct {
+  display: inline-block;
+  min-width: 3.25rem;
+  margin-left: 0.375rem;
+  text-align: right;
+}
+.tc-tabela-num-pct td.tc-num-pct:not(:has(.tc-pct)) {
+  padding-right: calc(1rem + 0.375rem + 3.25rem);
+}
+/* O zero de Vencidos fica com o mesmo recuo da etiqueta vermelha (px-2),
+   para alinhar com os numeros que estao dentro dela. */
+.tc-tabela-num-pct .tc-vencido-zero {
+  padding-left: 0.5rem;
+  padding-right: 0.5rem;
+}
+.tc-tabela-num-pct .tc-vencido-zero .tc-pct {
+  margin-right: -0.5rem;
+}
+/* Variacao da tendencia: caixa de largura fixa ao lado do mini grafico, com
+   o absoluto e o % em colunas. */
+.tc-tabela-num-pct .tc-variacao {
+  display: inline-block;
+  min-width: 7.5rem;
+  text-align: right;
+}

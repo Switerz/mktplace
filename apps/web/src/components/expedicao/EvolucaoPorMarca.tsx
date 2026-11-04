@@ -190,8 +190,11 @@ function Sparkline({ serie, dominioX }: { serie: SerieMarca; dominioX: [number, 
   );
 }
 
+// UI-ALINHAMENTO-1: cabecalho pela BASE (o de Tendencia tem duas linhas) e
+// `tc-tabela-num-pct`, que da' ao % largura fixa e faz a celula sem % reservar
+// o mesmo espaco (ver globals.css) — os numeros caem na mesma vertical.
 const CLASSE_TABELA =
-  "w-full text-sm [&_td]:py-1.5 [&_td]:pr-4 [&_th]:py-1.5 [&_th]:pr-4";
+  "tc-tabela-num-pct w-full text-sm [&_td]:py-1.5 [&_td]:pr-4 [&_th]:py-1.5 [&_th]:pr-4 [&_thead_th]:align-bottom";
 
 const NOTA_DO_EIXO =
   "Tendência no mesmo eixo de tempo para todas as marcas; hora sem ponto interrompe a linha.";
@@ -267,7 +270,7 @@ function SoTendencia({ resposta }: { resposta: RespostaTendencia }) {
                     ) : null}
                   </th>
                   <td className="text-right tabular-nums font-semibold text-ink">{inteiro(s.atual)}</td>
-                  <td className="whitespace-nowrap text-right tabular-nums text-ink">
+                  <td className="whitespace-nowrap text-right tabular-nums text-ink tc-num-pct">
                     {/* T-0021: o " · " so' para o leitor de tela; sem ele, "−12" e
                         "−5,0%" eram lidos colados ("−12−5,0%"). O `sr-only` e'
                         absoluto: o invólucro `relative` (inline, sem mudar o
@@ -277,7 +280,7 @@ function SoTendencia({ resposta }: { resposta: RespostaTendencia }) {
                       {v.secundario ? (
                         <>
                           <span className="sr-only"> · </span>
-                          <span className="ml-1 text-xs text-ink-muted">{v.secundario}</span>
+                          <span className="ml-1 tc-pct text-xs text-ink-muted">{v.secundario}</span>
                         </>
                       ) : null}
                     </span>
@@ -410,19 +413,19 @@ function TabelaUnica({
                     {inteiro(f ? f.backlog : (s?.atual ?? 0))}
                   </td>
                   {comVencidos ? (
-                    <td className="whitespace-nowrap text-right tabular-nums text-ink">
+                    <td className="whitespace-nowrap text-right tabular-nums text-ink tc-num-pct">
                       {f?.vencidos == null ? (
                         "—"
                       ) : f.vencidos === 0 ? (
                         // EXPEDICAO-ATRASO-7D: zero vencidos AGORA nao zera a
                         // taxa de 7 dias (atrasados ÷ pedidos com prazo na
                         // janela). Toda linha com o calculo mostra o %.
-                        <span>
+                        <span className="tc-vencido-zero">
                           {inteiro(0)}
                           {f.pctVencidos ? (
                             <>
                               <span className="sr-only"> · </span>
-                              <span className="ml-1.5 text-xs font-normal text-ink-faint">{f.pctVencidos}</span>
+                              <span className="ml-1.5 tc-pct text-xs font-normal text-ink-faint">{f.pctVencidos}</span>
                             </>
                           ) : null}
                         </span>
@@ -446,7 +449,7 @@ function TabelaUnica({
                           {f.pctVencidos ? (
                             <>
                               <span className="sr-only"> · </span>
-                              <span className="ml-1.5 text-xs font-normal text-ink-faint">{f.pctVencidos}</span>
+                              <span className="ml-1.5 tc-pct text-xs font-normal text-ink-faint">{f.pctVencidos}</span>
                             </>
                           ) : null}
                         </span>
@@ -454,7 +457,7 @@ function TabelaUnica({
                     </td>
                   ) : null}
                   {comPerto ? (
-                    <td className="whitespace-nowrap text-right tabular-nums text-ink">
+                    <td className="whitespace-nowrap text-right tabular-nums text-ink tc-num-pct">
                       {f?.pertoDeVencer == null ? (
                         "—"
                       ) : (
@@ -474,7 +477,7 @@ function TabelaUnica({
                           {f.pctPertoDeVencer && f.pertoDeVencer > 0 ? (
                             <>
                               <span className="sr-only"> · </span>
-                              <span className="ml-1 text-xs font-normal text-ink-faint">{f.pctPertoDeVencer}</span>
+                              <span className="ml-1 tc-pct text-xs font-normal text-ink-faint">{f.pctPertoDeVencer}</span>
                             </>
                           ) : null}
                         </span>
@@ -484,7 +487,7 @@ function TabelaUnica({
                   <td className="text-right tabular-nums text-ink">
                     {inteiro(f ? f.acima48h : (ultimo?.over48h ?? 0))}
                   </td>
-                  <td className="whitespace-nowrap text-right tabular-nums text-ink">
+                  <td className="whitespace-nowrap text-right tabular-nums text-ink tc-num-pct">
                     {/* T-0021: "12" e "5,3%" eram lidos colados ("125,3%"); o
                         " · " so' para o leitor de tela, preso ao invólucro
                         `relative` (QA F1). */}
@@ -504,7 +507,7 @@ function TabelaUnica({
                       {f?.pctTravados && f.travados > 0 ? (
                         <>
                           <span className="sr-only"> · </span>
-                          <span className="ml-1 text-xs text-ink-faint">{f.pctTravados}</span>
+                          <span className="ml-1 tc-pct text-xs text-ink-faint">{f.pctTravados}</span>
                         </>
                       ) : null}
                     </span>
@@ -518,12 +521,12 @@ function TabelaUnica({
                           // T-0021: o " · " so' para o leitor de tela (sem ele,
                           // "−12" e "−5,0%" eram lidos colados), preso ao
                           // invólucro `relative` (QA F1).
-                          <span className="relative whitespace-nowrap text-xs tabular-nums text-ink">
+                          <span className="relative whitespace-nowrap tc-variacao text-xs tabular-nums text-ink">
                             {v.principal}
                             {v.secundario ? (
                               <>
                                 <span className="sr-only"> · </span>
-                                <span className="ml-1 text-ink-muted">{v.secundario}</span>
+                                <span className="ml-1 tc-pct text-ink-muted">{v.secundario}</span>
                               </>
                             ) : null}
                           </span>
