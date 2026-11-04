@@ -34,6 +34,34 @@ As vendas seguem o mesmo contrato do `sync_ml_fulfillment_daily`:
   5. `SUFICIENTE`, nos demais casos.
 - **Os limites 7 e 90 são PROVISÓRIOS.** Vêm da Shopee FBS e nenhum responsável os ratificou para o ML. Eles saem no resumo marcados como provisórios.
 
+## Estado por marca na API e na tela (T-0051)
+
+`GET /api/v1/performance/ml-full-estoque` devolve `marcas[].estado` e distingue três situações. Elas não podem ser confundidas.
+
+| Situação | Como chega ao mart (029) | API | Tela | Total |
+|---|---|---|---|---|
+| **Sem estoque Full**: a enumeração foi completa e deu zero | Linha em `fact_ml_full_stock_brand_daily` com `inventarios = 0`, `inventarios_full_lidos = 0`, `inventarios_compartilhados = 0`, `disponivel_full`, `nao_disponivel_full` e `transfer_full` **NULL**, `source_run_id` não vazio e `published_at` presente. **Nenhuma** linha em `fact_ml_full_stock_inventory_daily` no dia. | `estado = "sem_estoque_full"`, `tem_fotografia_no_dia = true`, `disponivel_full = 0` (e não disponível e transferência 0). A marca fica em `marcas_com_fotografia`. | "Sem estoque Full", em tom neutro | Conta 0 e **não** torna o total parcial |
+| **Saldo disponível 0**: há inventário, mas nada disponível | Linhas de inventário com `disponivel = 0`; na marca, `disponivel_full = 0` e `inventarios_full_lidos > 0` | `estado = "com_inventario"`, `disponivel_full = 0` e `nao_disponivel_full` medido | "0" com "saldo disponível 0 · N não disponível" | Soma normal |
+| **Ausência ou falha**: não coletada, não publicada ou stale | Nenhuma linha da marca no dia | `estado = null`, números `null`; a marca fica em `cobertura.marcas_sem_fotografia` | "—" e chip âmbar | **Parcial** |
+
+**Regras**
+- "Sem estoque Full" **não** quer dizer "não opera Full". Significa apenas que a fotografia do dia não encontrou nenhum inventário.
+- A 029 já admite a linha zero **sem migration**:
+  - `inventarios >= 0`;
+  - `ck_fmlfsb_disponivel_exige_leitura`: `(inventarios_full_lidos > 0) = (disponivel_full IS NOT NULL)`. Com 0 e NULL, a comparação fica `FALSE = FALSE`, e o CHECK passa;
+  - `nao_disponivel_full` e `transfer_full` só exigem `>= 0` quando preenchidos. O contrato da API exige NULL nesses campos;
+  - `source_run_id` e `published_at` são NOT NULL.
+- Toda outra divergência entre marca e inventário continua sendo **contrato quebrado (503)**. Exemplos:
+  - a marca diz N > 0 inventários e não há nenhuma linha;
+  - a marca diz 0 e há linhas;
+  - a marca diz 0, mas tem lidos, compartilhados ou alguma quantidade preenchida (inclusive 0 em vez de NULL);
+  - a marca diz 0 e não tem linhagem.
+- **Total do escopo:**
+  - Se todas as marcas esperadas têm fotografia, as marcas "sem estoque Full" entram com 0 e o total não é parcial. Se todas estão sem estoque Full, o total é 0 e a tela mostra "Sem estoque Full".
+  - Se falta qualquer marca, o total é **parcial**: é a soma do que foi medido, com o motivo "Sem fotografia no dia: …". A marca ausente nunca vira zero.
+- **Na web:** um `estado` desconhecido, ou incoerente com a fotografia, é erro de contrato e a tela não mostra números. Um exemplo de incoerência: `sem_estoque_full` com `disponivel_full` diferente de 0. Um payload sem o campo, vindo de uma API anterior, é lido como antes: com fotografia, `com_inventario`; sem fotografia, ausência.
+- **Quem grava a linha zero:** o publicador ainda **não** grava. Hoje ele recusa a marca sem linhas. Até isso mudar (gap Z2 do QA da T-0044b), o estado não aparece em produção.
+
 ## Saída
 
 Somente agregados por marca: inventários, inventários compartilhados, disponível, indisponível e `transfer` do Full, contagem por classe, unidades alocadas, unidades não alocadas por motivo e cobertura da alocação. Nenhum id de inventário, anúncio ou conta é impresso.
