@@ -1,4 +1,5 @@
 import {
+  DEFAULT_MARKETPLACE_SELECTION,
   parseMarketplaceParam,
   serializeMarketplaceSelection,
 } from "../marketplace-filter.ts";
@@ -67,7 +68,10 @@ export function validateDateRange(dateFrom: string, dateTo: string, today: Date 
  * lanca excecao.
  */
 export function parseFiltersFromSearchParams(params: URLSearchParams): GlobalFilters {
-  const channels = parseMarketplaceParam(params.get("channels") ?? params.get("marketplace") ?? "all");
+  // Sem canal na URL -> Consolidado (ML + Shopee). `channels=all` explicito
+  // continua sendo os tres canais.
+  const channelsRaw = params.get("channels") ?? params.get("marketplace");
+  const channels = channelsRaw == null ? [...DEFAULT_MARKETPLACE_SELECTION] : parseMarketplaceParam(channelsRaw);
 
   const brandsRaw = params.get("brands");
   const brands = brandsRaw
@@ -90,7 +94,7 @@ export function parseFiltersFromSearchParams(params: URLSearchParams): GlobalFil
  * Presenca de qualquer um deles significa que a URL nao esta "vazia" — o
  * default por tela (`defaultPreset`/`defaultCompare`) nao se aplica mais,
  * mesmo que o parametro individual esteja ausente (nesse caso cai no
- * fallback neutro do parser: canal "all", sem marca, compare=false). Isso e
+ * fallback neutro do parser: Consolidado, sem marca, compare=false). Isso e
  * o que garante que "querystring explicita sempre vence o default da tela"
  * e que compare=false sobrevive a um reload (ver useGlobalFilters). */
 const FILTER_PARAM_NAMES = ["channels", "marketplace", "brands", "date_from", "date_to", "compare"] as const;
@@ -110,13 +114,13 @@ export interface DefaultFiltersOptions {
 }
 
 /** Resolve o default de uma tela (usado so quando a URL nao tem NENHUM
- * parametro de filtro reconhecido) — canal "all", sem marca, o intervalo do
+ * parametro de filtro reconhecido) — Consolidado (ML + Shopee), sem marca, o intervalo do
  * `defaultPreset` e `defaultCompare`. */
 export function computeDefaultFilters(options: DefaultFiltersOptions = {}): GlobalFilters {
   const { defaultPreset = "30d", defaultCompare = false, now = () => new Date() } = options;
   const range = presetRange(defaultPreset, now());
   return {
-    channels: parseMarketplaceParam("all"),
+    channels: [...DEFAULT_MARKETPLACE_SELECTION],
     brands: [],
     dateFrom: range.dateFrom,
     dateTo: range.dateTo,

@@ -8,7 +8,7 @@
  *
  * Funcao pura: testavel com node:test, sem React.
  */
-import { ALL_MARKETPLACES, isAllSelected } from "../marketplace-filter.ts";
+import { ALL_MARKETPLACES, isAllSelected, isConsolidadoSelected } from "../marketplace-filter.ts";
 import type { Marketplace } from "../mock-data.ts";
 import { ALL_BRAND_KEYS, brandLabel } from "./brands.ts";
 import { fmtPeriodo } from "./format.ts";
@@ -27,6 +27,7 @@ export interface OpcoesResumo {
 
 export function resumoCanais(channels: readonly Marketplace[]): string {
   if (isAllSelected(channels)) return "Todos os canais";
+  if (isConsolidadoSelected(channels)) return "Consolidado (ML + Shopee)";
   return ALL_MARKETPLACES.filter((c) => channels.includes(c)).map((c) => CANAL[c]).join(" + ");
 }
 

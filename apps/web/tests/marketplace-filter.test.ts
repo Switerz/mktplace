@@ -4,8 +4,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   ALL_MARKETPLACES,
+  ALL_MARKETPLACE_SELECTION,
+  CONSOLIDADO_SELECTION,
   DEFAULT_MARKETPLACE_SELECTION,
   canonicalizeSelection,
+  isConsolidadoSelected,
   isMarketplaceSelected,
   isAllSelected,
   toggleMarketplace,
@@ -13,9 +16,29 @@ import {
   parseMarketplaceParam,
 } from "../src/lib/marketplace-filter.ts";
 
-test("estado inicial (DEFAULT_MARKETPLACE_SELECTION) contem os tres canais na ordem canonica", () => {
-  assert.deepEqual(DEFAULT_MARKETPLACE_SELECTION, ["tiktok", "ml", "shopee"]);
-  assert.ok(isAllSelected(DEFAULT_MARKETPLACE_SELECTION));
+test("estado inicial (DEFAULT_MARKETPLACE_SELECTION) e' o Consolidado: ML + Shopee, sem TikTok", () => {
+  assert.deepEqual(DEFAULT_MARKETPLACE_SELECTION, ["ml", "shopee"]);
+  assert.deepEqual(CONSOLIDADO_SELECTION, ["ml", "shopee"]);
+  assert.ok(isConsolidadoSelected(DEFAULT_MARKETPLACE_SELECTION));
+  assert.ok(!isAllSelected(DEFAULT_MARKETPLACE_SELECTION));
+});
+
+test("ALL_MARKETPLACE_SELECTION (botao Todos) continua com os tres canais", () => {
+  assert.deepEqual(ALL_MARKETPLACE_SELECTION, ["tiktok", "ml", "shopee"]);
+  assert.ok(isAllSelected(ALL_MARKETPLACE_SELECTION));
+  assert.ok(!isConsolidadoSelected(ALL_MARKETPLACE_SELECTION));
+});
+
+test("isConsolidadoSelected: so' ML + Shopee exatos, em qualquer ordem", () => {
+  assert.ok(isConsolidadoSelected(["shopee", "ml"]));
+  assert.ok(!isConsolidadoSelected(["ml"]));
+  assert.ok(!isConsolidadoSelected(["tiktok", "ml"]));
+  assert.ok(!isConsolidadoSelected(["tiktok", "ml", "shopee"]));
+});
+
+test("Consolidado serializa como 'ml,shopee' e volta igual", () => {
+  assert.equal(serializeMarketplaceSelection(CONSOLIDADO_SELECTION), "ml,shopee");
+  assert.deepEqual(parseMarketplaceParam("ml,shopee"), ["ml", "shopee"]);
 });
 
 test("canonicalizeSelection ordena e remove duplicados", () => {
@@ -90,7 +113,7 @@ test("parseMarketplaceParam: aceita combinacao separada por virgula e normaliza 
   assert.deepEqual(parseMarketplaceParam("shopee,tiktok,ml"), ["tiktok", "ml", "shopee"]);
 });
 
-test("parseMarketplaceParam: valor invalido cai para o padrao (todos os canais)", () => {
+test("parseMarketplaceParam: valor invalido cai para todos os canais", () => {
   assert.deepEqual(parseMarketplaceParam("invalido"), ["tiktok", "ml", "shopee"]);
 });
 

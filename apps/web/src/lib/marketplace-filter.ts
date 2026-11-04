@@ -5,7 +5,17 @@ export const ALL_MARKETPLACES: readonly Marketplace[] = ["tiktok", "ml", "shopee
 
 export type MarketplaceSelection = Marketplace[];
 
-export const DEFAULT_MARKETPLACE_SELECTION: MarketplaceSelection = [...ALL_MARKETPLACES];
+/** Os tres canais — o botao "Todos" e o `channels=all` da URL. */
+export const ALL_MARKETPLACE_SELECTION: MarketplaceSelection = [...ALL_MARKETPLACES];
+
+/**
+ * Consolidado: Mercado Livre + Shopee, sem TikTok Shop. E' o escopo padrao
+ * das telas — o TikTok continua a um clique ("Todos" ou o proprio botao).
+ */
+export const CONSOLIDADO_SELECTION: MarketplaceSelection = ["ml", "shopee"];
+
+/** Selecao aplicada quando a URL nao diz o canal (entrada direta na tela). */
+export const DEFAULT_MARKETPLACE_SELECTION: MarketplaceSelection = [...CONSOLIDADO_SELECTION];
 
 /** Remove duplicados e ordena na ordem canônica TikTok, ML, Shopee. */
 export function canonicalizeSelection(selection: readonly Marketplace[]): MarketplaceSelection {
@@ -19,6 +29,15 @@ export function isMarketplaceSelected(selection: readonly Marketplace[], mp: Mar
 
 export function isAllSelected(selection: readonly Marketplace[]): boolean {
   return ALL_MARKETPLACES.every((mp) => selection.includes(mp));
+}
+
+/** Exatamente ML + Shopee (a ordem nao importa). */
+export function isConsolidadoSelected(selection: readonly Marketplace[]): boolean {
+  const canonical = canonicalizeSelection(selection);
+  return (
+    canonical.length === CONSOLIDADO_SELECTION.length &&
+    CONSOLIDADO_SELECTION.every((mp) => canonical.includes(mp))
+  );
 }
 
 /**
@@ -47,10 +66,15 @@ export function serializeMarketplaceSelection(selection: readonly Marketplace[])
   return canonical.join(",");
 }
 
-/** Compat: aceita o parâmetro escalar legado ("all"|"tiktok"|"ml"|"shopee") e devolve a seleção equivalente. */
+/**
+ * Compat: aceita o parâmetro escalar legado ("all"|"tiktok"|"ml"|"shopee") e devolve a seleção equivalente.
+ * "all" explícito (e valor inválido) continua sendo os três canais — links antigos e o botão "Todos".
+ * Parâmetro AUSENTE é decidido por quem chama: as telas de filtro global caem no Consolidado
+ * (ver `parseFiltersFromSearchParams`).
+ */
 export function parseMarketplaceParam(value: string): MarketplaceSelection {
-  if (value === "all" || value === "") return [...DEFAULT_MARKETPLACE_SELECTION];
+  if (value === "all" || value === "") return [...ALL_MARKETPLACE_SELECTION];
   const parts = value.split(",").map((p) => p.trim()).filter(Boolean) as Marketplace[];
   const valid = parts.filter((p) => (ALL_MARKETPLACES as string[]).includes(p));
-  return canonicalizeSelection(valid.length ? valid : DEFAULT_MARKETPLACE_SELECTION);
+  return canonicalizeSelection(valid.length ? valid : ALL_MARKETPLACE_SELECTION);
 }

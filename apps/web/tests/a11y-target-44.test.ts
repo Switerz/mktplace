@@ -326,7 +326,7 @@ test("V33 DateRangeFilter cumpre 44px em preset, comparacao e datas", () => {
 });
 
 test("V33 aria-pressed, labels e validacao de data seguem intactos", () => {
-  assert.equal((MKT.match(/aria-pressed=/g) ?? []).length, 2, "Todos + os tres canais");
+  assert.equal((MKT.match(/aria-pressed=/g) ?? []).length, 3, "Todos + Consolidado + os tres canais");
   assert.match(DRF, /aria-pressed=\{active\}/);
   assert.match(DRF, /role="group"[\s\S]{0,80}aria-label="Presets de período"/);
   assert.match(MKT, /aria-label="Filtro de marketplaces"/);

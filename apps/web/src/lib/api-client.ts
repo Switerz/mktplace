@@ -4,7 +4,7 @@
 } from "./mock-data";
 import { calcMoM } from "./formatters";
 import {
-  DEFAULT_MARKETPLACE_SELECTION,
+  ALL_MARKETPLACE_SELECTION,
   isMarketplaceSelected,
   serializeMarketplaceSelection,
   type MarketplaceSelection,
@@ -411,7 +411,7 @@ export function fetchBrands(
 }
 
 export function fetchMonthly(
-  selection: MarketplaceSelection = DEFAULT_MARKETPLACE_SELECTION,
+  selection: MarketplaceSelection = ALL_MARKETPLACE_SELECTION,
 ): Promise<{ data: MonthPoint[]; live: boolean }> {
   interface ApiResp { data: MonthPoint[] }
   const marketplace = serializeMarketplaceSelection(selection);
@@ -1852,7 +1852,7 @@ export interface PedidosData {
 }
 
 export function fetchPedidos(
-  selection: MarketplaceSelection = DEFAULT_MARKETPLACE_SELECTION,
+  selection: MarketplaceSelection = ALL_MARKETPLACE_SELECTION,
   filters?: GlobalFilterParams,
   daysBack = 30,
 ): Promise<PedidosData | null> {
