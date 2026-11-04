@@ -52,10 +52,12 @@ def gravar_destino(caminho, alvo=None, fonte=None):
 
 
 def registro(run_id=RAW, marcas="barbours", status="completo", desfecho=None,
-             inicio=datetime(2026, 10, 20, 10, 20, tzinfo=timezone.utc)):
+             inicio=datetime(2026, 10, 20, 10, 20, tzinfo=timezone.utc), fim="padrao"):
     desfecho = desfecho or {m: "PUBLICADA" for m in marcas.split(",")}
-    return {"run_id": run_id, "started_at": inicio, "brands_requested": marcas, "status": status,
-            "outcome_by_brand": desfecho}
+    if fim == "padrao":           # o produtor grava status terminal E finished_at juntos (registrar_fim)
+        fim = None if status == "running" else datetime(2026, 10, 20, 10, 50, tzinfo=timezone.utc)
+    return {"run_id": run_id, "started_at": inicio, "finished_at": fim, "brands_requested": marcas,
+            "status": status, "outcome_by_brand": desfecho}
 
 
 def fonte_marca(marca="barbours", run_id=RAW):
@@ -137,6 +139,8 @@ class Cursor:
 class Conn:
     def __init__(self, lock=True, destino=None, em_uso=False, ident=None, host="ep-x.sa-east-1.aws.neon.tech"):
         self.lock, self.destino, self.em_uso, self.sqls = lock, destino, em_uso, []
+        #: resposta da reconciliacao por marca: [(brand, inventarios_marca, linhas_inv, linhas_status)]
+        self.por_marca = []
         self.ident, self.host = dict(IDENT) if ident is None else ident, host
         self.pode_control, self.tem_alembic, self.negar = True, True, set()
         self.connection = self
@@ -147,6 +151,8 @@ class Conn:
         self.sqls.append((s, params))
         if "pg_try_advisory_xact_lock" in s:
             return Res(escalar=self.lock)
+        if "unnest(CAST(:marcas" in s:
+            return Res(linhas=self.por_marca)
         if "source_run_id = :publish_run_id" in s:
             return Res(escalar=self.em_uso)
         if "COUNT(*)" in s:
@@ -213,9 +219,8 @@ def ambiente(monkeypatch, tmp_path):
     return estado
 
 
-def _conn_ok(fonte=None):
-    pacote = pub.montar(fonte or fonte_barbours(), REF, "r")
-    return Conn(destino={"n": pacote["esperado"]["inventarios"], "soma": pacote["esperado"]["soma_disponivel"]})
+def _conn_ok(fonte=None, zero=frozenset()):
+    return _ok(Conn(), fonte, zero)
 
 
 def _sem_neon(monkeypatch, motivo="tocou o Neon"):
@@ -392,7 +397,7 @@ def test_publish_run_id_vira_source_run_id(ambiente, monkeypatch):
     monkeypatch.setattr(pub, "local_engine", lambda: Engine(conn))
     capturado = []
     original = pub.montar
-    monkeypatch.setattr(pub, "montar", lambda f, d, rid: capturado.append(rid) or original(f, d, rid))
+    monkeypatch.setattr(pub, "montar", lambda f, d, rid, **kw: capturado.append(rid) or original(f, d, rid, **kw))
     r = pub.run(apply=True, ref_date=REF, **CONTRATO)
     assert capturado == [PUB] and r["source_run_id"] == PUB and r["run_id"] == PUB
 
@@ -941,9 +946,11 @@ def _audit_real(monkeypatch, *conns):
     return fila
 
 
-def _ok(conn):
-    pac = pub.montar(fonte_barbours(), REF, "r")["esperado"]
+def _ok(conn, fonte=None, zero=frozenset()):
+    """Destino que devolve exatamente o pacote: totais e (inventarios, linhas inv, linhas status) por marca."""
+    pac = pub.montar(fonte or fonte_barbours(), REF, "r", zero=zero)["esperado"]
     conn.destino = {"n": pac["inventarios"], "soma": pac["soma_disponivel"]}
+    conn.por_marca = [(m,) + v for m, v in sorted(pac["por_marca"].items())]
     return conn
 
 
@@ -1165,7 +1172,7 @@ def test_status_vazio_e_legitimo_e_publica(ambiente, monkeypatch):
     f = fonte_barbours()
     f["status"] = []
     monkeypatch.setattr(pub, "_ler_fonte", lambda ref, runs=(): f)
-    monkeypatch.setattr(pub, "local_engine", lambda: Engine(_ok(Conn())))
+    monkeypatch.setattr(pub, "local_engine", lambda: Engine(_ok(Conn(), f)))
     r = pub.run(apply=True, ref_date=REF, **CONTRATO)
     assert r["applied"] is True and r["status_publicados"] == 0
 
@@ -1230,3 +1237,196 @@ def test_ler_fonte_que_nao_fica_repeatable_read_falha_antes_de_ler_dado(monkeypa
         pub._ler_fonte(REF, (RAW,))
     assert sqls == [fonte_mod.SQL_LEITURA_CONSISTENTE, fonte_mod.SQL_CONFERE_LEITURA]
     assert eventos == ["rollback", "close"]
+
+
+# ---------------------------------------------------------------------------
+# T-0052: Full zero comprovado (marca PUBLICADA pelo produtor com 0 inventarios)
+# ---------------------------------------------------------------------------
+QUATRO = "barbours,kokeshi,lescent,rituaria"
+
+
+def ponte_sem_inventario(marca, item="MZ1", seller="SK", run_id=RAW):
+    # o produtor grava o anuncio sem inventario na ponte e nao le snapshot dele (L424)
+    return {"brand": marca, "seller_id": seller, "item_id": item, "variation_id": "0", "inventory_id": None,
+            "logistic_type": "cross_docking", "listing_status": "active", "run_id": run_id}
+
+
+def fonte_com_zero(ponte_zero=True, reg=None):
+    """barbours com fotografia + kokeshi PUBLICADA com 0 inventarios, mesmo run."""
+    f = fonte_barbours(runs={RAW: reg or registro(marcas="barbours,kokeshi")})
+    if ponte_zero:
+        f["ponte"].append(ponte_sem_inventario("kokeshi"))
+    return f
+
+
+def _run_zero(ambiente, monkeypatch, fonte, marcas, conn=None, apply=True):
+    monkeypatch.setattr(pub, "_ler_fonte", lambda ref, runs=(): fonte)
+    zero = frozenset(m for m in marcas if not any(s["brand"] == m for s in fonte["snapshot"]))
+    conn = conn or _ok(Conn(), pub.filtrar_fonte(fonte, marcas)[0], zero)
+    monkeypatch.setattr(pub, "local_engine", lambda: Engine(conn))
+    kw = dict(marcas=marcas, raw_runs={m: RAW for m in marcas})
+    if apply:
+        kw.update(publish_run_id=PUB, destino_esperado=ARQ_DESTINO)
+    return pub.run(apply=apply, ref_date=REF, **kw), conn
+
+
+def test_full_zero_comprovado_publica_linha_zero_na_fato_de_marca_e_nada_mais(ambiente, monkeypatch):
+    r, conn = _run_zero(ambiente, monkeypatch, fonte_com_zero(), ["barbours", "kokeshi"])
+    assert r["applied"] is True and r["marcas_publicadas"] == ["barbours", "kokeshi"]
+    assert r["marcas_full_zero_publicadas"] == ["kokeshi"] == r["marcas_full_zero_comprovado"]
+    assert r["por_marca"]["kokeshi"] == {"estado": "full_zero_comprovado", "inventarios": 0,
+                                         "evidencia_conta": pub.CONTA_UNICA_NA_PONTE}
+    assert r["inventarios_publicados"] == 7                         # so' os da barbours
+    deletes = [p for s, p in conn.sqls if s.startswith("DELETE")]
+    assert len(deletes) == 3 and all(p["marcas"] == ["barbours", "kokeshi"] for p in deletes)
+    pac = pub.montar(pub.filtrar_fonte(fonte_com_zero(), ["barbours", "kokeshi"])[0], REF, PUB,
+                     zero=frozenset({"kokeshi"}))
+    assert {x[1] for x in pac["inventario"]} == {"barbours"} and {x[1] for x in pac["status"]} == {"barbours"}
+    zero = dict(zip(pub.COLS_MARCA, next(x for x in pac["marca"] if x[1] == "kokeshi")))
+    assert zero == {"ref_date": REF, "brand": "kokeshi", "inventarios": 0, "inventarios_full_lidos": 0,
+                    "inventarios_compartilhados": 0, "disponivel_full": None, "nao_disponivel_full": None,
+                    "transfer_full": None, "unidades_28d_alocadas": 0, "unidades_28d_item_varios_inventarios": 0,
+                    "unidades_28d_sem_inventory_id": 0, "unidades_28d_fora_da_ponte": 0,
+                    "cobertura_da_alocacao": None, "source_run_id": PUB}
+    assert pac["esperado"]["por_marca"]["kokeshi"] == (0, 0, 0)
+
+
+def test_full_zero_sem_ponte_publica_e_declara_falta_de_evidencia_de_conta(ambiente, monkeypatch):
+    f = {"snapshot": [], "status": [], "ponte": [], "vendas": {}, "runs": {RAW: registro(marcas="kokeshi")}}
+    r, _ = _run_zero(ambiente, monkeypatch, f, ["kokeshi"])
+    assert r["applied"] is True and r["marcas_publicadas"] == ["kokeshi"] and r["inventarios_publicados"] == 0
+    assert r["evidencia_conta_full_zero"] == {"kokeshi": pub.CONTA_SEM_EVIDENCIA_RAW}
+    assert ambiente["audit"][0] == ("start", 0) and ambiente["audit"][-1][0] == "success"
+
+
+def test_todas_as_marcas_full_zero_total_zero(ambiente, monkeypatch):
+    marcas = QUATRO.split(",")
+    f = {"snapshot": [], "status": [], "ponte": [], "vendas": {}, "runs": {RAW: registro(marcas=QUATRO)}}
+    r, _ = _run_zero(ambiente, monkeypatch, f, marcas)
+    assert r["applied"] is True and r["marcas_full_zero_publicadas"] == marcas
+    assert r["inventarios_publicados"] == 0 and r["disponivel_publicado"] == 0 and r["estado"] == "medido"
+    assert [t for t, _ in ambiente["inseridos"]] == [pub.FACT_MARCA]     # 4 linhas zero, so' a fato de marca
+    assert ambiente["inseridos"][0][1] == 4 and ambiente["marcas_inseridas"] == set(marcas)
+
+
+def test_full_zero_com_venda_na_janela_fica_como_nao_alocada():
+    f = {"snapshot": [], "status": [], "ponte": [ponte_sem_inventario("kokeshi")], "vendas":
+         {("kokeshi", "MZ1", "0"): 3, ("kokeshi", "MQ", "0"): 2}}
+    pac = pub.montar(f, REF, PUB, zero=frozenset({"kokeshi"}))
+    linha = dict(zip(pub.COLS_MARCA, pac["marca"][0]))
+    assert linha["inventarios"] == 0 and linha["disponivel_full"] is None and linha["unidades_28d_alocadas"] == 0
+    assert (linha["unidades_28d_sem_inventory_id"], linha["unidades_28d_fora_da_ponte"]) == (3, 2)
+    assert linha["cobertura_da_alocacao"] == 0 and pac["inventario"] == [] and pac["status"] == []
+
+
+def _zero(reg=None, ponte=None):
+    """So' kokeshi pedida, sem snapshot; `reg` e `ponte` adulteram a prova."""
+    return {"snapshot": [], "status": [], "vendas": {},
+            "ponte": [ponte_sem_inventario("kokeshi")] if ponte is None else ponte,
+            "runs": {RAW: registro(marcas="kokeshi")} if reg is None else reg}
+
+
+@pytest.mark.parametrize("fonte,trecho", [
+    (lambda: _zero({RAW: registro(marcas="kokeshi", desfecho={"kokeshi": "INCOMPLETA_NAO_PUBLICADA"})}),
+     "run_raw_nao_publicado"),                                              # coleta incompleta (400/paginacao)
+    (lambda: _zero({RAW: registro(marcas="kokeshi", desfecho={"kokeshi": "PERMISSAO_NEGADA"})}),
+     "run_raw_nao_publicado"),                                              # 403
+    (lambda: _zero({RAW: registro(marcas="kokeshi", desfecho={"barbours": "PUBLICADA"})}),
+     "run_raw_nao_publicado"),                                              # desfecho ausente
+    (lambda: _zero({RAW: dict(registro(marcas="kokeshi"), outcome_by_brand="nao-json")}),
+     "run_raw_nao_publicado"),                                              # desfecho mal formado
+    (lambda: _zero({RAW: registro(marcas="kokeshi", status="running")}), "run_raw_nao_terminado"),
+    (lambda: _zero({RAW: registro(marcas="kokeshi", fim=None)}), "run_raw_nao_terminado"),
+    (lambda: _zero({RAW: registro(marcas="kokeshi", status="parcial", fim=None)}), "run_raw_nao_terminado"),
+    (lambda: _zero({RAW: registro(marcas="kokeshi", inicio=datetime(2026, 10, 21, 3, 0, tzinfo=timezone.utc))}),
+     "run_raw_de_outra_data"),
+    (lambda: _zero({RAW: registro(marcas="barbours")}), "run_raw_de_outra_marca"),
+    (lambda: _zero({}), "run_raw_nao_registrado"),                          # ausencia
+    (lambda: _zero(ponte=[ponte_sem_inventario("kokeshi", run_id="run-novo")]), "linhagem_divergente"),
+    (lambda: _zero(ponte=[ponte_sem_inventario("kokeshi"), ponte_sem_inventario("kokeshi", "MZ2", "SK2")]),
+     "conta_ambigua: 2 contas"),
+    (lambda: dict(_zero(), snapshot=fonte_marca("barbours", "run-b")["snapshot"],
+                  ponte=[ponte_sem_inventario("kokeshi", seller="S1")]),
+     "conta_em_outra_marca"),                                               # conta da barbours (nao pedida)
+])
+def test_marca_sem_fotografia_sem_prova_de_zero_recusa_sem_escrever(ambiente, monkeypatch, fonte, trecho):
+    monkeypatch.setattr(pub, "_ler_fonte", lambda ref, runs=(): fonte())
+    _sem_neon(monkeypatch, "tocou o Neon com zero nao comprovado")
+    with pytest.raises(pub.PublicacaoRecusada) as e:
+        pub.run(apply=True, ref_date=REF, marcas=["kokeshi"], raw_runs={"kokeshi": RAW}, publish_run_id=PUB,
+                destino_esperado=ARQ_DESTINO)
+    msg = str(e.value)
+    assert msg.startswith(f"marca_pedida_sem_fotografia: kokeshi em {REF}; full zero nao comprovado: ")
+    assert trecho in msg
+    assert "SK" not in msg and "S1" not in msg                              # contagens, nunca ids de conta
+    assert ambiente["audit"] == [] and ambiente["inseridos"] == []
+
+
+def test_zero_com_ponte_que_tem_inventario_e_incoerente(ambiente, monkeypatch):
+    monkeypatch.setattr(pub, "_ler_fonte", lambda ref, runs=(): _zero(ponte=[
+        dict(ponte_sem_inventario("kokeshi"), inventory_id="IZ")]))
+    _sem_neon(monkeypatch)
+    with pytest.raises(pub.PublicacaoRecusada, match=r"fonte_incoerente: kokeshi tem 1 inventario\(s\) da ponte"):
+        pub.run(apply=True, ref_date=REF, marcas=["kokeshi"], raw_runs={"kokeshi": RAW}, publish_run_id=PUB,
+                destino_esperado=ARQ_DESTINO)
+
+
+def test_marca_sem_prova_derruba_a_invocacao_inteira_e_nao_grava_a_outra(ambiente, monkeypatch):
+    # tudo-ou-nada POR INVOCACAO continua: o isolamento e' uma invocacao por marca
+    reg = registro(marcas="barbours,kokeshi", status="parcial",
+                   desfecho={"barbours": "PUBLICADA", "kokeshi": "INCOMPLETA_NAO_PUBLICADA"})
+    monkeypatch.setattr(pub, "_ler_fonte", lambda ref, runs=(): fonte_com_zero(reg=reg))
+    _sem_neon(monkeypatch)
+    with pytest.raises(pub.PublicacaoRecusada, match="kokeshi .*run_raw_nao_publicado"):
+        pub.run(apply=True, ref_date=REF, marcas=["barbours", "kokeshi"],
+                raw_runs={"barbours": RAW, "kokeshi": RAW}, publish_run_id=PUB, destino_esperado=ARQ_DESTINO)
+    assert ambiente["inseridos"] == []
+
+
+def test_mesmo_run_parcial_a_marca_pronta_publica_sozinha(ambiente, monkeypatch):
+    reg = registro(marcas="barbours,kokeshi", status="parcial",
+                   desfecho={"barbours": "PUBLICADA", "kokeshi": "INCOMPLETA_NAO_PUBLICADA"})
+    r, conn = _run_zero(ambiente, monkeypatch, fonte_com_zero(reg=reg), ["barbours"])
+    assert r["applied"] is True and r["marcas_publicadas"] == ["barbours"]
+    assert all(p["marcas"] == ["barbours"] for s, p in conn.sqls if s.startswith("DELETE"))
+
+
+def test_dry_run_sem_raw_run_nao_comprova_zero(ambiente, monkeypatch):
+    monkeypatch.setattr(pub, "_ler_fonte", lambda ref, runs=(): _zero())
+    _sem_neon(monkeypatch)
+    with pytest.raises(pub.PublicacaoRecusada, match="sem --raw-run o full zero nao e' comprovavel"):
+        pub.run(apply=False, ref_date=REF, marcas=["kokeshi"])
+
+
+def test_dry_run_com_raw_run_mostra_o_zero_comprovado_sem_tocar_o_neon(ambiente, monkeypatch):
+    monkeypatch.setattr(pub, "_ler_fonte", lambda ref, runs=(): _zero())
+    _sem_neon(monkeypatch)
+    r = pub.run(apply=False, ref_date=REF, marcas=["kokeshi"], raw_runs={"kokeshi": RAW})
+    assert r["applied"] is False and r["por_marca"]["kokeshi"]["estado"] == "full_zero_comprovado"
+
+
+def test_reconciliacao_sem_a_linha_zero_no_destino_aborta(ambiente, monkeypatch):
+    conn = _ok(Conn(), pub.filtrar_fonte(_zero(), ["kokeshi"])[0], frozenset({"kokeshi"}))
+    conn.por_marca = [("kokeshi", None, 0, 0)]                     # a linha da fato de marca nao ficou
+    eng = Engine(conn)
+    monkeypatch.setattr(pub, "_ler_fonte", lambda ref, runs=(): _zero())
+    monkeypatch.setattr(pub, "local_engine", lambda: eng)
+    with pytest.raises(pub.ReconciliacaoFalhou, match="kokeshi") as e:
+        pub.run(apply=True, ref_date=REF, marcas=["kokeshi"], raw_runs={"kokeshi": RAW}, publish_run_id=PUB,
+                destino_esperado=ARQ_DESTINO)
+    assert e.value.estado_transacao == pub.ESTADO_REVERTIDA and eng.commits == 0
+
+
+def test_reconciliacao_por_marca_pega_divergencia_de_status(ambiente, monkeypatch):
+    conn = _conn_ok()
+    conn.por_marca = [("barbours", 7, 7, 0)]
+    monkeypatch.setattr(pub, "local_engine", lambda: Engine(conn))
+    with pytest.raises(pub.ReconciliacaoFalhou, match="barbours"):
+        pub.run(apply=True, ref_date=REF, **CONTRATO)
+
+
+def test_run_terminado_sem_finished_at_recusa_tambem_marca_com_fotografia(ambiente, monkeypatch):
+    monkeypatch.setattr(pub, "_ler_fonte", lambda ref, runs=(): fonte_barbours(runs={RAW: registro(fim=None)}))
+    _sem_neon(monkeypatch)
+    with pytest.raises(pub.PublicacaoRecusada, match="run_raw_nao_terminado.*finished_at=nulo"):
+        pub.run(apply=True, ref_date=REF, **CONTRATO)
