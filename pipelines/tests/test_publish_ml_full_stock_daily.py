@@ -1291,19 +1291,29 @@ def test_full_zero_comprovado_publica_linha_zero_na_fato_de_marca_e_nada_mais(am
     assert pac["esperado"]["por_marca"]["kokeshi"] == (0, 0, 0)
 
 
-def test_full_zero_sem_ponte_publica_e_declara_falta_de_evidencia_de_conta(ambiente, monkeypatch):
+def test_full_zero_sem_ponte_nao_prova_a_conta_e_recusa_sem_nenhuma_escrita(ambiente, monkeypatch):
+    # R103: run PUBLICADA com 0 linhas e sem ponte nao prova a conta -> ausente, nunca zero
     f = {"snapshot": [], "status": [], "ponte": [], "vendas": {}, "runs": {RAW: registro(marcas="kokeshi")}}
-    r, _ = _run_zero(ambiente, monkeypatch, f, ["kokeshi"])
-    assert r["applied"] is True and r["marcas_publicadas"] == ["kokeshi"] and r["inventarios_publicados"] == 0
-    assert r["evidencia_conta_full_zero"] == {"kokeshi": pub.CONTA_SEM_EVIDENCIA_RAW}
-    assert ambiente["audit"][0] == ("start", 0) and ambiente["audit"][-1][0] == "success"
+    monkeypatch.setattr(pub, "_ler_fonte", lambda ref, runs=(): f)
+    _sem_neon(monkeypatch, "tocou o Neon (DELETE/INSERT) sem prova de conta")
+    monkeypatch.setattr(pub, "_audit_conn", lambda: pytest.fail("abriu conexao de auditoria"))
+    with pytest.raises(pub.PublicacaoRecusada) as e:
+        pub.run(apply=True, ref_date=REF, marcas=["kokeshi"], raw_runs={"kokeshi": RAW}, publish_run_id=PUB,
+                destino_esperado=ARQ_DESTINO)
+    assert str(e.value).startswith(
+        f"marca_pedida_sem_fotografia: kokeshi em {REF}; full zero nao comprovado: conta_sem_evidencia_no_raw")
+    assert ambiente["audit"] == [] and ambiente["inseridos"] == []      # sem audit_start, sem INSERT
+    with pytest.raises(pub.PublicacaoRecusada, match="conta_sem_evidencia_no_raw"):   # dry-run: mesma recusa
+        pub.run(apply=False, ref_date=REF, marcas=["kokeshi"], raw_runs={"kokeshi": RAW})
 
 
 def test_todas_as_marcas_full_zero_total_zero(ambiente, monkeypatch):
     marcas = QUATRO.split(",")
-    f = {"snapshot": [], "status": [], "ponte": [], "vendas": {}, "runs": {RAW: registro(marcas=QUATRO)}}
+    f = {"snapshot": [], "status": [], "vendas": {}, "runs": {RAW: registro(marcas=QUATRO)},
+         "ponte": [ponte_sem_inventario(m, seller=f"S{i}") for i, m in enumerate(marcas)]}   # 4 contas
     r, _ = _run_zero(ambiente, monkeypatch, f, marcas)
     assert r["applied"] is True and r["marcas_full_zero_publicadas"] == marcas
+    assert r["evidencia_conta_full_zero"] == {m: pub.CONTA_UNICA_NA_PONTE for m in marcas}
     assert r["inventarios_publicados"] == 0 and r["disponivel_publicado"] == 0 and r["estado"] == "medido"
     assert [t for t, _ in ambiente["inseridos"]] == [pub.FACT_MARCA]     # 4 linhas zero, so' a fato de marca
     assert ambiente["inseridos"][0][1] == 4 and ambiente["marcas_inseridas"] == set(marcas)
@@ -1343,6 +1353,7 @@ def _zero(reg=None, ponte=None):
     (lambda: _zero({RAW: registro(marcas="barbours")}), "run_raw_de_outra_marca"),
     (lambda: _zero({}), "run_raw_nao_registrado"),                          # ausencia
     (lambda: _zero(ponte=[ponte_sem_inventario("kokeshi", run_id="run-novo")]), "linhagem_divergente"),
+    (lambda: _zero(ponte=[]), "conta_sem_evidencia_no_raw"),               # sem anuncio: conta nao provada
     (lambda: _zero(ponte=[ponte_sem_inventario("kokeshi"), ponte_sem_inventario("kokeshi", "MZ2", "SK2")]),
      "conta_ambigua: 2 contas"),
     (lambda: dict(_zero(), snapshot=fonte_marca("barbours", "run-b")["snapshot"],
@@ -1637,10 +1648,12 @@ def test_pg_quatro_marcas_uma_full_zero_por_invocacao_e_repeticao_idempotente(pg
 @sem_pg
 def test_pg_todas_as_marcas_full_zero_total_zero(pg):
     _run_raw(pg, "R2", D2, QUATRO.split(","))
+    for i, m in enumerate(QUATRO.split(",")):                      # cada marca prova a SUA conta na ponte
+        _ponte(pg, "R2", D2, m, f"S{i}", "MZ")
     antes = _contagens(pg)
     r = _publicar(D2, QUATRO.split(","), {m: "R2" for m in QUATRO.split(",")}, _pid(10))
     assert r["applied"] is True and r["inventarios_publicados"] == 0 and r["disponivel_publicado"] == 0
-    assert r["evidencia_conta_full_zero"] == {m: pub.CONTA_SEM_EVIDENCIA_RAW for m in QUATRO.split(",")}
+    assert r["evidencia_conta_full_zero"] == {m: pub.CONTA_UNICA_NA_PONTE for m in QUATRO.split(",")}
     fm = _marca(pg, D2)
     assert sorted(fm) == QUATRO.split(",") and all(v.inventarios == 0 and v.disponivel_full is None
                                                    for v in fm.values())
@@ -1659,6 +1672,7 @@ def _semear_recusas(eng):
     _run_raw(eng, "R6", D4, ["barbours", "kokeshi"])
     _inventario(eng, "R6", D4, "barbours", "S1", "IA", 7)
     _ponte(eng, "R6", D4, "kokeshi", "S1", "MK")
+    _run_raw(eng, "R7", D4, ["rituaria"])                   # PUBLICADA, 0 linhas e SEM ponte: conta nao provada
 
 
 @sem_pg
@@ -1669,6 +1683,7 @@ def _semear_recusas(eng):
     (D3, "rituaria", "R3", "run_raw_de_outra_marca"),        # run errado: nao pediu a marca
     (D3, "rituaria", "NAO-EXISTE", "run_raw_nao_registrado"),  # ausencia
     (D4, "kokeshi", "R6", "conta_em_outra_marca"),           # conta errada
+    (D4, "rituaria", "R7", "conta_sem_evidencia_no_raw"),    # zero sem anuncio: ausente, nunca zero
 ])
 def test_pg_zero_sem_prova_recusa_sem_tocar_o_destino(pg, dia, marca, run_raw, trecho):
     _semear_recusas(pg)
@@ -1688,6 +1703,7 @@ def test_pg_marca_pronta_do_run_parcial_publica_e_a_incompleta_fica_ausente(pg):
 @sem_pg
 def test_pg_destino_divergente_recusa_zero_sem_escrita(pg, tmp_path):
     _run_raw(pg, "R2", D2, ["rituaria"])
+    _ponte(pg, "R2", D2, "rituaria", "S4", "MR")
     alvo = json.loads((tmp_path / ARQ_DESTINO).read_text(encoding="utf-8"))["identidade"]["alvo_neon"]
     gravar_destino(tmp_path / ARQ_DESTINO, dict(alvo, system_identifier="1"))
     antes, audit = _contagens(pg), _audit(pg)

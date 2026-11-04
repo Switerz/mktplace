@@ -32,14 +32,14 @@ CONTRATO DO APPLY
 - FULL ZERO COMPROVADO (T-0052): marca pedida com 0 linhas de snapshot na data
   so' e' publicavel com `--raw-run` e a MESMA linhagem acima (o produtor so'
   grava `PUBLICADA` depois de coleta completa; marca publicada com 0
-  inventarios nao deixa linha na fotografia). Ponte do run so' com anuncio sem
-  inventario; conta da ponte (quando ha) unica e de nenhuma outra marca na
+  inventarios nao deixa linha na fotografia). Ponte do run com >= 1 linha, so'
+  de anuncio sem inventario, com UMA conta que nao aparece em outra marca na
   data. Vira UMA linha em `fact_ml_full_stock_brand_daily` com
   `inventarios = 0` e nenhuma linha de inventario/status. Sem essa prova =
   recusa `marca_pedida_sem_fotografia: ...; full zero nao comprovado: <causa>`
-  (ausencia nunca vira zero). O RAW nao grava a conta por marca no run: sem
-  ponte, a conta da marca zero nao tem evidencia no RAW e o resumo diz isso
-  (`evidencia_conta_full_zero`).
+  (ausencia nunca vira zero). O RAW nao grava a conta por marca no run: marca
+  sem nenhum anuncio (sem ponte) nao prova a conta e e' RECUSADA
+  (`conta_sem_evidencia_no_raw`), ficando ausente.
 - Coerencia da fotografia do run, por marca pedida (`conferir_coerencia`,
   invariantes do produtor para marca PUBLICADA): snapshot sem duplicata,
   inventarios do snapshot == `inventory_id` nao nulos da ponte (nas duas
@@ -182,7 +182,6 @@ SELECT m.brand,
 """)
 #: Rotulos da evidencia de conta de uma marca Full zero (sem ids no resumo).
 CONTA_UNICA_NA_PONTE = "conta_unica_na_ponte_do_run"
-CONTA_SEM_EVIDENCIA_RAW = "sem_evidencia_de_conta_no_raw"
 #: Id de publicacao ja' usado em QUALQUER data/marca/fato.
 SQL_PUBLISH_RUN_ID_EM_USO = text("SELECT " + " OR ".join(
     f"EXISTS (SELECT 1 FROM {t} WHERE source_run_id = :publish_run_id)" for t in TABELAS))
@@ -491,23 +490,24 @@ def conferir_conta_zero(zero, contas: dict, ref_date: date) -> dict:
     - mais de uma conta na ponte da marca = recusa (`conta_ambigua`);
     - a conta da ponte aparece em OUTRA marca na data (fonte sem filtro) =
       recusa (`conta_em_outra_marca`): o zero teria sido coletado na conta errada;
-    - sem ponte = sem evidencia de conta no RAW: nao recusa (nao ha o que
-      comparar) e o resumo diz `sem_evidencia_de_conta_no_raw`.
+    - sem ponte = sem evidencia de conta no RAW = recusa
+      (`conta_sem_evidencia_no_raw`): sem provar a conta, o zero nao e'
+      comprovado e a marca fica AUSENTE (sem fotografia), nunca zero.
     Mensagens e resumo levam contagens, nunca ids. Devolve {marca: rotulo}.
     """
     evidencia = {}
     for m in sorted(zero):
         proprias = contas.get(m, set())
+        if not proprias:
+            raise _recusa_zero(m, ref_date, "conta_sem_evidencia_no_raw: nenhuma linha de ponte do run "
+                                            "prova a conta da marca")
         if len(proprias) > 1:
             raise _recusa_zero(m, ref_date, f"conta_ambigua: {len(proprias)} contas na ponte do run")
-        if proprias:
-            outras = sorted(k for k, v in contas.items() if k != m and v & proprias)
-            if outras:
-                raise _recusa_zero(m, ref_date, f"conta_em_outra_marca: a conta da ponte aparece em "
-                                                f"{len(outras)} outra(s) marca(s) na data")
-            evidencia[m] = CONTA_UNICA_NA_PONTE
-        else:
-            evidencia[m] = CONTA_SEM_EVIDENCIA_RAW
+        outras = sorted(k for k, v in contas.items() if k != m and v & proprias)
+        if outras:
+            raise _recusa_zero(m, ref_date, f"conta_em_outra_marca: a conta da ponte aparece em "
+                                            f"{len(outras)} outra(s) marca(s) na data")
+        evidencia[m] = CONTA_UNICA_NA_PONTE
     return evidencia
 
 
