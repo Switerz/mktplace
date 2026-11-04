@@ -252,6 +252,19 @@ class Settings(BaseSettings):
     slack_bot_token: SecretStr = SecretStr("")
     expedicao_alerta_destinatarios: str = ""
 
+    # ------------------------------------------------------------------
+    # Login Google (AUTH-GOOGLE-2) — gate de sessao (app/gate_sessao.py)
+    # ------------------------------------------------------------------
+    # off (padrao: nao muda nada) | report (so' loga o que negaria) | enforce (401).
+    # Valor desconhecido vale enforce (fail-closed).
+    torre_auth_mode: str = "off"
+    # Mesmo valor da Vercel; >= 32 caracteres, senao conta como nao configurado (503).
+    auth_secret: SecretStr = SecretStr("")
+    # Dominios de e-mail aceitos na sessao (CSV, match exato).
+    allowed_email_domains: str = "gocase.com,gobeaute.com.br"
+    # Chave do Oraculo MCP (header x-torre-service-key); >= 32 caracteres, vazia = desligada.
+    torre_service_key: SecretStr = SecretStr("")
+
     @property
     def expedicao_alerta_destinatarios_list(self) -> list[str]:
         return [e.strip() for e in self.expedicao_alerta_destinatarios.split(",") if e.strip()]

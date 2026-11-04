@@ -812,11 +812,12 @@ test("GET e DELETE seguem a MESMA fronteira", async () => {
 // Anti-escopo: nada de authorization server proprio, tools seguem read-only
 // ===========================================================================
 
+// api/auth saiu da lista: agora hospeda o login Google da Torre (AUTH-GOOGLE-4), que nao e authorization server do MCP.
 test("nenhum endpoint proprio de OAuth foi criado", () => {
   const app = resolve(HERE, "../app");
   for (const forbidden of [
     "api/mcp/register", "api/mcp/authorize", "api/mcp/token", "api/mcp/callback",
-    "api/oauth", "api/auth", "api/login", "oauth", "register",
+    "api/oauth", "api/login", "oauth", "register",
   ]) {
     assert.ok(!existsSync(resolve(app, forbidden)), `${forbidden} nao pode existir`);
   }

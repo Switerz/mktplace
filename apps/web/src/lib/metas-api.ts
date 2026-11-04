@@ -4,6 +4,7 @@
  * Sem modo demonstracao, como a DRE: meta de exemplo seria lida como meta
  * real. Com a API fora, a tela mostra o erro.
  */
+import { torreFetch } from "./torre-fetch.ts";
 import {
   classificarFalha,
   hojeBrt,
@@ -28,7 +29,7 @@ export class MetasErro extends Error {
 async function pedir(url: string, init?: RequestInit): Promise<unknown> {
   let res: Response;
   try {
-    res = await fetch(url, init);
+    res = await torreFetch(url, init);
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;
     throw new MetasErro(classificarFalha(null, null));
@@ -85,7 +86,7 @@ export async function fetchRealizado(
   if (!janela) return "futuro";
   const qs = new URLSearchParams({ channels: "all", date_from: janela.dateFrom, date_to: janela.dateTo });
   try {
-    const res = await fetch(`${API_URL}/api/v1/performance/brands?${qs}`, { signal });
+    const res = await torreFetch(`${API_URL}/api/v1/performance/brands?${qs}`, { signal });
     if (!res.ok) return null;
     const json = (await res.json()) as { brands?: LinhaRealizado[] };
     return Array.isArray(json.brands) ? json.brands : null;

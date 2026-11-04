@@ -18,6 +18,8 @@
 // ---------------------------------------------------------------------------
 // Tipos (espelho da API)
 // ---------------------------------------------------------------------------
+import { torreFetch } from "./torre-fetch.ts";
+
 export type SituacaoFrescor = "em_dia" | "atrasado";
 
 export type MotivoTecnico =
@@ -375,7 +377,7 @@ const BASE = "/api/v1/b2b-revenda";
 async function obter<T>(caminho: string, query: string, signal?: AbortSignal): Promise<Resposta<T>> {
   let res: Response;
   try {
-    res = await fetch(`${API_URL}${BASE}${caminho}${query ? `?${query}` : ""}`, { signal });
+    res = await torreFetch(`${API_URL}${BASE}${caminho}${query ? `?${query}` : ""}`, { signal });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;
     throw new B2BRevendaError("Não foi possível contatar a API.", null);

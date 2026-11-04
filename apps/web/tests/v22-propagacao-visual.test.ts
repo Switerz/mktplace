@@ -229,7 +229,7 @@ test("P9. nenhum fetch/endpoint novo foi introduzido nas dez rotas", () => {
     // `brand` tem um helper local (`fetchDailyRange`) que monta a URL a mao —
     // divida PRE-EXISTENTE, anterior a esta task, mantida porque corrigi-la
     // mexeria em codigo de dados, fora do escopo de uma propagacao visual.
-    const cruasEsperadas = nome === "brand" ? 1 : 0;
+    const cruasEsperadas = 0; // AUTH-GOOGLE-5: o fetch diario de `brand` agora e `torreFetch(`
     const cruas = (src.match(/\bfetch\(\s*[\s\S]{0,12}?["'`]/g) || []).length;
     assert.equal(cruas, cruasEsperadas, `${nome}: chamada de rede crua fora do api-client`);
     assert.doesNotMatch(src, /axios|XMLHttpRequest/, `${nome}: cliente HTTP alternativo`);
