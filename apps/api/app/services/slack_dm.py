@@ -89,21 +89,36 @@ def enviar_dm_sem_repetir(
     chamar: Chamador = _slack,
 ) -> ResultadoEnvio:
     """Manda `texto` no privado de cada destinatario (e-mail do Slack) que
-    ainda nao recebeu a `chave`. Qualquer falha levanta `SlackFalhou` e
-    interrompe o restante."""
+    ainda nao recebeu a `chave`.
+
+    Cada destinatario e' independente: uma falha (e-mail de quem saiu da
+    empresa, historico ilegivel) nao impede os seguintes. Se algum falhou,
+    levanta `SlackFalhou` ao final, para o gatilho tentar de novo; quem ja'
+    recebeu e' pulado na nova tentativa. A mensagem do erro nao traz e-mail.
+    """
     metadata = json.dumps({"event_type": EVENTO_METADATA, "event_payload": {"chave": chave}})
     enviados = ja_tinham = 0
+    falhas: list[str] = []
     for endereco in destinatarios:
-        usuario = chamar(token, "users.lookupByEmail", {"email": endereco})["user"]["id"]
-        canal = chamar(token, "conversations.open", {"users": usuario})["channel"]["id"]
-        historico = chamar(token, "conversations.history", {
-            "channel": canal,
-            "limit": str(HISTORICO_LIMITE),
-            "include_all_metadata": "true",
-        })
-        if _ja_tem_a_chave(historico.get("messages") or [], chave):
-            ja_tinham += 1
-            continue
-        chamar(token, "chat.postMessage", {"channel": canal, "text": texto, "metadata": metadata})
-        enviados += 1
+        try:
+            usuario = chamar(token, "users.lookupByEmail", {"email": endereco})["user"]["id"]
+            canal = chamar(token, "conversations.open", {"users": usuario})["channel"]["id"]
+            historico = chamar(token, "conversations.history", {
+                "channel": canal,
+                "limit": str(HISTORICO_LIMITE),
+                "include_all_metadata": "true",
+            })
+            if _ja_tem_a_chave(historico.get("messages") or [], chave):
+                ja_tinham += 1
+                continue
+            chamar(token, "chat.postMessage",
+                   {"channel": canal, "text": texto, "metadata": metadata})
+            enviados += 1
+        except SlackFalhou as exc:
+            falhas.append(str(exc))
+    if falhas:
+        raise SlackFalhou(
+            f"{len(falhas)} de {len(destinatarios)} destinatario(s) falharam "
+            f"(enviados={enviados}, ja_tinham={ja_tinham}): {'; '.join(falhas)}"
+        )
     return ResultadoEnvio(enviados=enviados, ja_tinham=ja_tinham)

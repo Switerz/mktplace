@@ -100,6 +100,23 @@ def test_falha_ao_ler_historico_nao_posta():
     assert slack.posts() == []
 
 
+def test_destinatario_com_falha_nao_bloqueia_os_seguintes():
+    class _UmSaiuDaEmpresa(_SlackFalso):
+        def __call__(self, token, metodo, campos):
+            if metodo == "users.lookupByEmail" and campos["email"] == "a@x.com":
+                self.chamadas.append((metodo, dict(campos)))
+                raise SlackFalhou("users.lookupByEmail: users_not_found")
+            return super().__call__(token, metodo, campos)
+
+    slack = _UmSaiuDaEmpresa()
+    with pytest.raises(SlackFalhou) as erro:
+        enviar_dm_sem_repetir("xoxb-t", ["a@x.com", "b@x.com", "c@x.com"], "oi", CHAVE,
+                              chamar=slack)
+    assert [p["channel"] for p in slack.posts()] == ["D-U-b@x.com", "D-U-c@x.com"]
+    assert "users_not_found" in str(erro.value)
+    assert "1 de 3" in str(erro.value)
+
+
 def test_ok_false_vira_falha_sem_token(monkeypatch):
     class _Resp:
         def __enter__(self):

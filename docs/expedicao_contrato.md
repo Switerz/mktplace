@@ -1683,7 +1683,11 @@ disparo apos um 5xx (ate' 3 tentativas, 30 s de intervalo). Cada DM leva
 "shopee:<effective_at em UTC>"`); antes de postar, a API le as 20 mensagens
 mais recentes da DM (`conversations.history` com `include_all_metadata`) e
 pula quem ja' tem a chave. Uma nova tentativa depois de envio parcial so' manda
-para quem faltou. Se o historico nao puder ser lido, NADA e' postado (502).
+para quem faltou. Se o historico nao puder ser lido, NADA e' postado para
+aquela pessoa. Cada destinatario e' independente: um e-mail invalido (quem saiu
+da empresa) nao impede os demais; a rota responde 502 e o GoDeploy tenta de
+novo so' para quem faltou. Gatilho quebrado aparece em `listCronJobs` e
+`getAppLogs` do app no GoDeploy.
 
 Nao ha tabela de controle no Neon: uma migration `036` exigiria trocar o pin da
 imagem do Airflow, cuja cadeia do PMA recusa head desconhecido (ver a `035`).
