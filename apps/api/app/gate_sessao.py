@@ -135,9 +135,9 @@ class GateDeSessao:
             cookie_sessao=_cookie(headers, SESSION_COOKIE),
             chave_servico=_header(headers, SERVICE_KEY_HEADER),
             modo=modo,
-            segredo=settings.auth_secret.get_secret_value(),
+            segredo=settings.auth_secret.get_secret_value().strip(),
             dominios=dominios_permitidos(settings.allowed_email_domains),
-            chave_servico_esperada=settings.torre_service_key.get_secret_value(),
+            chave_servico_esperada=settings.torre_service_key.get_secret_value().strip(),
         )
 
         if decisao.liberar:

@@ -170,3 +170,10 @@ def test_main_registra_gate_dentro_do_cors():
     from app.main import app
     nomes = [m.cls.__name__ for m in app.user_middleware]
     assert nomes.index("CORSMiddleware") < nomes.index("GateDeSessao")  # user_middleware[0] = mais externo
+
+
+def test_segredo_com_quebra_de_linha_e_aparado(monkeypatch):
+    # Vercel/Render podem guardar o segredo com espaco/quebra; o Next faz trim.
+    c = _cfg(monkeypatch, segredo="s" * 32 + "\n", chave=CHAVE + " ")
+    assert c.get("/api/v1/x", cookies={"torre_session": tok()}).json() == {"ator": "joao@gocase.com"}
+    assert c.get("/api/v1/x", headers={"x-torre-service-key": CHAVE}).json() == {"ator": "servico:oraculo-mcp"}
