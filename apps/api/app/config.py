@@ -188,6 +188,12 @@ class Settings(BaseSettings):
     # fotografias diarias no Data Mart. Nasce desligada (404 antes de consultar).
     expedicao_performance_api_enabled: bool = Field(default=False)
 
+    # Aba CX (`/api/v1/cx/*`, menu principal, 04/11/2026): chat da Saude da
+    # Conta + cancelamentos e devolucoes da Shopee. So' leitura do Data Mart
+    # (pelo `datamart_leitura`), entao nasce LIGADA; desligar = 404 antes de
+    # consultar. Contrato: docs/cx_atendimento_contrato.md.
+    cx_api_enabled: bool = Field(default=True)
+
     # ------------------------------------------------------------------
     # Gate TORRE-B2B-OCTAPRICE — revendedores B2B x PMA do OctaPrice
     # ------------------------------------------------------------------

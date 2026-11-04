@@ -314,7 +314,7 @@ export function formatarInstante(iso: string | null): string | null {
 // Validacao minima do payload e fetch do servidor
 // ---------------------------------------------------------------------------
 
-function ehObjeto(v: unknown): v is Record<string, unknown> {
+export function ehObjeto(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
@@ -345,7 +345,7 @@ function problemaNoLimiar(l: unknown): string | null {
   return null;
 }
 
-function problemaNoIndicador(i: unknown): string | null {
+export function problemaNoIndicador(i: unknown): string | null {
   if (!ehObjeto(i)) return "indicador não é objeto";
   if (typeof i.codigo !== "string") return "indicador.codigo inválido";
   if (typeof i.rotulo !== "string") return "indicador.rotulo inválido";
@@ -363,7 +363,7 @@ function problemaNoIndicador(i: unknown): string | null {
   return problemaNoLimiar(i.limiar);
 }
 
-function problemaNaCobertura(c: unknown): string | null {
+export function problemaNaCobertura(c: unknown): string | null {
   if (!ehObjeto(c)) return "cobertura não é objeto";
   if (!Array.isArray(c.marcas) || !c.marcas.every((m) => typeof m === "string")) {
     return "cobertura.marcas inválida";
