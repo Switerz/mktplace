@@ -133,7 +133,6 @@ export default function LdrTopo({ api, marca }: { api: string; marca: string | n
           <span aria-hidden="true" className="inline-block h-0.5 w-3 rounded bg-crit" /> Teto: limite antes de
           risco de penalização
         </span>
-        <span>Meta e teto provisórios, a confirmar com o negócio.</span>
       </div>
     </section>
   );

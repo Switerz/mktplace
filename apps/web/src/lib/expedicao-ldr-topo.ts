@@ -32,13 +32,12 @@ export interface MetaTeto {
 }
 
 /**
- * Meta e teto por canal. VALORES PROVISÓRIOS até o negócio confirmar
- * (03/11/2026). O teto do ML é o limite MercadoLíder de envios com atraso
- * (doc de reputação do ML); o do TikTok é a referência de 4% que a Torre já
- * usava, sem fonte oficial publicada.
+ * Meta e teto por canal, CONFIRMADOS pelo negócio em 04/11/2026. O teto do ML
+ * é o limite MercadoLíder de envios com atraso (doc de reputação do ML); o do
+ * TikTok é a referência de 4% que a Torre já usava; o da Shopee é interno.
  */
 export const META_TETO: Record<CanalLdr, MetaTeto> = {
-  shopee: { meta: 0.02, teto: 0.05, origemTeto: "referência interna (a confirmar)" },
+  shopee: { meta: 0.02, teto: 0.05, origemTeto: "referência interna" },
   mercadolivre: { meta: 0.03, teto: 0.06, origemTeto: "limite MercadoLíder para envios com atraso" },
   tiktokshop: { meta: 0.02, teto: 0.04, origemTeto: "referência TikTok usada pela Torre (sem fonte oficial)" },
 };

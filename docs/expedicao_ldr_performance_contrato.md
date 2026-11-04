@@ -48,11 +48,11 @@ Performance como "Envios com atraso".
 
 ## 3. Meta e teto
 
-Valores em `apps/web/src/lib/expedicao-ldr-topo.ts` (`META_TETO`), **provisórios até o negócio confirmar**:
+Valores em `apps/web/src/lib/expedicao-ldr-topo.ts` (`META_TETO`), **confirmados pelo negócio em 04/11/2026** (junto com as regras de LDR do ML e do TikTok desta seção):
 
 | Canal | Meta | Teto | Origem do teto |
 |---|---|---|---|
-| Shopee | 2% | 5% | referência interna (a confirmar) |
+| Shopee | 2% | 5% | referência interna |
 | Mercado Livre | 3% | 6% | limite MercadoLíder para envios com atraso (doc de reputação do ML) |
 | TikTok | 2% | 4% | referência de 4% que a Torre já usava, sem fonte oficial publicada |
 
