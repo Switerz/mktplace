@@ -143,9 +143,24 @@ def _ler_metabase(sql: str) -> list[dict]:
     return metabase_client.query(sql)
 
 
+#: Depois de uma falha de CONEXAO, por quanto tempo ir direto ao Metabase. A
+#: conexao direta so' desiste no `datamart_connect_timeout_seconds` (10 s):
+#: sem isto, TODA chamada pagava 10 s antes da reserva (medido: 11-14 s).
+PAUSA_DIRETO_S = 600.0
+_direto_suspenso_ate = 0.0
+
+
+def _agora() -> float:
+    import time
+    return time.monotonic()
+
+
 def consultar(sql: str, params: dict) -> list[dict]:
     """Direto no Data Mart; pelo Metabase so' se o banco recusar por permissao,
     a conexao falhar (ou nao houver engine) E houver `METABASE_API_KEY`."""
+    global _direto_suspenso_ate
+    if settings.metabase_api_key and _agora() < _direto_suspenso_ate:
+        return normalizar(_ler_metabase(renderizar(sql, params)))
     try:
         return _ler_direto(sql, params)
     except Exception as exc:  # noqa: BLE001 — decide abaixo; o texto nunca sai
@@ -153,5 +168,7 @@ def consultar(sql: str, params: dict) -> list[dict]:
         motivo_valido = sem_engine or _recusa_de_permissao(exc) or _falha_de_conexao(exc)
         if not motivo_valido or not settings.metabase_api_key:
             raise
+        if _falha_de_conexao(exc) or sem_engine:
+            _direto_suspenso_ate = _agora() + PAUSA_DIRETO_S
         logger.info("datamart_leitura: leitura direta recusada (%s); usando o Metabase", type(exc).__name__)
     return normalizar(_ler_metabase(renderizar(sql, params)))
