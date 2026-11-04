@@ -17,9 +17,11 @@ FONTE DA COMPOSICAO (`--source`)
   nao colidem com as do Protheus; uma oferta que alcance kit nas duas vira
   `AMBIGUOUS` pela regra do contrato, e nao produz linha.
 
-A publicacao apaga e regrava o escopo `(marketplace, observed_date)` inteiro:
-`--apply --source avoe` APAGA as linhas derivadas do Protheus naquele escopo.
-Para somar a Avoe ao que ja' existe, o modo e' `ambas`.
+A publicacao apaga e regrava o escopo `(marketplace, observed_date)` inteiro,
+entao `--apply --source avoe` apagaria as linhas derivadas do Protheus naquele
+escopo. Por isso a combinacao e' RECUSADA no CLI (exit 2), antes de abrir
+qualquer conexao. `--source avoe` serve so' para diagnostico; para publicar a
+Avoe somada ao que ja' existe, o modo e' `ambas`.
 
 ONDE A TRANSFORMACAO ACONTECE, E POR QUE AQUI
 ----------------------------------------------
@@ -596,6 +598,14 @@ def build_cli() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_cli().parse_args(argv)
+    if args.apply and args.source == SOURCE_AVOE:
+        # Recusa ANTES de carregar configuracao e de abrir conexao: o publish
+        # apaga o escopo inteiro, e so' com a BOM da Avoe as linhas do
+        # Protheus sumiriam.
+        print("--apply com --source avoe e' recusado: use --source ambas para "
+              "publicar; avoe sozinho apagaria as linhas do Protheus no escopo.",
+              file=sys.stderr)
+        return 2
     try:
         from dotenv import load_dotenv
         load_dotenv(Path(__file__).resolve().parents[1] / ".env")

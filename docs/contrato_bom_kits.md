@@ -313,8 +313,9 @@ de motivos continuam os das seções 2 a 6, sem exceção.
 | `ambas` | as duas | publicação: soma a Avoe ao que já existia |
 
 A publicação apaga e regrava o escopo `(marketplace, observed_date)`:
-`--apply --source avoe` **apaga** as linhas derivadas do Protheus naquele
-escopo. Para publicar, o modo é `ambas`.
+`--apply --source avoe` **apagaria** as linhas derivadas do Protheus naquele
+escopo, e por isso o CLI a **recusa** (exit 2) antes de abrir conexão. Para
+publicar, o modo é `ambas`; `avoe` sozinho é só diagnóstico.
 
 O publisher **nunca chama a Avoe**: ele lê um snapshot JSON gravado antes por
 `python -m pipelines.avoe_kits_source`. A credencial vem de um **arquivo** cujo

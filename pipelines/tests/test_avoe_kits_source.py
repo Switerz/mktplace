@@ -319,6 +319,48 @@ def test_cli_avoe_com_snapshot_ausente_sai_com_2(tmp_path):
                    str(tmp_path / "nao-existe.json")]) == 2
 
 
+class _ConexaoAberta(Exception):
+    """Sinal de que o CLI passou da trava e tentou conectar."""
+
+
+@pytest.fixture
+def cli_sem_banco(monkeypatch, tmp_path):
+    """Snapshot valido, DSNs falsas e `_connect` que levanta se for chamado."""
+    snap = tmp_path / "snap.json"
+    snap.write_text(json.dumps({"kits": AVOE}), encoding="utf-8")
+    monkeypatch.setenv(P.ENV_TARGET, "postgresql://falso.invalid/alvo")
+    monkeypatch.setenv(P.ENV_SOURCE, "postgresql://falso.invalid/fonte")
+    conexoes = []
+
+    def conectar(url, *, readonly):
+        conexoes.append((url, readonly))
+        raise _ConexaoAberta(url)
+
+    monkeypatch.setattr(P, "_connect", conectar)
+    return str(snap), conexoes
+
+
+def test_apply_com_source_avoe_e_recusado_sem_abrir_conexao(cli_sem_banco,
+                                                            capsys):
+    snap, conexoes = cli_sem_banco
+    assert P.main(["--source", "avoe", "--avoe-snapshot", snap,
+                   "--apply"]) == 2
+    assert conexoes == []
+    assert "--source ambas" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [
+    ["--source", "avoe"],               # diagnostico com avoe: permitido
+    ["--source", "ambas", "--apply"],   # publicacao com ambas: permitida
+    ["--apply"],                        # protheus (padrao): inalterado
+])
+def test_demais_combinacoes_passam_da_trava(cli_sem_banco, argv):
+    snap, conexoes = cli_sem_banco
+    with pytest.raises(_ConexaoAberta):
+        P.main(argv + ["--avoe-snapshot", snap])
+    assert len(conexoes) == 1
+
+
 # --------------------------------------------------------------- snapshot
 
 def test_snapshot_valido_e_lido(tmp_path):
