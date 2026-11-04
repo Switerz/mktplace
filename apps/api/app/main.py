@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import readiness
+from app.gate_sessao import GateDeSessao
 from app.routers import (
     account_performance,
     alertas,
@@ -23,6 +24,9 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+# Gate de sessao ANTES do CORS: add_middleware insere por fora, entao o CORS
+# fica como camada mais externa e responde preflight/401 com cabecalhos CORS.
+app.add_middleware(GateDeSessao)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
