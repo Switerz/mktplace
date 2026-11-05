@@ -325,8 +325,12 @@ export function PopupColetaPerdida({
                       {variasMarcas ? <th scope="col">Marca</th> : null}
                       <th scope="col">Em {dia}</th>
                       <th scope="col">Hoje</th>
-                      <th scope="col">Pago em</th>
-                      <th scope="col">Etiqueta pronta</th>
+                      <th scope="col" title="Data do pagamento: é quando o TikTok libera o pedido para envio (sem NF-e, na mesa de embalo).">
+                        Aguardando envio desde
+                      </th>
+                      <th scope="col" title="Quando entrou em Aguardando coleta: embalado, com NF-e e etiqueta (rts_time do TikTok).">
+                        Aguardando coleta desde
+                      </th>
                       <th scope="col">Coleta</th>
                     </tr>
                   </thead>
@@ -382,7 +386,8 @@ export function PopupColetaPerdida({
             ? "sem coleta (IN_TRANSIT) até o fim desse dia, com ou sem etiqueta pronta — a mesma conta da LDR."
             : "etiqueta pronta até o fim desse dia e sem coleta (IN_TRANSIT) até o fim dele."}{" "}
           &quot;Em {diaCurto(vencimento)}&quot; é como o pedido estava no fim desse dia: aguardando coleta se a etiqueta
-          já estava pronta, senão aguardando despacho (ou retido pelo TikTok).
+          já estava pronta, senão aguardando envio (ou retido pelo TikTok). &quot;Aguardando envio desde&quot; é o
+          pagamento; &quot;Aguardando coleta desde&quot; é quando o pedido ficou embalado, com NF-e e etiqueta.
           Prazo reconstruído pela política do TikTok (coleta até 2 dias úteis após o pagamento).
         </p>
       </div>
@@ -444,7 +449,7 @@ export default function TikTokColetaPerdida({ api, marca }: { api: string; marca
             ? "Não foi possível contar agora."
             : dados
               ? dados.list_total > 0
-                ? `${formatarInteiro(dados.list_total)} pedidos com etiqueta pronta e sem coleta até o fim do dia · ${formatarInteiro(dados.still_waiting)} ainda sem coleta`
+                ? `${formatarInteiro(dados.list_total)} pedidos já aguardando coleta e não coletados até o fim do dia · ${formatarInteiro(dados.still_waiting)} ainda sem coleta`
                 : "Nenhum pedido ficou sem coleta nesse prazo."
               : null}
       </span>
