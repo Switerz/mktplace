@@ -87,6 +87,8 @@ function ChartTooltip({
   showComparisonTotal: boolean;
 }) {
   if (!active || !payload?.length) return null;
+  // GERENCIAL-D0: o dia em andamento vem rotulado "Hoje" e sem par anterior.
+  const emAndamento = payload[0]?.payload?.label === "Hoje";
   const channelRows = payload.filter((p) => p.dataKey.startsWith("values."));
   const totalRow = payload.find((p) => p.dataKey === "total");
   // O bucket completo vem no payload: dele saem a data e o rotulo REAIS do
@@ -96,10 +98,11 @@ function ChartTooltip({
   return (
     <div className="bg-surface border border-line rounded-xl shadow-lg px-3 py-2 text-xs min-w-[168px]">
       <p className="font-semibold text-ink-muted">{label}</p>
-      {showComparisonTotal && (
+      {emAndamento && <p className="text-xs text-ink-faint mb-1">Dia em andamento · parcial</p>}
+      {showComparisonTotal && !emAndamento && (
         <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide mb-1">Período atual</p>
       )}
-      {!showComparisonTotal && <span className="block mb-1.5" />}
+      {(!showComparisonTotal || emAndamento) && <span className="block mb-1.5" />}
       <ul className="flex flex-col gap-0.5">
         {channelRows.map((row) => {
           const channel = row.dataKey.replace("values.", "") as Marketplace;
@@ -125,7 +128,7 @@ function ChartTooltip({
           <span className="tabular-nums font-semibold text-ink">{formatValue(totalRow.value, metric)}</span>
         </p>
       )}
-      {showComparisonTotal && (
+      {showComparisonTotal && !emAndamento && (
         <div className="mt-1.5 pt-1.5 border-t border-line">
           <p className="text-xs font-semibold text-ink-faint uppercase tracking-wide">Período anterior</p>
           {cmp ? (
@@ -143,7 +146,9 @@ function ChartTooltip({
           )}
         </div>
       )}
-      <p className="mt-1.5 text-xs text-ink-faint">Clique para abrir o detalhe do período</p>
+      <p className="mt-1.5 text-xs text-ink-faint">
+        {emAndamento ? "Clique para ver só hoje" : "Clique para abrir o detalhe do período"}
+      </p>
     </div>
   );
 }
