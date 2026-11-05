@@ -1,8 +1,23 @@
 // Para onde o gatilho repassa e como o status da API vira status do cron.
 // A regra do alerta NAO mora aqui: ver apps/api/app/services/alerta_vencidos.py.
 
-export const URL_DA_API =
-  "https://mktplace-api.onrender.com/api/v1/alertas/expedicao-vencidos";
+const API = "https://mktplace-api.onrender.com/api/v1/alertas";
+
+/** Mantido por compatibilidade: a rota do alerta de vencidos (A1). */
+export const URL_DA_API = `${API}/expedicao-vencidos`;
+
+/**
+ * Caminho do cron no gatilho -> rota da API. Mapa dos alertas em
+ * docs/torre_bot_alertas.md. Cron de cada um (UTC):
+ *   /cron/alerta-vencidos   a cada 15 min
+ *   /cron/alertas-criticos  a cada 15 min
+ *   /cron/report-diario     todo dia 11:00 UTC (8h de Brasilia)
+ */
+export const ROTAS = {
+  "/cron/alerta-vencidos": URL_DA_API,
+  "/cron/alertas-criticos": `${API}/criticos`,
+  "/cron/report-diario": `${API}/report-diario`,
+};
 
 /**
  * Status da API do Render -> status devolvido ao cron do GoDeploy.

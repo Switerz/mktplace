@@ -122,3 +122,79 @@ def enviar_dm_sem_repetir(
             f"(enviados={enviados}, ja_tinham={ja_tinham}): {'; '.join(falhas)}"
         )
     return ResultadoEnvio(enviados=enviados, ja_tinham=ja_tinham)
+
+
+# ---------------------------------------------------------------------------
+# Varios itens por mensagem, cada um com a sua chave (alertas criticos, report)
+# ---------------------------------------------------------------------------
+#: `event_type` das DMs com itens (`enviar_itens_sem_repetir`).
+EVENTO_ITENS = "torre_alerta_itens"
+
+#: Historico conferido para itens: um dia de alertas cabe com folga.
+HISTORICO_ITENS_LIMITE = 100
+
+
+@dataclass(frozen=True)
+class Item:
+    """Um aviso com identidade propria (`chave`) dentro de uma mensagem."""
+    chave: str
+    texto: str
+
+
+def _chaves_ja_enviadas(mensagens: list[dict]) -> set[str]:
+    chaves: set[str] = set()
+    for m in mensagens:
+        meta = m.get("metadata") or {}
+        if meta.get("event_type") != EVENTO_ITENS:
+            continue
+        for c in (meta.get("event_payload") or {}).get("chaves") or []:
+            if isinstance(c, str):
+                chaves.add(c)
+    return chaves
+
+
+def enviar_itens_sem_repetir(
+    token: str,
+    destinatarios: list[str],
+    itens: list[Item],
+    montar: Callable[[list[Item]], str],
+    *,
+    chamar: Chamador = _slack,
+) -> ResultadoEnvio:
+    """Para cada destinatario, manda UMA mensagem com os itens cuja chave ele
+    ainda nao recebeu (`montar(novos)` faz o texto). Quem ja' tem todas conta
+    em `ja_tinham`.
+
+    Mesmas garantias de `enviar_dm_sem_repetir`: historico ilegivel = nada
+    postado para aquela pessoa; falha de um nao bloqueia os outros; no fim,
+    `SlackFalhou` se alguem falhou (sem e-mail na mensagem).
+    """
+    enviados = ja_tinham = 0
+    falhas: list[str] = []
+    for endereco in destinatarios:
+        try:
+            usuario = chamar(token, "users.lookupByEmail", {"email": endereco})["user"]["id"]
+            canal = chamar(token, "conversations.open", {"users": usuario})["channel"]["id"]
+            historico = chamar(token, "conversations.history", {
+                "channel": canal,
+                "limit": str(HISTORICO_ITENS_LIMITE),
+                "include_all_metadata": "true",
+            })
+            ja = _chaves_ja_enviadas(historico.get("messages") or [])
+            novos = [i for i in itens if i.chave not in ja]
+            if not novos:
+                ja_tinham += 1
+                continue
+            metadata = json.dumps({"event_type": EVENTO_ITENS,
+                                   "event_payload": {"chaves": [i.chave for i in novos]}})
+            chamar(token, "chat.postMessage",
+                   {"channel": canal, "text": montar(novos), "metadata": metadata})
+            enviados += 1
+        except SlackFalhou as exc:
+            falhas.append(str(exc))
+    if falhas:
+        raise SlackFalhou(
+            f"{len(falhas)} de {len(destinatarios)} destinatario(s) falharam "
+            f"(enviados={enviados}, ja_tinham={ja_tinham}): {'; '.join(falhas)}"
+        )
+    return ResultadoEnvio(enviados=enviados, ja_tinham=ja_tinham)
