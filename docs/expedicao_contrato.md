@@ -1606,7 +1606,11 @@ consultar o banco.
 - Etapas da coorte por canal: TikTok `fora_amostra`, `cancelado_antes`,
   `aguardando`, `concluido`; Shopee `fora_fbs`, `cancelado_antes`,
   `enviado_sem_registro`, `aguardando`, `concluido`. A fila aberta tem uma
-  etapa só (`aguardando_expedicao`) até a etapa interna ser publicada.
+  etapa só (`aguardando_expedicao`) até a etapa interna ser publicada (coluna
+  `etapa` da migration **033**, T-0015); depois, uma entrada por etapa real
+  (`a_faturar` … `outro`, ordem de `ETAPAS_FILA`) e, no lote misto,
+  `nao_publicada` com `status: partial` e `reason: "fila_aberta: etapa_parcial"`.
+  Coluna ausente e lote todo `nao_publicada` são indistinguíveis no payload.
 
 ### Ausência ≠ zero
 
@@ -1618,6 +1622,26 @@ consultar o banco.
 - Na tela: 404, erro de rede e `disabled` → "Jornada indisponível" discreto
   (a rota ainda não está em produção); 5xx ou payload fora do contrato →
   erro com "Tentar novamente".
+
+### Modo compacto (fila Shopee/ML) — regra por estado (T-0029)
+
+Na visão da fila (Shopee e Mercado Livre), `JornadaPedidos compacta` mostra só
+o que o "Risco atual" não diz: **nunca** as sobreposições (vencidos, travados
+etc.), e sem etapa real **nenhum** número da fila (base, barra, % ou
+"Aguardando expedição", que repetiriam o Risco atual). A seção não some calada.
+O TikTok usa o modo completo e não muda.
+
+| Estado | Mostra |
+|---|---|
+| etapa real (inclusive UMA, = base) | painel "Pedidos aguardando expedição" com as etapas (`n · x%`) e as `limitacoes`, sem sobreposições |
+| parcial (`etapa_parcial`) | o mesmo painel com a linha "Etapa ainda não publicada" e o motivo traduzido **uma vez** (aviso "Parcial" do topo) |
+| sem etapa real, base > 0 (coluna ausente ou tudo `nao_publicada`) | linha discreta `role="status"`, sem número: "Etapas da fila ainda não publicadas neste canal." |
+| base 0 | "Nenhum pedido nesta leitura." (vazio prevalece sobre "não publicadas") |
+| `fila_aberta: null` com motivo | "Fila por etapa indisponível agora: <motivo traduzido>." — nunca zero |
+| coorte presente (Shopee com LDR) | bloco da coorte, ao lado do painel de etapas (`lg:grid-cols-2`) ou abaixo da linha |
+| coorte ausente / ML | sem bloco de coorte |
+| carregando / erro / indisponível (404, rede, `disabled`) / fora do ar | os mesmos estados do modo completo (`EstadosDaJornada`): erro com "Tentar novamente"; indisponível discreto, sem alerta |
+| marca pedida e não aplicada | aviso `exp-jornada-marca-nao-aplicada` |
 
 ### Limitações por canal
 
