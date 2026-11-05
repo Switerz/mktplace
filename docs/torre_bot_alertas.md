@@ -17,6 +17,8 @@ e o envio pula quem já recebeu aquela chave (ver `app/services/slack_dm.py`).
 | A2 | LDR acima do teto (qualquer marca × canal) | na hora, no máximo 1 vez por dia por conta | `POST /api/v1/alertas/criticos` | `*/15 * * * *` |
 | A3 | Kokeshi: reputação oficial do Mercado Livre crítica | na hora, 1 vez por fotografia diária | `POST /api/v1/alertas/criticos` | `*/15 * * * *` |
 | A4 | TikTok: pedidos vencidos parados acima de 3% dos pendentes | na hora; de novo às 9h, 13h e 17h enquanto continuar acima | `POST /api/v1/alertas/criticos` | `*/15 * * * *` |
+| A5 | Vencem hoje: quantos pedidos têm prazo hoje, por canal, etapa e marca | todo dia às 9h | `POST /api/v1/alertas/expedicao-dia?momento=manha` | `0 12 * * *` |
+| A6 | Corte da coleta: o que vence hoje e ainda não saiu | todo dia às 15h30 | `POST /api/v1/alertas/expedicao-dia?momento=corte` | `30 18 * * *` |
 | R1 | Report diário: GMV de ontem, avanços e problemas | todo dia às 8h (Brasília) | `POST /api/v1/alertas/report-diario` | `0 11 * * *` |
 
 Horário de Brasília = UTC−3 (sem horário de verão).
@@ -85,6 +87,41 @@ mesmos recortes da tela `/expedicao/tiktok`:
 * **Mercado Livre fica de fora** enquanto a trava `expedicao_ml_prazo_enabled`
   estiver desligada. Hoje a fotografia do ML marca como vencido o envio que já
   foi coletado, e o alerta sairia falso.
+
+## A5 e A6 — Vencem hoje e corte da coleta
+
+Regra em `app/services/torre_expedicao_dia.py`. Serve para o time começar o dia
+pelo que vence hoje e, no fim da tarde, cobrar a coleta antes do prazo.
+
+* **Shopee e Mercado Livre:** fila do lote servido (`marts.expedicao_fila_atual`),
+  com o dia do prazo em Brasília e a etapa publicada. O ML só entra quando a tela
+  mostra o prazo dele (`expedicao_service.prazo_publicado`).
+* **TikTok Shop:** pendentes de **coleta** com vencimento hoje, da série diária
+  (o prazo é reconstruído e não há etapa).
+* **A5 (9h):** total que vence hoje por canal, separado em:
+  * :red_circle: **ainda não prontos**: a preparar, a faturar, a imprimir, em separação;
+  * :truck: **aguardando coleta**.
+
+  Vêm também as marcas e, em nota, os travados, os já vencidos e quantos vencem
+  no próximo dia de prazo.
+* **A6 (15h30):** o que vence hoje e ainda não saiu: primeiro o que nem está
+  pronto, depois o que aguarda coleta, por marca.
+* Fotografia com mais de 3 h tira o canal da mensagem, com uma nota dizendo
+  qual ficou de fora. Se nada vence hoje, não manda nada.
+* Chave: `expedicao-dia:<manha|corte>:<dia>`, uma DM por pessoa por momento.
+* O botão abre `/expedicao?channel=<canal>&visao=detalhe` (com `&marca=` quando
+  é uma marca só).
+
+## Outras visões da Expedição que valem alerta (ainda não implementadas)
+
+| Visão | Onde está | Por que ajuda | Ideia de alerta |
+|---|---|---|---|
+| Travados (`is_stalled`) | fila, `stalled_count` | pedido parado sem andar de etapa | nota diária com o total por marca; DM quando subir muito de um dia para o outro |
+| Abertos há mais de 48 h (`over_48h`) | fila, `over_48h_count` | atraso que ainda não virou vencido | entrar no A5 como linha própria |
+| Zumbis (`is_source_zombie`) | fila, `zombie_count` | pedido que a fonte parou de atualizar | aviso ao time de dados, não à operação |
+| Fotografia atrasada | `source_freshness_status`, `effective_at` | a tela mostra número velho | DM quando a fila não atualiza há mais de 2 h em horário comercial |
+| Vence amanhã (`due_next_day`) | fila | dá para adiantar hoje | já entra como nota no A5 e no A6 |
+| Link filtrado por situação | tela | hoje o link abre só canal, marca e detalhe | a tela passar a ler `?situacao=` da URL, para o botão abrir já em "vence hoje" |
 
 ## R1 — Report diário das 8h
 
