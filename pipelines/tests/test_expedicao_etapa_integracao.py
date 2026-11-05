@@ -285,15 +285,17 @@ def test_cadeia_real_e_linear_e_passa_pela_033(tmp_path):
     """Grafo REAL do alembic sobre `apps/api/alembic/versions/` (so' leitura).
 
     A 034 (EXPEDICAO-KOKESHI-EXPORT), a 035 (atraso de 7 dias, no resumo), a
-    036 (CX-KOKESHI-BOT) e a 037 (T-0018, anuncio-ancora do estoque Full ML)
+    036 (CX-KOKESHI-BOT), a 037 (T-0059, CHECK dos insumos da DRE) e a 038
+    (T-0018, anuncio-ancora do estoque Full ML)
     entraram depois da 033 e nao a alteram.
     """
     grafo = json.loads(
         _python_isolado(ROTEIRO_GRAFO, str(VERSIONS.parent), cwd=tmp_path)
     )
-    assert grafo["heads"] == ["037"]
+    assert grafo["heads"] == ["038"]
     assert grafo["bases"] == ["001"]
-    assert grafo["revisoes"][:8] == ["037", "036", "035", "034", "033", "032", "031", "030"]
+    assert grafo["revisoes"][:9] == ["038", "037", "036", "035", "034", "033", "032", "031", "030"]
+    assert grafo["pais"]["038"] == "037"
     assert grafo["pais"]["037"] == "036"
     assert grafo["pais"]["036"] == "035"
     assert grafo["pais"]["035"] == "034"

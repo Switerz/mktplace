@@ -201,9 +201,9 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # devolucoes da Kokeshi gravados pelo bot no Neon).
     # T-0059: head avancado de 036 para 037, que so' troca o CHECK de
     # componentes de marts.fact_dre_insumo_mensal (aceita `shopee_taxa_escrow`).
-    # T-0018: head avancado de 036 para 037, que acrescenta o anuncio-ancora a
-    # marts.fact_ml_full_stock_inventory_daily, sobre a 036 (nasceu 034).
-    assert heads == ["037"], f"head deveria ser unico e igual a 037, veio {heads}"
+    # T-0018: head avancado de 037 para 038, que acrescenta o anuncio-ancora a
+    # marts.fact_ml_full_stock_inventory_daily, sobre a 037 (nasceu 034).
+    assert heads == ["038"], f"head deveria ser unico e igual a 038, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():

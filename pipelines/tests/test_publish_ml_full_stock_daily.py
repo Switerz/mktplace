@@ -31,7 +31,7 @@ REF = date(2026, 10, 20)
 RAW = "run-raw-barbours-1"
 PUB = "0123456789abcdef0123456789abcdef"
 MIG = Path(__file__).resolve().parents[2] / "apps" / "api" / "alembic" / "versions" / "029_create_fact_ml_full_stock_daily.py"
-MIG_037 = MIG.parent / "037_ml_full_inventario_anuncio_ancora.py"
+MIG_038 = MIG.parent / "038_ml_full_inventario_anuncio_ancora.py"
 #: arquivo aprovado do `-Identificar`, relativo ao cwd (o fixture `ambiente` faz chdir para tmp_path)
 ARQ_DESTINO = "identidade_aprovada.json"
 #: impressao digital do Neon como o helper grava (tipos do JSON: str, bool, null)
@@ -769,13 +769,13 @@ def test_migration_029_cadeia_e_travas():
     assert "ck_fmlfsi_leitura_quantidade" in sql and "ck_fmlfsi_cobertura_exige_demanda" in sql
     assert sql.count("<> 'NaN'") >= 3
     assert "INSERT" not in sql.upper()
-    sql_037 = MIG_037.read_text(encoding="utf-8")
+    sql_038 = MIG_038.read_text(encoding="utf-8")
     for c in pub.COLS_INV + pub.COLS_MARCA:
-        assert c in sql or f"ADD COLUMN {c} " in sql_037, c
+        assert c in sql or f"ADD COLUMN {c} " in sql_038, c
 
 
 # ---------------------------------------------------------------------------
-# T-0018: anuncio-ancora por inventario (migration 037)
+# T-0018: anuncio-ancora por inventario (migration 038)
 # ---------------------------------------------------------------------------
 class _OpGravador:
     def __init__(self):
@@ -785,10 +785,10 @@ class _OpGravador:
         self.sqls.append(sql)
 
 
-def _mig_037():
+def _mig_038():
     import types
     op = _OpGravador()
-    spec = importlib.util.spec_from_file_location("m037", MIG_037)
+    spec = importlib.util.spec_from_file_location("m038", MIG_038)
     m = importlib.util.module_from_spec(spec)
     antigo = sys.modules.get("alembic")
     sys.modules["alembic"] = types.SimpleNamespace(op=op)
@@ -802,9 +802,9 @@ def _mig_037():
     return m, op
 
 
-def test_migration_037_tres_colunas_nulas_sem_default_e_downgrade_inverso():
-    m, op = _mig_037()
-    assert (m.revision, m.down_revision) == ("037", "036")
+def test_migration_038_tres_colunas_nulas_sem_default_e_downgrade_inverso():
+    m, op = _mig_038()
+    assert (m.revision, m.down_revision) == ("038", "037")
     m.upgrade()
     up = op.sqls[:]
     assert len(up) == 3 and all(s.startswith(f"ALTER TABLE {pub.FACT_INVENTARIO} ADD COLUMN ") for s in up)
@@ -1649,10 +1649,12 @@ def pg(monkeypatch, tmp_path):
         for ddl in _mig()._upgrade_sql():
             c.execute(sql(ddl))
         # T-0018: o publicador grava as colunas do anuncio-ancora, entao o destino
-        # deste teste e' 029 + 037, como o Neon depois do `alembic upgrade 037`.
-        m037, op037 = _mig_037()
-        m037.upgrade()
-        for ddl in op037.sqls:
+        # deste teste e' 029 + 038, como o Neon depois do `alembic upgrade 038`.
+        # A 037 (T-0059, CHECK da marts.fact_dre_insumo_mensal) nao toca estas
+        # tabelas e fica de fora: o teste so' aplica o que o publicador le.
+        m038, op038 = _mig_038()
+        m038.upgrade()
+        for ddl in op038.sqls:
             c.execute(sql(ddl))
         # publicacao anterior de OUTRO dia, para provar que nada fora do pedido muda
         for m in QUATRO.split(","):

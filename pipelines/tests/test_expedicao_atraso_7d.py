@@ -1401,7 +1401,7 @@ def test_kokeshi_48h_e_travados_pelo_export():
 
 # ---------------------------------------------------------------------------
 # 035: as seis colunas na PROPRIA 035; as revisoes posteriores (036 CX-KOKESHI,
-# 037 T-0018) sao de outras frentes e nao tocam as tabelas de resumo
+# 037 T-0059, 038 T-0018) sao de outras frentes e nao tocam as tabelas de resumo
 # ---------------------------------------------------------------------------
 def test_035_tem_as_seis_colunas_e_nenhuma_posterior_as_toca():
     filhos = [

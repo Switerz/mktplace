@@ -48,7 +48,7 @@ o total parcial. Qualquer outra divergencia marca x inventario continua 503.
 A 029 ja' admite essa linha (CHECK `(inventarios_full_lidos > 0) =
 (disponivel_full IS NOT NULL)`); nenhuma migration foi necessaria.
 
-IDENTIFICACAO (T-0018, migration 037)
+IDENTIFICACAO (T-0018, migration 038)
 -------------------------------------
 Cada inventario traz o seu anuncio-ancora (gravado pelo publicador). SKU e
 titulo vem da 014 (`marts.fact_marketplace_listing_price_daily`) por marca +
@@ -56,7 +56,7 @@ titulo vem da 014 (`marts.fact_marketplace_listing_price_daily`) por marca +
 `DISTINCT ON (brand, item_id)`: no maximo UMA linha por item, entao o JOIN
 nunca duplica inventario nem estoque. A 014 nao tem `variation_id` (preco e' de ITEM):
 em variacao o SKU e' o do item, e a resposta diz isso (`ancora_e_variacao`).
-Sem a 037 aplicada, ou sem a 014 legivel, a listagem sai como antes, com
+Sem a 038 aplicada, ou sem a 014 legivel, a listagem sai como antes, com
 `sku`/`titulo`/`anuncios_extras` nulos e uma limitacao declarada.
 
 SEGURANCA
@@ -80,7 +80,7 @@ STATUS_TABLE = "marts.fact_ml_full_stock_status_daily"
 BRAND_TABLE = "marts.fact_ml_full_stock_brand_daily"
 #: Migration 014: SKU e titulo por (ref_date, item_id). So' para identificacao.
 PRICE_TABLE = "marts.fact_marketplace_listing_price_daily"
-#: Colunas da migration 037 em INVENTORY_TABLE.
+#: Colunas da migration 038 em INVENTORY_TABLE.
 COLUNAS_ANCORA = ("anuncio_ancora_item_id", "anuncio_ancora_variation_id",
                   "anuncios_extras")
 
@@ -167,7 +167,7 @@ LIMITACAO_IDENTIFICACAO = (
     "estoque continua contado uma vez."
 )
 LIMITACAO_SEM_IDENTIFICACAO = (
-    "SKU e título indisponíveis neste ambiente: a migration 037 ainda não foi "
+    "SKU e título indisponíveis neste ambiente: a migration 038 ainda não foi "
     "aplicada ou a tabela de preços (014) não está acessível. A listagem "
     "continua correta, só sem identificação."
 )
@@ -231,7 +231,7 @@ SQL_FATOS_EXISTEM = text("""
            to_regclass(:marca)      IS NOT NULL AS tem_marca
 """)
 
-#: Identificacao exige as TRES colunas da 037 e a 014 legivel. Sem elas a
+#: Identificacao exige as TRES colunas da 038 e a 014 legivel. Sem elas a
 #: listagem sai sem SKU/titulo -- nunca 500 por coluna ausente.
 SQL_IDENTIFICACAO_DISPONIVEL = text("""
     SELECT (SELECT COUNT(*) FROM information_schema.columns
@@ -439,7 +439,7 @@ def fatos_disponiveis(db: Session) -> bool:
 
 
 def identificacao_disponivel(db: Session) -> bool:
-    """Colunas da 037 presentes E a 014 legivel por este papel."""
+    """Colunas da 038 presentes E a 014 legivel por este papel."""
     linha = db.execute(SQL_IDENTIFICACAO_DISPONIVEL, {
         "colunas": list(COLUNAS_ANCORA), "n_colunas": len(COLUNAS_ANCORA),
         "precos": PRICE_TABLE}).mappings().one()
@@ -758,7 +758,7 @@ def get_ml_full_estoque_block(
             sku=_texto_opcional(r.get("sku")),
             titulo=_texto_opcional(r.get("titulo")),
             anuncios_extras=_opt_int(r.get("anuncios_extras")),
-            # Sem ancora (ou sem a 037) nao ha' o que dizer sobre variacao.
+            # Sem ancora (ou sem a 038) nao ha' o que dizer sobre variacao.
             ancora_e_variacao=(bool(r["ancora_e_variacao"])
                                if r.get("tem_ancora") else None),
         )

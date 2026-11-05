@@ -99,13 +99,13 @@ export interface InventarioML {
   vinculo_vendas: string;
   ref_date: string;
   /**
-   * IDENTIFICACAO do anuncio-ancora do inventario (T-0018, migration 037).
+   * IDENTIFICACAO do anuncio-ancora do inventario (T-0018, migration 038).
    * Atributo da linha: nunca multiplica estoque. `null` = sem identificacao.
    * Opcionais: uma API anterior a' T-0018 nao envia os campos.
    */
   sku?: string | null;
   titulo?: string | null;
-  /** Anuncios do inventario alem do ancora. `null` = publicado antes da 037. */
+  /** Anuncios do inventario alem do ancora. `null` = publicado antes da 038. */
   anuncios_extras?: number | null;
   /** TRUE = ancora e' variacao e o SKU/titulo e' do ITEM (ambiguo). */
   ancora_e_variacao?: boolean | null;

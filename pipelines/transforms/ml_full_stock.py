@@ -183,7 +183,7 @@ def indicadores(snapshot, status, ponte, vendas):
             "cobertura_torre_dias": cob,
             "classificacao_torre": classe,
             "vinculo_vendas": "COM_VENDA" if un > 0 else "SEM_VENDA_NA_JANELA",
-            # Identificacao (migration 037): atributo da linha, nao juncao.
+            # Identificacao (migration 038): atributo da linha, nao juncao.
             **ancora(anuncios),
         })
 
