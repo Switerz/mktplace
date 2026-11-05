@@ -12,11 +12,15 @@ export const URL_DA_API = `${API}/expedicao-vencidos`;
  *   /cron/alerta-vencidos   a cada 15 min
  *   /cron/alertas-criticos  a cada 15 min
  *   /cron/report-diario     todo dia 11:00 UTC (8h de Brasilia)
+ *   /cron/vence-hoje        todo dia 12:00 UTC (9h de Brasilia)
+ *   /cron/corte-coleta      todo dia 18:30 UTC (15h30 de Brasilia)
  */
 export const ROTAS = {
   "/cron/alerta-vencidos": URL_DA_API,
   "/cron/alertas-criticos": `${API}/criticos`,
   "/cron/report-diario": `${API}/report-diario`,
+  "/cron/vence-hoje": `${API}/expedicao-dia?momento=manha`,
+  "/cron/corte-coleta": `${API}/expedicao-dia?momento=corte`,
 };
 
 /**

@@ -33,5 +33,7 @@ test("cada cron do gatilho aponta para a sua rota na API", () => {
     "/cron/alerta-vencidos": `${base}/expedicao-vencidos`,
     "/cron/alertas-criticos": `${base}/criticos`,
     "/cron/report-diario": `${base}/report-diario`,
+    "/cron/vence-hoje": `${base}/expedicao-dia?momento=manha`,
+    "/cron/corte-coleta": `${base}/expedicao-dia?momento=corte`,
   });
 });

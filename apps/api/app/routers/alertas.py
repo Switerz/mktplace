@@ -6,6 +6,8 @@ Mapa completo: `docs/torre_bot_alertas.md`. Todas chamadas pelo app
   POST /api/v1/alertas/expedicao-vencidos  A1, a cada 15 min (`alerta_vencidos.py`)
   POST /api/v1/alertas/criticos            A2 + A3, a cada 15 min (`torre_alertas.py`)
   POST /api/v1/alertas/report-diario       R1, as 8h de Brasilia (`torre_report.py`)
+  POST /api/v1/alertas/expedicao-dia       A5 (?momento=manha, 9h) e A6 (?momento=corte,
+                                           15h30) (`torre_expedicao_dia.py`)
 
 O envio que nao se repete mora em `app/services/slack_dm.py`.
 
@@ -31,7 +33,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.services import torre_alertas, torre_report
+from app.services import torre_alertas, torre_expedicao_dia, torre_report
 from app.services.alerta_vencidos import EVENTO, avaliar
 from app.services.slack_dm import (
     Item,
@@ -159,4 +161,33 @@ def disparar_report_diario(
         return corpo
     item = Item(torre_report.chave_do_report(rep), texto)
     corpo.update(_enviar("report diario", token, destinatarios, [item], lambda _novos: msg))
+    return corpo
+
+
+@router.post("/expedicao-dia")
+def disparar_expedicao_dia(
+    momento: str = Query(..., description="`manha` (vencem hoje) ou `corte` (corte da coleta)."),
+    simular: bool = Query(False, description="Monta e devolve a mensagem sem enviar."),
+    x_alerta_token: Optional[str] = Header(None, alias="X-Alerta-Token"),
+    db: Session = Depends(get_db),
+) -> dict:
+    """A5/A6: o que vence hoje na Expedicao. Uma vez por dia e momento por pessoa."""
+    token, destinatarios = _conferir(x_alerta_token, db, simular)
+    if momento not in torre_expedicao_dia.MOMENTOS:
+        raise HTTPException(422, "Momento invalido. Use manha ou corte.")
+    leitura = torre_expedicao_dia.ler_dia(db, agora=datetime.now(timezone.utc))
+    par = torre_expedicao_dia.item(leitura, momento)
+    corpo = {"momento": momento, "dia": leitura.hoje.isoformat(),
+             "canais": [c.canal for c in leitura.canais],
+             "canais_indisponiveis": leitura.indisponiveis,
+             "vencem_hoje": sum(c.total_hoje() for c in leitura.canais),
+             "enviados": 0, "ja_tinham": 0}
+    if simular:
+        corpo["mensagem"], corpo["blocos"] = (par[1].texto, par[1].blocos) if par else (None, None)
+        return corpo
+    if par is None:
+        return corpo
+    item, msg = par
+    corpo.update(_enviar(f"expedicao dia ({momento})", token, destinatarios, [item],
+                         lambda _novos: msg))
     return corpo
