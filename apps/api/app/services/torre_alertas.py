@@ -71,6 +71,9 @@ BASE_MINIMA = 30
 #: O TikTok entra para a mensagem dizer que ainda nao ha' nota oficial dele.
 CANAIS_SAUDE: tuple[str, ...] = ("mercadolivre", "shopee", "tiktokshop")
 
+#: Comparador da meta oficial -> palavra no texto ("maximo 8%", "minimo 60%").
+LIMITE_POR_COMPARADOR = {"<=": "máximo", "<": "abaixo de", ">=": "mínimo", ">": "acima de", "=": "igual a"}
+
 #: Unidade da metrica oficial -> sufixo no texto.
 SUFIXO_UNIDADE = {"pct": "%", "segundos": " s", "horas": " h", "dias": " dias", "contagem": ""}
 
@@ -299,7 +302,8 @@ def sinais_da_conta(conta, canal: str = "mercadolivre") -> list[SinalSaude]:
         if m.situacao == "fora":
             alvo = "para MercadoLíder" if canal == "mercadolivre" else "da Shopee"
             sinal(CRITICO, m.codigo,
-                  f"{m.rotulo} em {valor}, fora da meta ({m.comparador} {limite} {alvo}).")
+                  f"{m.rotulo} em {valor}, fora da meta "
+                  f"({LIMITE_POR_COMPARADOR.get(m.comparador, m.comparador)} {limite} {alvo}).")
         elif (m.comparador in ("<=", "<") and m.meta > 0
               and m.valor >= LIMIAR_PERTO * m.meta):
             sinal(ATENCAO, m.codigo, f"{m.rotulo} em {valor}, perto do limite de {limite}.")
@@ -519,7 +523,7 @@ def _resumo_criticos(ldr: list[CelulaLdr], vencidos: list["LeituraVencidos"], sa
     for v in vencidos:
         partes.append(f"{pct(v.fracao or 0)} dos pedidos parados vencidos {NO_CANAL[v.canal]}")
     if saude:
-        partes.append(f"{saude} sinal{'is' if saude != 1 else ''} na performance oficial")
+        partes.append(f"{saude} {'sinal' if saude == 1 else 'sinais'} na performance oficial")
     return " · ".join(partes) or "alerta crítico"
 
 
