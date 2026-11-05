@@ -499,3 +499,470 @@ def test_erro_http_nao_carrega_a_chave(monkeypatch):
 def test_cli_de_captura_sem_credencial_sai_com_2(monkeypatch, tmp_path):
     monkeypatch.delenv(A.ENV_SECRET_FILE, raising=False)
     assert A.main(["--out", str(tmp_path / "s.json")]) == 2
+
+
+# --------------------------------------------------------------- de-para (T-0063)
+#
+# Tudo sintetico: marcas reais (o de-para e' escopado pela marca da Torre), mas
+# codigos, SKUs e nomes inventados. O caso real equivalente esta' citado no
+# comentario de cada teste, sem numero de negocio.
+
+CATALOGO = [
+    {"component_sku": "PL0001", "brand": "lescent", "ean": None,
+     "name": "Deo Sintetico 25ml"},
+    {"component_sku": "PL0002", "brand": "lescent", "ean": None,
+     "name": "Deo Sintetico Outro"},
+    {"component_sku": "PL0007", "brand": "lescent", "ean": None,
+     "name": "DEO SINTETICO SETE 25ML"},
+    {"component_sku": "PL0008", "brand": "lescent", "ean": None,
+     "name": "Deo Sintetico Oito"},
+    {"component_sku": "PB0001", "brand": "barbours", "ean": None,
+     "name": "Body Splash Sintetico 200ml"},
+    {"component_sku": "PX0001", "brand": "apice", "ean": None,
+     "name": "Ativador Sintetico 1000 ml"},
+    {"component_sku": "PX0002", "brand": "apice", "ean": None,
+     "name": "Condicionador Sintetico 1L"},
+    {"component_sku": "PX0003", "brand": "apice", "ean": None,
+     "name": "Shampoo Sintetico 300ml"},
+]
+
+PONTE_APICE = [
+    {"brand": "apice", "code": "700", "protheus_sku": "PX0001"},
+    {"brand": "apice", "code": "701", "protheus_sku": "PX0002"},
+    {"brand": "apice", "code": "702", "protheus_sku": "PX0003"},
+]
+
+
+def _dp(marca, codigo, destino, ativo=True):
+    return {"marca": marca, "codigo_avoe": codigo, "sku_destino": destino,
+            "classe": "A", "evidencia": "sintetico", "aprovado_por": "teste",
+            "ativo": ativo}
+
+
+def _kit_nomeado(marca, sku, *pares):
+    """Kit cujos componentes tem nome: `pares` = (codigo, nome)."""
+    k = _kit(marca, sku)
+    k["componentes"] = [{"sku": c, "ean": None, "nome": n} for c, n in pares]
+    return k
+
+
+def _bom(kits, *, ponte=PONTE, catalogo=CATALOGO, de_para=()):
+    return A.build_avoe_bom(kits, brand_code_rows=ponte, catalog_rows=catalogo,
+                            de_para_rows=list(de_para))
+
+
+def test_de_para_traduz_o_que_o_map_nao_traduz():
+    bom = _bom([_kit_nomeado("Lescent", "KIT020",
+                             ("950", "Deo Sintetico Sete 25ML"))],
+               de_para=[_dp("lescent", "950", "PL0007")])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT020"] == {"PL0007": 1}
+    assert bom.summary["traduzidos_por_origem"] == {A.ORIGEM_DE_PARA: 1}
+    assert bom.summary["volume"] == {A.VOLUME_CONCORDA: 1}
+
+
+def test_trava_a_de_para_igual_ao_map_fica_com_o_map():
+    # O map ja' traduz 900 -> PL0001; o de-para repete o mesmo destino.
+    bom = _bom([_kit("Lescent", "KIT021", "900")],
+               de_para=[_dp("lescent", "900", "PL0001")])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT021"] == {"PL0001": 1}
+    assert bom.summary["traduzidos_por_origem"] == {A.ORIGEM_MAP: 1}
+
+
+def test_trava_a_de_para_nao_desempata_map_ambiguo():
+    # 905 tem DUAS traducoes no map; o de-para nao escolhe uma delas.
+    bom = _bom([_kit("Lescent", "KIT022", "905")],
+               de_para=[_dp("lescent", "905", "PL0005")])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT022"] == {"AVOE:LESCENT:905": 1}
+    assert bom.summary["ambiguos_por_motivo"] == {A.AMBIGUO_MAP_MULTIPLO: 1}
+
+
+def test_trava_b_map_e_de_para_divergentes_viram_ambiguo():
+    bom = _bom([_kit("Lescent", "KIT023", "900", "901")],
+               de_para=[_dp("lescent", "900", "PL0008")])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT023"] == {
+        "AVOE:LESCENT:900": 1, "PL0002": 1}
+    assert bom.summary["componentes_ambiguos"] == 1
+    assert bom.summary["ambiguos_por_motivo"] == {
+        A.AMBIGUO_MAP_DIVERGE_DE_PARA: 1}
+    [b] = bom.summary["bloqueios"]
+    assert (b["map"], b["de_para"]) == (["PL0001"], ["PL0008"])
+
+
+def test_de_para_com_dois_destinos_ativos_e_ambiguo():
+    bom = _bom([_kit("Lescent", "KIT024", "950")],
+               de_para=[_dp("lescent", "950", "PL0007"),
+                        _dp("lescent", "950", "PL0008")])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT024"] == {"AVOE:LESCENT:950": 1}
+    assert bom.summary["ambiguos_por_motivo"] == {A.AMBIGUO_DE_PARA_MULTIPLO: 1}
+
+
+def test_trava_c_destino_fora_do_catalogo_fica_sem_ponte():
+    bom = _bom([_kit("Lescent", "KIT025", "950")],
+               de_para=[_dp("lescent", "950", "PL9999")])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT025"] == {"AVOE:LESCENT:950": 1}
+    assert bom.summary["sem_ponte_por_motivo"] == {
+        A.SEM_PONTE_DE_PARA_FORA_DO_CATALOGO: 1}
+
+
+def test_trava_c_sem_catalogo_nenhum_destino_e_aceito():
+    bom = A.build_avoe_bom([_kit("Lescent", "KIT026", "950")],
+                           brand_code_rows=PONTE,
+                           de_para_rows=[_dp("lescent", "950", "PL0007")])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT026"] == {"AVOE:LESCENT:950": 1}
+
+
+def test_trava_c_destino_de_outra_marca_no_catalogo_fica_sem_ponte():
+    # A linha e' Lescent, mas o destino e' um SKU da Barbour's no catalogo.
+    bom = _bom([_kit("Lescent", "KIT027", "950")],
+               de_para=[_dp("lescent", "950", "PB0001")])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT027"] == {"AVOE:LESCENT:950": 1}
+    assert bom.summary["sem_ponte_por_motivo"] == {
+        A.SEM_PONTE_DE_PARA_OUTRA_MARCA: 1}
+
+
+def test_trava_d_de_para_de_outra_marca_nao_alcanca_o_componente():
+    # Mesmo codigo, kit da Barbour's: a linha Lescent nao vale para ele.
+    bom = _bom([_kit("Barbours", "KIT028", "950")],
+               de_para=[_dp("lescent", "950", "PL0007")])
+    assert _linhas_por_kit(bom)["AVOE:BARBOURS:KIT028"] == {
+        "AVOE:BARBOURS:950": 1}
+    assert bom.summary["sem_ponte_por_motivo"] == {A.SEM_PONTE_SEM_TRADUCAO: 1}
+
+
+def test_trava_e_linha_inativa_e_ignorada():
+    bom = _bom([_kit("Lescent", "KIT029", "950")],
+               de_para=[_dp("lescent", "950", "PL0007", ativo=False)])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT029"] == {"AVOE:LESCENT:950": 1}
+    assert bom.summary["de_para_linhas_ativas"] == 0
+
+
+def test_trava_e_ativo_textual_so_liga_com_true():
+    bom = _bom([_kit("Lescent", "KIT030", "950")],
+               de_para=[_dp("lescent", "950", "PL0007", ativo="sim")])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT030"] == {"AVOE:LESCENT:950": 1}
+
+
+# --------------------------------------------------------------- linha negativa
+
+def _neg(marca, codigo, ativo=True):
+    return dict(_dp(marca, codigo, "", ativo=ativo), classe="NEG", bloquear=True)
+
+
+def test_negativa_bloqueia_traducao_do_map():
+    # Equivalente sintetico de "Mascara" que o map traduz para um
+    # Condicionador: a trava de volume nao pega (sem_prova), a negativa pega.
+    bom = _bom([_kit("Lescent", "KIT040", "900", "901")],
+               de_para=[_neg("lescent", "900")])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT040"] == {
+        "AVOE:LESCENT:900": 1, "PL0002": 1}
+    assert bom.summary["componentes_ambiguos"] == 1
+    assert bom.summary["ambiguos_por_motivo"] == {A.AMBIGUO_DE_PARA_BLOQUEIO: 1}
+    assert bom.summary["de_para_bloqueios_ativos"] == 1
+    assert bom.summary["de_para_linhas_ativas"] == 0
+    [b] = bom.summary["bloqueios"]
+    assert (b["kit"], b["codigo"], b["motivo"], b["map"]) == (
+        "AVOE:LESCENT:KIT040", "900", A.AMBIGUO_DE_PARA_BLOQUEIO, ["PL0001"])
+
+
+def test_negativa_faz_o_kit_nao_resolver_no_contrato():
+    sem = _por_oferta(_plano(P.montar_fontes(
+        _dados_protheus(), source="avoe", avoe_kits=AVOE, de_para_rows=[])))
+    assert sem["O1"]["status"] == "resolved"
+    com = _por_oferta(_plano(P.montar_fontes(
+        _dados_protheus(), source="avoe", avoe_kits=AVOE,
+        de_para_rows=[_neg("lescent", "900")])))
+    assert com["O1"]["status"] == "blocked"
+    assert com["O1"]["reason"] == kb.REASON_COMPONENT_NOT_IN_CATALOG
+    assert {c["component_sku"] for c in json.loads(com["O1"]["components"])} == {
+        "AVOE:LESCENT:900", "PL0002"}
+
+
+def test_negativa_inativa_e_ignorada_e_o_map_volta_a_valer():
+    bom = _bom([_kit("Lescent", "KIT041", "900")],
+               de_para=[_neg("lescent", "900", ativo=False)])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT041"] == {"PL0001": 1}
+    assert bom.summary["traduzidos_por_origem"] == {A.ORIGEM_MAP: 1}
+    assert bom.summary["de_para_bloqueios_ativos"] == 0
+
+
+def test_negativa_de_uma_marca_nao_afeta_positiva_de_outra():
+    # Caso real: o codigo 10009 e' negativo em barbours e positivo em lescent.
+    ponte = [{"brand": "barbours", "code": "10009", "protheus_sku": "PB0001"}]
+    catalogo = CATALOGO + [{"component_sku": "LC01003", "brand": "lescent",
+                            "ean": None, "name": "Deo Sintetico"}]
+    bom = _bom([_kit("Barbours", "KIT042", "10009"),
+                _kit("Lescent", "KIT042", "10009")],
+               ponte=ponte, catalogo=catalogo,
+               de_para=[_neg("barbours", "10009"),
+                        _dp("lescent", "10009", "LC01003")])
+    kits = _linhas_por_kit(bom)
+    assert kits["AVOE:BARBOURS:KIT042"] == {"AVOE:BARBOURS:10009": 1}
+    assert kits["AVOE:LESCENT:KIT042"] == {"LC01003": 1}
+    assert bom.summary["ambiguos_por_motivo"] == {A.AMBIGUO_DE_PARA_BLOQUEIO: 1}
+    assert bom.summary["traduzidos_por_origem"] == {A.ORIGEM_DE_PARA: 1}
+
+
+def test_negativa_vence_positiva_quando_chega_sem_passar_pelo_carregador():
+    # O carregador recusa o par; quem chama `build_avoe_bom` direto com as
+    # duas linhas recebe bloqueio (fail-closed), nunca a traducao.
+    bom = _bom([_kit("Lescent", "KIT043", "950")],
+               de_para=[_dp("lescent", "950", "PL0007"), _neg("lescent", "950")])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT043"] == {"AVOE:LESCENT:950": 1}
+    assert bom.summary["ambiguos_por_motivo"] == {A.AMBIGUO_DE_PARA_BLOQUEIO: 1}
+
+
+# --------------------------------------------------------------- volume
+
+@pytest.mark.parametrize("nome, esperado", [
+    ("Deo 25ML", {("ml", Decimal(25))}),
+    ("Condicionador 1L", {("ml", Decimal(1000))}),
+    ("Cond 1,5 L", {("ml", Decimal(1500))}),
+    ("Ativador 500gr", {("g", Decimal(500))}),
+    ("Pote 1kg", {("g", Decimal(1000))}),
+    ("Máscara 300 g Marca- G7", {("g", Decimal(300))}),
+    # Numero colado a letra, ou unidade seguida de letra: nao e' volume.
+    ("SERUM AP3000 N20 Q10", set()),
+    ("Kit 3 Lescent", set()),
+    ("7900000000000 - Body Splash - C1", set()),
+])
+def test_volumes_declarados(nome, esperado):
+    assert A.volumes_declarados([nome]) == esperado
+
+
+def test_volume_igual_passa():
+    assert A.comparar_volume(["Deo 25ml"], ["DEO 25ML"]) == A.VOLUME_CONCORDA
+
+
+def test_volume_1l_e_1000ml_sao_iguais():
+    assert A.comparar_volume(["Cond 1L"], ["Cond 1000 ml"]) == A.VOLUME_CONCORDA
+    assert A.comparar_volume(["Pote 1kg"], ["Pote 1000g"]) == A.VOLUME_CONCORDA
+
+
+def test_volume_diferente_diverge():
+    assert A.comparar_volume(["Shampoo 300ml"], ["Shampoo 1L"]) == A.VOLUME_DIVERGE
+
+
+def test_volume_ausente_e_sem_prova():
+    assert A.comparar_volume(["Mascara"], ["Cond 1L"]) == A.VOLUME_SEM_PROVA
+    assert A.comparar_volume(["Cond 1L"], []) == A.VOLUME_SEM_PROVA
+
+
+def test_volume_g_contra_ml_e_unidade_incompativel():
+    assert (A.comparar_volume(["Ativador 500gr"], ["Ativador 1000 ml"])
+            == A.VOLUME_UNIDADE_INCOMPATIVEL)
+    assert (A.comparar_volume(["Gel 500g"], ["Gel 500ml"])
+            == A.VOLUME_UNIDADE_INCOMPATIVEL)
+
+
+def test_traducao_do_map_com_volume_em_gr_contra_ml_bloqueia():
+    # Equivalente sintetico do Ativador "500gr" traduzido para SKU de 1000 ml.
+    bom = _bom([_kit_nomeado("Apice", "KIT031",
+                             ("700", "Ativador Sintetico 500gr"),
+                             ("702", "Shampoo Sintetico 300ml"))],
+               ponte=PONTE_APICE)
+    assert _linhas_por_kit(bom)["AVOE:APICE:KIT031"] == {
+        "AVOE:APICE:700": 1, "PX0003": 1}
+    assert bom.summary["ambiguos_por_motivo"] == {A.AMBIGUO_VOLUME_UNIDADE: 1}
+    assert bom.summary["volume"] == {A.VOLUME_CONCORDA: 1,
+                                     A.VOLUME_UNIDADE_INCOMPATIVEL: 1}
+
+
+def test_traducao_do_map_com_volume_diferente_bloqueia():
+    bom = _bom([_kit_nomeado("Apice", "KIT032",
+                             ("702", "Shampoo Sintetico 1000ml"))],
+               ponte=PONTE_APICE)
+    assert _linhas_por_kit(bom)["AVOE:APICE:KIT032"] == {"AVOE:APICE:702": 1}
+    assert bom.summary["ambiguos_por_motivo"] == {A.AMBIGUO_VOLUME_DIVERGE: 1}
+
+
+def test_mascara_sem_volume_para_condicionador_1l_nao_e_pega_pela_trava():
+    # Equivalente sintetico das "Mascara ... Scalp Care" -> Condicionador 1L:
+    # a Avoe nao declara volume, entao a trava de volume NAO bloqueia. O tipo
+    # de produto diferente precisa de outra prova, fora desta trava.
+    bom = _bom([_kit_nomeado("Apice", "KIT033",
+                             ("701", "Mascara Sintetica Scalp"))],
+               ponte=PONTE_APICE)
+    assert _linhas_por_kit(bom)["AVOE:APICE:KIT033"] == {"PX0002": 1}
+    assert bom.summary["volume"] == {A.VOLUME_SEM_PROVA: 1}
+
+
+def test_de_para_tambem_passa_pela_trava_de_volume():
+    bom = _bom([_kit_nomeado("Lescent", "KIT034",
+                             ("950", "Deo Sintetico 100ml"))],
+               de_para=[_dp("lescent", "950", "PL0007")])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT034"] == {"AVOE:LESCENT:950": 1}
+    assert bom.summary["ambiguos_por_motivo"] == {A.AMBIGUO_VOLUME_DIVERGE: 1}
+
+
+def test_volume_julga_a_traducao_com_os_nomes_de_todos_os_kits():
+    # A traducao (marca, codigo) -> SKU e' a mesma em todo kit. Um nome que
+    # contradiz o destino num kit bloqueia o codigo em TODOS — inclusive no kit
+    # cujo nome concorda e no kit em que a Avoe mandou o componente sem nome.
+    bom = _bom([_kit_nomeado("Apice", "KIT035",
+                             ("702", "Shampoo Sintetico 300ml")),
+                _kit_nomeado("Apice", "KIT036",
+                             ("702", "Condicionador Sint 1000ml")),
+                _kit_nomeado("Apice", "KIT037", ("702", ""))],
+               ponte=PONTE_APICE)
+    kits = _linhas_por_kit(bom)
+    assert kits["AVOE:APICE:KIT035"] == {"AVOE:APICE:702": 1}
+    assert kits["AVOE:APICE:KIT036"] == {"AVOE:APICE:702": 1}
+    assert kits["AVOE:APICE:KIT037"] == {"AVOE:APICE:702": 1}
+    assert bom.summary["ambiguos_por_motivo"] == {A.AMBIGUO_VOLUME_DIVERGE: 3}
+
+
+# --------------------------------------------------------------- CSV versionado
+
+def test_de_para_versionado_tem_as_positivas_classe_a_e_as_negativas():
+    linhas = A.carregar_de_para()
+    assert all(r["ativo"] is True for r in linhas)
+    positivas = [r for r in linhas if not r["bloquear"]]
+    negativas = [r for r in linhas if r["bloquear"]]
+    assert all(r["classe"] == "A" for r in positivas)
+    assert {(r["marca"], r["codigo_avoe"], r["sku_destino"])
+            for r in positivas} == {
+        ("barbours", "10041", "BB02027"), ("barbours", "10042", "BB02019"),
+        ("lescent", "10009", "LC01003"), ("lescent", "10015", "LC01009"),
+        ("lescent", "10016", "LC01010"), ("lescent", "10017", "LC01011"),
+        ("lescent", "10018", "LC03012"), ("lescent", "10026", "LC03020"),
+        ("lescent", "10027", "LC03021"),
+    }
+    assert all(r["classe"] == "NEG" and r["sku_destino"] == ""
+               for r in negativas)
+    assert {(r["marca"], r["codigo_avoe"]) for r in negativas} == {
+        ("apice", "20674"), ("apice", "20675"), ("apice", "20016"),
+        ("barbours", "10009"), ("barbours", "10134"),
+    }
+    assert len(positivas) == 9 and len(negativas) == 5
+    assert all(r["aprovado_por"] and r["evidencia"] for r in linhas)
+    # Cada linha leu exatamente as colunas do cabecalho: nenhuma virgula solta
+    # fora das aspas deslocou a evidencia.
+    assert all(None not in r for r in linhas)
+
+
+_CABECALHO = ",".join(A.DE_PARA_COLUNAS)
+
+
+@pytest.mark.parametrize("conteudo", [
+    "marca,codigo,sku\nlescent,1,X\n",                # colunas erradas
+    ("marca,codigo_avoe,sku_destino,classe,evidencia,aprovado_por,ativo\n"
+     "lescent,1,X,A,e,p,true\n"),                     # sem a coluna bloquear
+    f"{_CABECALHO}\nlescnt,1,X,A,e,p,true,false\n",   # marca digitada errada
+    f"{_CABECALHO}\nlescent,1,X,A,e,p,sim,false\n",   # ativo fora de true|false
+    f"{_CABECALHO}\nlescent,,X,A,e,p,true,false\n",   # codigo vazio
+    f"{_CABECALHO}\nlescent,1,X,A,e,p,true,sim\n",    # bloquear fora de true|false
+    f"{_CABECALHO}\nlescent,1,X,A,e,p,true,\n",       # bloquear vazio
+    f"{_CABECALHO}\nlescent,1,,A,e,p,true,false\n",   # destino vazio sem bloquear
+    f"{_CABECALHO}\nlescent,1,,A,e,p,false,false\n",  # idem, mesmo inativa
+    f"{_CABECALHO}\nlescent,1,X,NEG,e,p,true,true\n", # bloquear com destino
+])
+def test_de_para_malformado_e_recusado(tmp_path, conteudo):
+    arq = tmp_path / "dp.csv"
+    arq.write_text(conteudo, encoding="utf-8")
+    with pytest.raises(A.AvoeSourceError, match="de-para"):
+        A.carregar_de_para(arq)
+
+
+def _csv(tmp_path, *linhas):
+    arq = tmp_path / "dp.csv"
+    arq.write_text("\n".join((_CABECALHO,) + linhas) + "\n", encoding="utf-8")
+    return arq
+
+
+def test_de_para_positiva_e_negativa_ativas_na_mesma_chave_sao_conflito(tmp_path):
+    arq = _csv(tmp_path, "lescent,1,X,A,e,p,true,false",
+               "lescent,1,,NEG,e,p,true,true")
+    with pytest.raises(A.AvoeSourceError, match="linha 3"):
+        A.carregar_de_para(arq)
+
+
+def test_de_para_negativa_antes_da_positiva_tambem_e_conflito(tmp_path):
+    arq = _csv(tmp_path, "lescent,1,,NEG,e,p,true,true",
+               "lescent,1,X,A,e,p,true,false")
+    with pytest.raises(A.AvoeSourceError, match="linha 3"):
+        A.carregar_de_para(arq)
+
+
+def test_de_para_conflito_so_conta_linhas_ativas_e_mesma_chave(tmp_path):
+    # Negativa inativa + positiva ativa; e negativa de outra marca no mesmo
+    # codigo: nenhum dos dois e' conflito.
+    linhas = A.carregar_de_para(_csv(
+        tmp_path, "lescent,1,X,A,e,p,true,false",
+        "lescent,1,,NEG,e,p,false,true",
+        "barbours,1,,NEG,e,p,true,true"))
+    assert [(r["marca"], r["ativo"], r["bloquear"]) for r in linhas] == [
+        ("lescent", True, False), ("lescent", False, True),
+        ("barbours", True, True)]
+
+
+def test_de_para_versionado_bloqueia_barbours_10009_e_traduz_lescent_10009():
+    # O mesmo codigo 10009: o map de barbours traduz (errado) e a negativa
+    # bloqueia; em lescent a positiva do CSV traduz.
+    ponte = [{"brand": "barbours", "code": "10009", "protheus_sku": "BB02025"}]
+    catalogo = [{"component_sku": "BB02025", "brand": "barbours", "ean": None,
+                 "name": "Kit de cabelo sintetico"},
+                {"component_sku": "LC01003", "brand": "lescent", "ean": None,
+                 "name": "Body Splash Sintetico"}]
+    bom = A.build_avoe_bom([_kit("Barbours", "KIT044", "10009"),
+                            _kit("Lescent", "KIT044", "10009")],
+                           brand_code_rows=ponte, catalog_rows=catalogo,
+                           de_para_rows=A.carregar_de_para())
+    kits = _linhas_por_kit(bom)
+    assert kits["AVOE:BARBOURS:KIT044"] == {"AVOE:BARBOURS:10009": 1}
+    assert kits["AVOE:LESCENT:KIT044"] == {"LC01003": 1}
+    assert bom.summary["de_para_bloqueios_ativos"] == 5
+    assert bom.summary["de_para_linhas_ativas"] == 9
+
+
+def test_de_para_ausente_e_recusado(tmp_path):
+    with pytest.raises(A.AvoeSourceError):
+        A.carregar_de_para(tmp_path / "nao-existe.csv")
+
+
+# --------------------------------------------------------------- nao regressao
+
+def test_sem_de_para_com_catalogo_a_bom_e_a_de_antes():
+    kits = [_kit("Lescent", "KIT001", "900", "901"),
+            _kit("Lescent", "KIT002", "900", "777"),
+            _kit("Lescent", "KIT003", "905", "901")]
+    antes = A.build_avoe_bom(kits, brand_code_rows=PONTE)
+    depois = A.build_avoe_bom(kits, brand_code_rows=PONTE,
+                              catalog_rows=_dados_protheus()["catalog_rows"],
+                              de_para_rows=[])
+    assert antes.bom_rows == depois.bom_rows
+    for k in ("componentes_traduzidos", "componentes_sem_ponte",
+              "componentes_ambiguos"):
+        assert antes.summary[k] == depois.summary[k]
+
+
+def test_ambas_sem_de_para_e_igual_com_o_csv_versionado_nos_kits_sinteticos():
+    # O CSV real nao alcanca os codigos sinteticos: o plano e' o mesmo, e e'
+    # o que os testes de `ambas` acima ja' travam.
+    sem = P.montar_fontes(_dados_protheus(), source="ambas", avoe_kits=AVOE,
+                          today=HOJE, de_para_rows=[])
+    com = P.montar_fontes(_dados_protheus(), source="ambas", avoe_kits=AVOE,
+                          today=HOJE)
+    assert _por_oferta(_plano(sem)) == _por_oferta(_plano(com))
+    assert com["avoe_summary"]["de_para_linhas_ativas"] == 9
+    assert sem["avoe_summary"]["de_para_linhas_ativas"] == 0
+
+
+def test_ambas_com_de_para_destrava_o_kit_pelo_contrato():
+    dados = _dados_protheus()
+    dados["catalog_rows"].append(
+        {"component_sku": "PL0007", "brand": "lescent", "ean": None,
+         "name": "Deo Sintetico 25ml"})
+    dados["references"].append(
+        {"reference_row_id": "R7", "brand": "lescent", "source_sku": "PL0007",
+         "source_gtin": None, "suggested_retail_amount": "5.00",
+         "quality_status": "ok"})
+    # KIT002 = 900 + 777; 777 nao tem traducao no map.
+    sem = _por_oferta(_plano(P.montar_fontes(
+        dados, source="ambas", avoe_kits=AVOE, today=HOJE, de_para_rows=[])))
+    assert sem["O3"]["reason"] == kb.REASON_COMPONENT_NOT_IN_CATALOG
+    com = _por_oferta(_plano(P.montar_fontes(
+        dados, source="ambas", avoe_kits=AVOE, today=HOJE,
+        de_para_rows=[_dp("lescent", "777", "PL0007")])))
+    assert com["O3"]["status"] == "resolved"
+    assert {c["component_sku"] for c in json.loads(com["O3"]["components"])} == {
+        "PL0001", "PL0007"}

@@ -43,6 +43,41 @@ kit como `blocked` com `kit_component_not_in_catalog`. Descartar o componente
 produziria um kit mais barato, que e' o defeito que o contrato existe para
 impedir. O EAN que a Avoe devolve nunca e' usado como criterio.
 
+DE-PARA VERSIONADO (T-0063)
+---------------------------
+`avoe_de_para_componentes.csv`, ao lado deste modulo, e' uma SEGUNDA fonte de
+traducao, mantida a mao e aprovada linha a linha. Ela so' cobre o que o
+`map_produto` nao traduz, com cinco travas:
+
+(a) so' vale quando o `map` NAO traduz aquele `(marca, codigo)`;
+(b) se o `map` traduz para um SKU DIFERENTE do de-para, o componente fica
+    ambiguo (bloqueado) — nenhum dos dois e' escolhido;
+(c) o `sku_destino` tem de estar no catalogo do contrato (`SQL_CATALOG`), sob
+    a mesma marca; senao o componente fica sem ponte;
+(d) a linha so' vale para kit da MESMA marca (a chave e' `(marca, codigo)`);
+(e) `ativo=false` e' ignorada.
+
+LINHA NEGATIVA (`bloquear=true`, `sku_destino` vazio): a traducao daquele
+`(marca, codigo)` esta' provada errada. Ela vale MESMO quando o `map` traduz
+(e' a excecao a' trava (a)): o componente fica ambiguo com motivo
+`de_para_bloqueio`, nunca traduzido. Positiva e negativa ativas na mesma chave
+sao conflito e o carregamento levanta.
+
+TRAVA DE VOLUME
+---------------
+Vale para TODA traducao (map ou de-para). Se o nome do componente na Avoe e o
+nome do SKU destino no catalogo declaram volume/peso (`ml`, `l`, `g`, `gr`,
+`kg`) e, normalizados (1 l = 1000 ml, 1 kg = 1000 g), os conjuntos diferem, a
+traducao vira ambigua com motivo `volume_diverge`. Unidades de dimensoes
+diferentes (g x ml) contam como diferentes: `volume_unidade_incompativel`,
+tambem bloqueado (regra conservadora: sem densidade, nao ha conversao). Se um
+dos lados nao declara volume, a traducao NAO e' bloqueada; o par e' contado
+como `sem_prova` no resumo. Os nomes da Avoe sao os de TODOS os kits em que o
+codigo aparece: a traducao e' uma so', entao um nome que a contradiz bloqueia
+o codigo em todos os kits. Ambiguo, aqui, tem o mesmo efeito de sempre: o
+componente fica com chave `AVOE:` e o contrato bloqueia o kit; o motivo fino
+fica em `summary["ambiguos_por_motivo"]` e `summary["bloqueios"]`.
+
 QUANTIDADE: REPETICAO NA LISTA
 ------------------------------
 A Avoe nao tem coluna de quantidade: um kit de 3 unidades do mesmo produto
@@ -68,16 +103,19 @@ erro. O snapshot gravado contem apenas a resposta da Avoe.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 import re
 import sys
+import unicodedata
 import urllib.error
 import urllib.request
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Callable
 
@@ -131,6 +169,47 @@ MOTIVO_COMPOSICAO_CONFLITANTE = "composicao_conflitante"
 
 _SKU_VALIDO = re.compile(r"^[A-Z0-9][A-Z0-9._-]*$")
 
+#: De-para versionado, empacotado ao lado deste modulo (`package-data` do
+#: `pyproject.toml`). Ausente ou malformado: `AvoeSourceError`, nunca vazio
+#: silencioso.
+DE_PARA_CSV = Path(__file__).with_name("avoe_de_para_componentes.csv")
+DE_PARA_COLUNAS = ("marca", "codigo_avoe", "sku_destino", "classe",
+                   "evidencia", "aprovado_por", "ativo", "bloquear")
+
+#: Origem de uma traducao aceita.
+ORIGEM_MAP = "map_produto"
+ORIGEM_DE_PARA = "de_para"
+
+#: Motivos de componente AMBIGUO (bloqueado, nunca desempatado).
+AMBIGUO_MAP_MULTIPLO = "map_multiplo"
+AMBIGUO_MAP_DIVERGE_DE_PARA = "map_diverge_de_para"
+AMBIGUO_DE_PARA_MULTIPLO = "de_para_multiplo"
+AMBIGUO_DE_PARA_BLOQUEIO = "de_para_bloqueio"
+AMBIGUO_VOLUME_DIVERGE = "volume_diverge"
+AMBIGUO_VOLUME_UNIDADE = "volume_unidade_incompativel"
+
+#: Motivos de componente SEM PONTE.
+SEM_PONTE_SEM_TRADUCAO = "sem_traducao"
+SEM_PONTE_DE_PARA_FORA_DO_CATALOGO = "de_para_destino_fora_do_catalogo"
+SEM_PONTE_DE_PARA_OUTRA_MARCA = "de_para_destino_de_outra_marca"
+
+#: Veredito da trava de volume.
+VOLUME_CONCORDA = "concorda"
+VOLUME_SEM_PROVA = "sem_prova"
+VOLUME_DIVERGE = "diverge"
+VOLUME_UNIDADE_INCOMPATIVEL = "unidade_incompativel"
+
+#: Numero + unidade de volume/peso. O numero nao pode vir colado a letra ou
+#: digito (`AP3000`, `Q10`, `N20`) e a unidade nao pode continuar em letra
+#: (`3 Lescent` nao e' 3 litros).
+_VOLUME = re.compile(
+    r"(?<![0-9a-z])(\d+(?:[.,]\d+)?)\s*"
+    r"(ml|litros?|lts?|l|kg|gramas?|grs?|g)(?![0-9a-z])")
+_UNIDADE = {"ml": ("ml", 1), "l": ("ml", 1000), "lt": ("ml", 1000),
+            "lts": ("ml", 1000), "litro": ("ml", 1000), "litros": ("ml", 1000),
+            "g": ("g", 1), "gr": ("g", 1), "grs": ("g", 1), "grama": ("g", 1),
+            "gramas": ("g", 1), "kg": ("g", 1000)}
+
 
 class AvoeSourceError(RuntimeError):
     """Falha que impede usar a Avoe como fonte. Nunca carrega a chave."""
@@ -183,16 +262,178 @@ def _indice_de_codigos(brand_code_rows: Iterable[Mapping]) -> dict:
     return indice
 
 
+def _ativo(raw: object) -> bool:
+    """`ativo` do de-para: so' `true` (ou booleano verdadeiro) liga a linha."""
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() == "true"
+
+
+def _indice_de_para(de_para_rows: Iterable[Mapping]) -> dict:
+    """`(marca, codigo)` -> conjunto de SKUs destino, so' das linhas ATIVAS.
+
+    Trava (e): `ativo=false` nao entra. Trava (d): a chave carrega a marca,
+    entao a linha so' alcanca componente de kit da mesma marca.
+    """
+    indice: dict[tuple[str, str], set[str]] = {}
+    for row in de_para_rows:
+        if not _ativo(row.get("ativo")) or _ativo(row.get("bloquear")):
+            continue
+        marca = row.get("marca")
+        marca = str(marca).strip().lower() if marca is not None else None
+        codigo = _sku(row.get("codigo_avoe"))
+        alvo = _sku(row.get("sku_destino"))
+        if marca and codigo and alvo:
+            indice.setdefault((marca, codigo), set()).add(alvo)
+    return indice
+
+
+def _bloqueios_de_para(de_para_rows: Iterable[Mapping]) -> set:
+    """`(marca, codigo)` das linhas NEGATIVAS ativas (`bloquear=true`).
+
+    `bloquear` usa a mesma leitura de `ativo`: so' `true` liga. Linha sem a
+    coluna (chamador antigo) e' positiva.
+    """
+    chaves: set[tuple[str, str]] = set()
+    for row in de_para_rows:
+        if not (_ativo(row.get("ativo")) and _ativo(row.get("bloquear"))):
+            continue
+        marca = row.get("marca")
+        marca = str(marca).strip().lower() if marca is not None else None
+        codigo = _sku(row.get("codigo_avoe"))
+        if marca and codigo:
+            chaves.add((marca, codigo))
+    return chaves
+
+
+def _indice_do_catalogo(catalog_rows: Iterable[Mapping] | None) -> dict | None:
+    """SKU do catalogo -> {"marcas": set, "nomes": list}. `None` = sem catalogo."""
+    if catalog_rows is None:
+        return None
+    indice: dict[str, dict] = {}
+    for row in catalog_rows:
+        sku = _sku(row.get("component_sku") or row.get("sku"))
+        if sku is None:
+            continue
+        item = indice.setdefault(sku, {"marcas": set(), "nomes": []})
+        marca = row.get("brand") or row.get("marca")
+        item["marcas"].add(str(marca).strip().lower() if marca else None)
+        nome = row.get("name") or row.get("nome")
+        if nome:
+            item["nomes"].append(str(nome))
+    return indice
+
+
+def _sem_acento(texto: str) -> str:
+    decomposto = unicodedata.normalize("NFKD", texto)
+    return "".join(c for c in decomposto if not unicodedata.combining(c)).lower()
+
+
+def volumes_declarados(nomes: Iterable[object]) -> frozenset:
+    """Volumes/pesos declarados nos nomes, normalizados: {("ml"|"g", Decimal)}.
+
+    `1L` e `1000ml` viram o mesmo `("ml", 1000)`; `1kg` e `1000g`, o mesmo
+    `("g", 1000)`. Nome sem volume nao contribui.
+    """
+    achados = set()
+    for nome in nomes:
+        if not nome:
+            continue
+        for numero, unidade in _VOLUME.findall(_sem_acento(str(nome))):
+            dimensao, fator = _UNIDADE[unidade]
+            valor = Decimal(numero.replace(",", ".")) * fator
+            achados.add((dimensao, valor.normalize()))
+    return frozenset(achados)
+
+
+def comparar_volume(nomes_avoe: Iterable[object],
+                    nomes_destino: Iterable[object]) -> str:
+    """Veredito da trava de volume entre a Avoe e o SKU destino."""
+    va, vd = volumes_declarados(nomes_avoe), volumes_declarados(nomes_destino)
+    if not va or not vd:
+        return VOLUME_SEM_PROVA
+    if va == vd:
+        return VOLUME_CONCORDA
+    if {d for d, _ in va}.isdisjoint({d for d, _ in vd}):
+        return VOLUME_UNIDADE_INCOMPATIVEL
+    return VOLUME_DIVERGE
+
+
+def _traduzir(marca: str, codigo: str, nomes_avoe: list, *, indice: dict,
+              de_para: dict, catalogo: dict | None,
+              bloqueados: set = frozenset()) -> dict:
+    """Decide UM componente. Devolve `alvo` (ou None), `estado` e `motivo`.
+
+    `estado`: `traduzido` | `ambiguo` | `sem_ponte`. Nada aqui desempata.
+    """
+    alvos_map = indice.get((marca, codigo), set())
+    alvos_dp = de_para.get((marca, codigo), set())
+    res = {"alvo": None, "origem": None, "estado": None, "motivo": None,
+           "volume": None, "map": sorted(alvos_map), "de_para": sorted(alvos_dp)}
+
+    if (marca, codigo) in bloqueados:
+        # Linha negativa: a traducao esta' provada errada. Vale mesmo com o
+        # `map` traduzindo (excecao a' trava (a)) e vence qualquer positiva.
+        return dict(res, estado="ambiguo", motivo=AMBIGUO_DE_PARA_BLOQUEIO)
+    if len(alvos_map) > 1:
+        return dict(res, estado="ambiguo", motivo=AMBIGUO_MAP_MULTIPLO)
+    if len(alvos_map) == 1:
+        alvo = next(iter(alvos_map))
+        if alvos_dp and alvos_dp != {alvo}:
+            # Trava (b): map e de-para discordam; nenhum dos dois vence.
+            return dict(res, estado="ambiguo", motivo=AMBIGUO_MAP_DIVERGE_DE_PARA)
+        origem = ORIGEM_MAP
+    else:
+        # Trava (a): so' aqui, com o map calado, o de-para e' consultado.
+        if not alvos_dp:
+            return dict(res, estado="sem_ponte", motivo=SEM_PONTE_SEM_TRADUCAO)
+        if len(alvos_dp) > 1:
+            return dict(res, estado="ambiguo", motivo=AMBIGUO_DE_PARA_MULTIPLO)
+        alvo = next(iter(alvos_dp))
+        item = (catalogo or {}).get(alvo)
+        if item is None:
+            # Trava (c): destino fora do catalogo (ou catalogo nao fornecido).
+            return dict(res, estado="sem_ponte",
+                        motivo=SEM_PONTE_DE_PARA_FORA_DO_CATALOGO)
+        if item["marcas"] != {marca}:
+            return dict(res, estado="sem_ponte",
+                        motivo=SEM_PONTE_DE_PARA_OUTRA_MARCA)
+        origem = ORIGEM_DE_PARA
+
+    nomes_destino = ((catalogo or {}).get(alvo) or {}).get("nomes", [])
+    volume = comparar_volume(nomes_avoe, nomes_destino)
+    res.update(alvo=alvo, origem=origem, volume=volume)
+    if volume == VOLUME_DIVERGE:
+        return dict(res, alvo=None, estado="ambiguo", motivo=AMBIGUO_VOLUME_DIVERGE)
+    if volume == VOLUME_UNIDADE_INCOMPATIVEL:
+        return dict(res, alvo=None, estado="ambiguo", motivo=AMBIGUO_VOLUME_UNIDADE)
+    return dict(res, estado="traduzido")
+
+
 def build_avoe_bom(kits: Iterable[Mapping], *,
-                   brand_code_rows: Iterable[Mapping]) -> AvoeBom:
+                   brand_code_rows: Iterable[Mapping],
+                   catalog_rows: Iterable[Mapping] | None = None,
+                   de_para_rows: Iterable[Mapping] = ()) -> AvoeBom:
     """Kits da Avoe -> linhas de BOM + ponte, no formato do contrato.
 
     `brand_code_rows` sao as linhas de `SQL_BRIDGE_BRAND_CODE` (marca, codigo,
     protheus_sku). Sao usadas SO' para traduzir o codigo do componente.
+
+    `catalog_rows` sao as de `SQL_CATALOG` (com `name`): dao a trava (c) do
+    de-para e o nome do SKU destino para a trava de volume. Sem catalogo,
+    nenhum destino do de-para e' aceito e a trava de volume fica `sem_prova`.
+
+    `de_para_rows` sao as linhas de `avoe_de_para_componentes.csv`. Vazio (o
+    padrao) = comportamento anterior ao de-para.
     """
     indice = _indice_de_codigos(brand_code_rows)
+    de_para_rows = list(de_para_rows)
+    de_para = _indice_de_para(de_para_rows)
+    bloqueados = _bloqueios_de_para(de_para_rows)
+    catalogo = _indice_do_catalogo(catalog_rows)
     recusados: Counter = Counter()
     aceitos: dict[tuple[str, str], Counter] = {}
+    nomes_por_kit: dict[tuple[str, str], dict[str, list]] = {}
     conflitantes: set[tuple[str, str]] = set()
 
     for kit in kits:
@@ -217,31 +458,65 @@ def build_avoe_bom(kits: Iterable[Mapping], *,
         anterior = aceitos.get((marca, sku_kit))
         if anterior is not None and anterior != composicao:
             conflitantes.add((marca, sku_kit))
+        if anterior is None:
+            nomes: dict[str, list] = {}
+            for codigo, c in zip(codigos, componentes):
+                if (c or {}).get("nome"):
+                    nomes.setdefault(codigo, []).append(c["nome"])
+            nomes_por_kit[(marca, sku_kit)] = nomes
         aceitos.setdefault((marca, sku_kit), composicao)
 
     for par in conflitantes:
         del aceitos[par]
         recusados[MOTIVO_COMPOSICAO_CONFLITANTE] += 1
 
+    # A trava de volume julga a TRADUCAO `(marca, codigo) -> SKU`, que e' a
+    # mesma em todo kit. Por isso os nomes sao os de TODOS os kits aceitos: um
+    # nome que contradiz o destino em um kit bloqueia o codigo em todos, inclusive
+    # nos kits em que a Avoe mandou o componente sem nome.
+    nomes_por_codigo: dict[tuple[str, str], list] = {}
+    for (marca, sku_kit) in aceitos:
+        for codigo, lista in nomes_por_kit[(marca, sku_kit)].items():
+            nomes_por_codigo.setdefault((marca, codigo), []).extend(lista)
+
     out = AvoeBom()
     traduzidos, sem_ponte, ambiguos = 0, 0, 0
     por_marca: Counter = Counter()
+    por_origem: Counter = Counter()
+    ambiguos_motivo: Counter = Counter()
+    sem_ponte_motivo: Counter = Counter()
+    volume: Counter = Counter()
+    bloqueios: list[dict] = []
     for (marca, sku_kit), composicao in sorted(aceitos.items()):
         chave_kit = chave(marca, sku_kit)
         por_marca[marca] += 1
         for codigo, qtd in sorted(composicao.items()):
-            alvos = indice.get((marca, codigo), set())
-            if len(alvos) == 1:
-                componente = next(iter(alvos))
+            nomes = nomes_por_codigo.get((marca, codigo), [])
+            r = _traduzir(marca, codigo, nomes, indice=indice,
+                          de_para=de_para, catalogo=catalogo,
+                          bloqueados=bloqueados)
+            if r["volume"] is not None:
+                volume[r["volume"]] += 1
+            if r["estado"] == "traduzido":
+                componente = r["alvo"]
                 traduzidos += 1
+                por_origem[r["origem"]] += 1
             else:
                 # Sem traducao unica: o componente fica com chave propria, o
                 # catalogo nao o conhece e o contrato bloqueia o kit com motivo.
                 componente = chave(marca, codigo)
-                if alvos:
+                if r["estado"] == "ambiguo":
                     ambiguos += 1
+                    ambiguos_motivo[r["motivo"]] += 1
                 else:
                     sem_ponte += 1
+                    sem_ponte_motivo[r["motivo"]] += 1
+                if r["motivo"] != SEM_PONTE_SEM_TRADUCAO:
+                    bloqueios.append({
+                        "kit": chave_kit, "codigo": codigo,
+                        "motivo": r["motivo"], "map": r["map"],
+                        "de_para": r["de_para"],
+                        "nomes_avoe": sorted(set(nomes))})
             out.bom_rows.append({
                 "kit_sku": chave_kit, "component_sku": componente,
                 "qty_per_kit": qtd, "valid_from": None, "valid_to": None,
@@ -258,8 +533,71 @@ def build_avoe_bom(kits: Iterable[Mapping], *,
         "componentes_traduzidos": traduzidos,
         "componentes_sem_ponte": sem_ponte,
         "componentes_ambiguos": ambiguos,
+        "traduzidos_por_origem": dict(sorted(por_origem.items())),
+        "ambiguos_por_motivo": dict(sorted(ambiguos_motivo.items())),
+        "sem_ponte_por_motivo": dict(sorted(sem_ponte_motivo.items())),
+        "volume": dict(sorted(volume.items())),
+        "de_para_linhas_ativas": sum(len(v) for v in de_para.values()),
+        "de_para_bloqueios_ativos": len(bloqueados),
+        "bloqueios": bloqueios,
     }
     return out
+
+
+def carregar_de_para(path: str | os.PathLike = DE_PARA_CSV) -> list[dict]:
+    """Le' e valida o de-para versionado. Nunca toca rede nem banco.
+
+    Malformado -> `AvoeSourceError`: uma linha com marca digitada errada ou
+    `ativo` fora de `true|false` nao pode virar "sem de-para" em silencio.
+    Linha negativa = `sku_destino` vazio E `bloquear=true`; qualquer outra
+    combinacao de destino vazio/`bloquear` levanta, e uma positiva e uma
+    negativa ATIVAS na mesma `(marca, codigo)` tambem (conflito, nao desempate).
+    """
+    caminho = Path(path)
+    try:
+        texto = caminho.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        raise AvoeSourceError(f"de-para da Avoe ausente: {caminho.name}") from exc
+    leitor = csv.DictReader(texto.splitlines())
+    if tuple(leitor.fieldnames or ()) != DE_PARA_COLUNAS:
+        raise AvoeSourceError(
+            f"de-para da Avoe com colunas inesperadas: {leitor.fieldnames}")
+    marcas_validas = set(MARCAS.values())
+    linhas = []
+    # (marca, codigo) -> {"positiva": n, "negativa": n} das linhas ATIVAS.
+    ativas: dict[tuple[str, str], dict[str, int]] = {}
+    for n, row in enumerate(leitor, start=2):
+        marca = (row.get("marca") or "").strip().lower()
+        ativo = (row.get("ativo") or "").strip().lower()
+        bloquear = (row.get("bloquear") or "").strip().lower()
+        if marca not in marcas_validas:
+            raise AvoeSourceError(f"de-para linha {n}: marca desconhecida {marca!r}")
+        if ativo not in ("true", "false"):
+            raise AvoeSourceError(f"de-para linha {n}: ativo deve ser true|false")
+        if bloquear not in ("true", "false"):
+            raise AvoeSourceError(f"de-para linha {n}: bloquear deve ser true|false")
+        codigo = _sku(row.get("codigo_avoe"))
+        destino = _sku(row.get("sku_destino"))
+        if not codigo:
+            raise AvoeSourceError(f"de-para linha {n}: codigo vazio")
+        if bloquear == "true" and destino:
+            raise AvoeSourceError(
+                f"de-para linha {n}: linha negativa (bloquear=true) com destino")
+        if bloquear == "false" and not destino:
+            raise AvoeSourceError(
+                f"de-para linha {n}: destino vazio sem bloquear=true")
+        if ativo == "true":
+            tipo = "negativa" if bloquear == "true" else "positiva"
+            par = ativas.setdefault((marca, codigo), {})
+            outro = "positiva" if tipo == "negativa" else "negativa"
+            if outro in par:
+                raise AvoeSourceError(
+                    f"de-para linha {n}: linha {tipo} ativa conflita com a "
+                    f"linha {outro} ativa {par[outro]} na mesma (marca, codigo)")
+            par.setdefault(tipo, n)
+        linhas.append(dict(row, marca=marca, ativo=(ativo == "true"),
+                           bloquear=(bloquear == "true")))
+    return linhas
 
 
 # ---------------------------------------------------------------------------
