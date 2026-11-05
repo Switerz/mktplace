@@ -118,3 +118,33 @@ def test_rota_valida_lista(monkeypatch):
                         lambda **kw: {"ok": True, **{k: v for k, v in kw.items()}})
     cliente = TestClient(app)
     assert cliente.get("/api/v1/expedicao/tiktok/abertos?lista=xpto").status_code in (401, 422)
+
+
+def test_pagamentos_do_prazo_de_coleta():
+    # Coleta vence 04/11 (qua): pagos de sex 30/10 a seg 02/11 (Finados).
+    assert svc.pagamentos_do_prazo(date(2026, 11, 4)) == (date(2026, 10, 30), date(2026, 11, 2))
+    assert svc.pagamentos_do_prazo(date(2026, 11, 7)) is None  # sabado
+    assert svc.dias_de_prazo(date(2026, 11, 5), 3) == ["2026-11-05", "2026-11-04", "2026-11-03"]
+
+
+def test_coleta_perdida_lista_e_resumo():
+    chamadas = []
+
+    def consultar(sql, params):
+        chamadas.append((sql, params))
+        if "LIMIT" in sql:
+            return [{"brand": "apice", "order_id": "1", "shop_name": "Apice", "order_status": "IN_TRANSIT",
+                     "paid_at": datetime(2026, 10, 31, 9, 0), "pronto_em": datetime(2026, 11, 3, 15, 0),
+                     "coletado_em": datetime(2026, 11, 5, 8, 0)}]
+        return [{"brand": "apice", "n": 10, "sem_coleta": 4}, {"brand": "kokeshi", "n": 20, "sem_coleta": 15}]
+
+    r = svc.obter_coleta_perdida(vencimento=date(2026, 11, 4), consultar=consultar, agora=AGORA)
+    assert r["availability"] == "available"
+    assert r["list_total"] == 30 and r["still_waiting"] == 19
+    assert [b["brand"] for b in r["brands"]] == ["kokeshi", "apice"]
+    assert r["orders"][0]["collected_at"] == "2026-11-05T08:00:00"
+    assert r["orders"][0]["hours_late"] == 8.0
+    sql, params = chamadas[0]
+    assert params["limite"] == "2026-11-05 00:00:00"
+    assert params["pago_ini"] == date(2026, 10, 30) and params["pago_fim"] == date(2026, 11, 2)
+    assert "raw.tiktok_shop_line_items" in sql and "%" not in sql

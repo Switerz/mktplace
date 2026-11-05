@@ -184,3 +184,87 @@ export function faixaDaPagina(pagina: number, tamanho: number, naPagina: number,
   const ini = (pagina - 1) * tamanho + 1;
   return `${fmt(ini)}–${fmt(ini + naPagina - 1)} de ${fmt(Math.max(total, ini + naPagina - 1))}`;
 }
+
+// ---------------------------------------------------------------------------
+// EXPEDICAO-TIKTOK-COLETA-PERDIDA — nao coletados no prazo, por dia de prazo
+// ---------------------------------------------------------------------------
+export type PedidoColetaPerdida = {
+  brand: string;
+  order_id: string;
+  shop_name: string | null;
+  status: string | null;
+  paid_at: string | null;
+  /** Etiqueta pronta (todos os itens com RTS), Brasilia sem fuso. */
+  ready_at: string | null;
+  /** Coleta (IN_TRANSIT); null = ainda sem coleta. */
+  collected_at: string | null;
+  hours_late: number | null;
+};
+
+export type RespostaColetaPerdida = {
+  channel: "tiktokshop";
+  availability: "available" | "unavailable";
+  unavailable_reason?: string;
+  deadline: string;
+  paid_from: string | null;
+  paid_to: string | null;
+  deadline_days: string[];
+  brands: { brand: string; missed: number; still_waiting: number }[];
+  list_total: number;
+  still_waiting: number;
+  orders: PedidoColetaPerdida[];
+  page: number;
+  page_size: number;
+  has_more: boolean;
+};
+
+export function queryColetaPerdida(vencimento: string | null, marca: string | null, pagina = 1): string {
+  const p = new URLSearchParams();
+  if (vencimento) p.set("vencimento", vencimento);
+  if (marca) p.set("brands", marca);
+  if (pagina > 1) p.set("page", String(pagina));
+  const q = p.toString();
+  return `/api/v1/expedicao/tiktok/coleta-perdida${q ? `?${q}` : ""}`;
+}
+
+export function csvDaColetaPerdida(pedidos: PedidoColetaPerdida[], vencimento: string): string {
+  const cab = ["pedido", "marca", "loja", "prazo_coleta", "pago_em", "etiqueta_pronta_em", "coletado_em", "situacao", "horas_de_atraso"];
+  const linhas = pedidos.map((p) =>
+    [
+      p.order_id,
+      p.brand,
+      p.shop_name ?? "",
+      vencimento,
+      (p.paid_at ?? "").replace("T", " "),
+      (p.ready_at ?? "").replace("T", " "),
+      (p.collected_at ?? "").replace("T", " "),
+      p.collected_at ? "coletado depois do prazo" : "ainda sem coleta",
+      p.hours_late === null ? "" : String(p.hours_late).replace(".", ","),
+    ]
+      .map(celula)
+      .join(";"),
+  );
+  return "﻿" + [cab.join(";"), ...linhas].join("\n");
+}
+
+/** Teto de paginas num download (200 x 100 = 20 mil pedidos). */
+export const MAX_PAGINAS_CSV = 100;
+
+/**
+ * Busca TODAS as paginas de uma lista, uma de cada vez (cada pagina cabe na
+ * reserva pelo Metabase). `aoAvancar` recebe a pagina corrente para a tela
+ * mostrar o progresso. Levanta se uma pagina falhar: CSV pela metade nunca.
+ */
+export async function buscarTodasAsPaginas<T>(
+  buscar: (pagina: number) => Promise<{ orders: T[]; has_more: boolean }>,
+  aoAvancar?: (pagina: number) => void,
+): Promise<T[]> {
+  const todos: T[] = [];
+  for (let pagina = 1; pagina <= MAX_PAGINAS_CSV; pagina++) {
+    aoAvancar?.(pagina);
+    const r = await buscar(pagina);
+    todos.push(...r.orders);
+    if (!r.has_more) return todos;
+  }
+  throw new Error("lista grande demais para um download");
+}

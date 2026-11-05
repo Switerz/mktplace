@@ -576,6 +576,8 @@ export function respostaFicticia(url: string, cenarioPedido: CenarioDemo): { sta
   if (caminho === "/api/v1/expedicao") return { status: 200, corpo: fila(filaCanal, cenario) };
   if (caminho === "/api/v1/expedicao/trend") return { status: 200, corpo: tendencia(filaCanal, cenario) };
   if (caminho === "/api/v1/expedicao/tiktok") return { status: 200, corpo: tiktok(cenario) };
+  if (caminho === "/api/v1/expedicao/tiktok/coleta-perdida")
+    return { status: 200, corpo: tiktokColetaPerdida(u.searchParams.get("vencimento"), Number(u.searchParams.get("page") ?? "1")) };
   if (caminho === "/api/v1/expedicao/tiktok/abertos")
     return {
       status: 200,
@@ -630,5 +632,26 @@ function tiktokAbertos(marca: string | null, lista: string | null, pagina: numbe
     deadline_reconstructed: true, totals, brands: marcas, list: lista, orders,
     page: Math.max(1, pagina), page_size: tamanho, has_more: ini + tamanho < todos.length,
     list_total: lista ? Math.min(totals[campo[lista]] ?? 0, todos.length) : 0,
+  };
+}
+
+// EXPEDICAO-TIKTOK-COLETA-PERDIDA — 430 pedidos ficticios (3 paginas).
+function tiktokColetaPerdida(vencimento: string | null, pagina: number): unknown {
+  const dia = vencimento ?? "2026-11-04";
+  const marcas = ["kokeshi", "apice", "barbours", "lescent"];
+  const todos = Array.from({ length: 430 }, (_, k) => ({
+    brand: marcas[k % 4], order_id: `58${String(k).padStart(4, "0")}9912345678`, shop_name: marcas[k % 4],
+    status: k % 3 === 0 ? "AWAITING_COLLECTION" : "IN_TRANSIT", paid_at: "2026-10-31T10:12:00",
+    ready_at: "2026-11-03T16:40:00", collected_at: k % 3 === 0 ? null : "2026-11-05T09:15:00",
+    hours_late: k % 3 === 0 ? 13 : 9.3,
+  }));
+  const ini = (Math.max(1, pagina) - 1) * 200;
+  return {
+    channel: "tiktokshop", availability: "available", deadline: dia, paid_from: "2026-10-30", paid_to: "2026-11-02",
+    deadline_days: ["2026-11-05", "2026-11-04", "2026-11-03", "2026-10-30", "2026-10-29"],
+    brands: marcas.map((m) => ({ brand: m, missed: todos.filter((t) => t.brand === m).length,
+      still_waiting: todos.filter((t) => t.brand === m && !t.collected_at).length })),
+    list_total: todos.length, still_waiting: todos.filter((t) => !t.collected_at).length,
+    orders: todos.slice(ini, ini + 200), page: Math.max(1, pagina), page_size: 200, has_more: ini + 200 < todos.length,
   };
 }
