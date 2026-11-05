@@ -62,6 +62,8 @@ DDL_PATH = REPO / "db" / "sql" / "marts" / "pma_listing_price_serving_ddl.sql"
 #: da Kokeshi gravados pelo bot no Neon), encadeada SOBRE a 035.
 #: Avancado para 037 pela T-0059 (CHECK de componentes da
 #: marts.fact_dre_insumo_mensal aceita `shopee_taxa_escrow`), encadeada SOBRE a 036.
+#: Avancado para 037 pela T-0018 (anuncio-ancora do estoque Full ML), encadeada
+#: SOBRE a 036 (nasceu 034 na branch antiga e foi renumerada).
 HEAD_ESPERADO = "037"
 
 #: Mapa OFICIAL de propriedade das revisoes. Existe para que uma frente nao

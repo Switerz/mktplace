@@ -197,8 +197,12 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # (registry, pedido, fila e resumo), sem alterar nenhuma tabela existente.
     # Atraso de 7 dias da Expedicao: head avancado de 034 para 035, que
     # acrescenta quatro colunas NULLABLE a marts.expedicao_refresh_run.
+    # CX-KOKESHI-BOT: head avancado de 035 para 036 (Saude da Conta, chat e
+    # devolucoes da Kokeshi gravados pelo bot no Neon).
     # T-0059: head avancado de 036 para 037, que so' troca o CHECK de
     # componentes de marts.fact_dre_insumo_mensal (aceita `shopee_taxa_escrow`).
+    # T-0018: head avancado de 036 para 037, que acrescenta o anuncio-ancora a
+    # marts.fact_ml_full_stock_inventory_daily, sobre a 036 (nasceu 034).
     assert heads == ["037"], f"head deveria ser unico e igual a 037, veio {heads}"
 
 

@@ -43,7 +43,7 @@ SERVICE_SRC = io.open(
     encoding="utf-8").read()
 MIGRATION_PATH = RAIZ / "alembic" / "versions" / "029_create_fact_ml_full_stock_daily.py"
 MIGRATION_SRC = io.open(MIGRATION_PATH, encoding="utf-8").read()
-MIGRATION_034_PATH = RAIZ / "alembic" / "versions" / "034_ml_full_inventario_anuncio_ancora.py"
+MIGRATION_037_PATH = RAIZ / "alembic" / "versions" / "037_ml_full_inventario_anuncio_ancora.py"
 MIGRATION_014_PATH = RAIZ / "alembic" / "versions" / "014_create_price_monitoring_serving.py"
 
 ROTA = "/api/v1/performance/ml-full-estoque"
@@ -76,7 +76,7 @@ def _inv(brand, seller, inv, read_status="OK", disp=None, nao=None, tr=None,
         "classificacao_torre": classe,
         "vinculo_vendas": "COM_VENDA" if un > 0 else "SEM_VENDA_NA_JANELA",
         "source_run_id": "run-ficticio",
-        # Migration 034. `extras=None` = linha publicada antes da 034.
+        # Migration 037. `extras=None` = linha publicada antes da 037.
         "anuncio_ancora_item_id": ancora,
         "anuncio_ancora_variation_id": variacao,
         "anuncios_extras": extras,
@@ -233,7 +233,7 @@ class SessaoFalsa:
         self.marcas = marcas
         self.status = status
         self.tabelas = tabelas
-        #: (colunas da 034 presentes, 014 legivel)
+        #: (colunas da 037 presentes, 014 legivel)
         self.identificacao = identificacao
         self.precos = precos
         self.comandos: list[str] = []
@@ -318,7 +318,7 @@ class SessaoFalsa:
         if nome == "SQL_TOTAL_NO_FILTRO":
             return _Resultado(escalar=len(listaveis))
         if nome == "SQL_INVENTARIOS":
-            # Sem a 034 as colunas novas nem existem: nao chegam ao servico.
+            # Sem a 037 as colunas novas nem existem: nao chegam ao servico.
             return _Resultado([{k: v for k, v in i.items()
                                 if not k.startswith("anuncio")
                                 or k in ("anuncios", "anuncios_ativos",
@@ -1010,7 +1010,7 @@ def test_identificacao_ausente_e_null_explicito():
     b2 = _linha(r, "INV-B2")             # ancora sem linha na 014
     assert (b2.sku, b2.titulo, b2.anuncios_extras) == (None, None, 0)
     assert b2.ancora_e_variacao is False
-    b3 = _linha(r, "INV-B3")             # publicado antes da 034: sem ancora
+    b3 = _linha(r, "INV-B3")             # publicado antes da 037: sem ancora
     assert (b3.sku, b3.titulo, b3.anuncios_extras, b3.ancora_e_variacao) == (
         None, None, None, None)
     l1 = _linha(r, "INV-L1")             # variacao: SKU ausente, titulo do item
@@ -1030,7 +1030,7 @@ def test_identificacao_vazia_vira_null():
 
 
 @pytest.mark.parametrize("identificacao", [(False, True), (True, False), (False, False)])
-def test_sem_034_ou_sem_014_lista_como_antes(identificacao):
+def test_sem_037_ou_sem_014_lista_como_antes(identificacao):
     sessao = SessaoFalsa(identificacao=identificacao)
     r = _bloco_falso(sessao)
     assert "SQL_INVENTARIOS" in sessao.comandos
@@ -1042,9 +1042,9 @@ def test_sem_034_ou_sem_014_lista_como_antes(identificacao):
     assert svc.LIMITACAO_IDENTIFICACAO not in r.limitacoes
 
 
-def test_checagem_de_identificacao_pede_as_tres_colunas_da_034():
+def test_checagem_de_identificacao_pede_as_tres_colunas_da_037():
     import re
-    texto = io.open(MIGRATION_034_PATH, encoding="utf-8").read()
+    texto = io.open(MIGRATION_037_PATH, encoding="utf-8").read()
     for col in svc.COLUNAS_ANCORA:
         assert f"ADD COLUMN {col} " in texto, col
     assert len(svc.COLUNAS_ANCORA) == 3
@@ -1104,12 +1104,12 @@ def engine():
 
 
 def _recriar(engine, com_tabelas=True, inventarios=INVENTARIOS, marcas=MARCAS,
-             status=STATUS, com_034=True, precos=PRECOS):
+             status=STATUS, com_037=True, precos=PRECOS):
     """Estado COMMITADO: o servico comeca com rollback. DDL das PROPRIAS
-    migrations 029, 034 (colunas do ancora) e 014 (SKU/titulo)."""
+    migrations 029, 037 (colunas do ancora) e 014 (SKU/titulo)."""
     from sqlalchemy import text as _t
     upgrade, downgrade = _ddl_029()
-    if not com_034:
+    if not com_037:
         inventarios = [{k: v for k, v in i.items()
                         if k not in svc.COLUNAS_ANCORA} for i in inventarios]
     with engine.begin() as conn:
@@ -1120,8 +1120,8 @@ def _recriar(engine, com_tabelas=True, inventarios=INVENTARIOS, marcas=MARCAS,
             return
         for sql in upgrade + _sql_da_migration(MIGRATION_014_PATH, "upgrade"):
             conn.execute(_t(sql))
-        if com_034:
-            for sql in _sql_da_migration(MIGRATION_034_PATH, "upgrade"):
+        if com_037:
+            for sql in _sql_da_migration(MIGRATION_037_PATH, "upgrade"):
                 conn.execute(_t(sql))
         for tabela, linhas in ((svc.INVENTORY_TABLE, inventarios),
                                (svc.STATUS_TABLE, status),
@@ -1302,8 +1302,8 @@ def test_pg_identificacao_nao_duplica_e_bate_com_a_sessao_falsa(engine, sessao):
 
 
 @pg
-def test_pg_sem_034_lista_como_antes(engine, sessao):
-    _recriar(engine, com_034=False)
+def test_pg_sem_037_lista_como_antes(engine, sessao):
+    _recriar(engine, com_037=False)
     r = _bloco(sessao)
     assert len(r.inventarios) == 6
     assert all(i.sku is None and i.anuncios_extras is None for i in r.inventarios)
@@ -1311,7 +1311,7 @@ def test_pg_sem_034_lista_como_antes(engine, sessao):
 
 
 @pg
-def test_pg_034_downgrade_remove_so_as_tres_colunas(engine):
+def test_pg_037_downgrade_remove_so_as_tres_colunas(engine):
     from sqlalchemy import text as _t
     _recriar(engine)
     cols = lambda conn: {r[0] for r in conn.execute(_t(
@@ -1321,7 +1321,7 @@ def test_pg_034_downgrade_remove_so_as_tres_colunas(engine):
     with engine.begin() as conn:
         antes = cols(conn)
         n = conn.execute(_t(f"SELECT COUNT(*) FROM {svc.INVENTORY_TABLE}")).scalar()
-        for sql in _sql_da_migration(MIGRATION_034_PATH, "downgrade"):
+        for sql in _sql_da_migration(MIGRATION_037_PATH, "downgrade"):
             conn.execute(_t(sql))
         depois = cols(conn)
         assert conn.execute(_t(f"SELECT COUNT(*) FROM {svc.INVENTORY_TABLE}")).scalar() == n

@@ -90,11 +90,11 @@ class InventarioEstoque(BaseModel):
 
     #: IDENTIFICACAO do anuncio-ancora (T-0018). Atributo da linha: nunca
     #: multiplica nem soma estoque. `None` = sem ancora, sem match na 014 ou
-    #: 034 nao aplicada -- "sem identificacao", nunca string vazia.
+    #: 037 nao aplicada -- "sem identificacao", nunca string vazia.
     sku: Optional[str] = None
     titulo: Optional[str] = None
     #: Anuncios distintos do inventario alem do ancora. `None` = linha
-    #: publicada antes da 034 (ou 034 nao aplicada).
+    #: publicada antes da 037 (ou 037 nao aplicada).
     anuncios_extras: Optional[int] = Field(default=None, ge=0)
     #: TRUE = o ancora e' uma variacao e o SKU/titulo vem do ITEM (a 014 nao
     #: tem variacao): ambiguo. `None` = sem ancora.

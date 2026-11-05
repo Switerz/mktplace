@@ -16,47 +16,49 @@ Full e `active`, depois Full, depois qualquer; desempate pelo menor `item_id`
 e depois pelo menor `variation_id`, como texto.
 
 NULAS E SEM DEFAULT, de proposito: as linhas ja' publicadas ficam NULL
-("publicada antes da 034", nao "sem anuncio"), e `ADD COLUMN` sem default nao
+("publicada antes da 037", nao "sem anuncio"), e `ADD COLUMN` sem default nao
 reescreve a tabela. Os CHECKs aceitam NULL, entao validam as linhas existentes
 sem tocar nelas.
+
+NUMERACAO
+---------
+Nasceu 034 (branch `feat/T-0018-ml-full-sku-titulo`) e foi renumerada para 037
+sobre a 036: a `main` ja' tinha 034 (expedicao_shopee_export), 035
+(expedicao_atraso_7d) e 036 (cx_kokeshi_export).
 
 ESTA MIGRATION NAO E' APLICADA PELO GATE QUE A CRIA
 ---------------------------------------------------
 O head do Neon e' lido por OUTROS publicadores: a barreira do PMA
 (`pipelines.channel_offer_sync` / `assert_apply_authorized`) recusa um head
 que o grafo da imagem nao conhece. Aplicar esta DDL antes de os workers
-conhecerem a 034 repete o apagao da passagem para a 033. Ordem segura
+conhecerem a 037 repete o apagao da passagem para a 033. Ordem segura
 (humana; detalhe em `docs/ml_full_stock_runbook.md`, secao 7.2):
-  1. merge em `main`. Nada roda: nenhuma DAG chama o publicador do ML Full
-     e o pacote humano de publicacao tem `-Commit` fixo em `bad69cf`, que
-     nao conhece a 034;
-  2. pin da imagem do airflow (`MKTPLACE_PIPELINES_SHA`) e do runner Windows
-     num commit com a 034 no grafo, com rollout e prova em runtime: a
-     barreira do PMA aceita 017 -> 034 e todo publicador que valida o grafo
-     continua passando. Gate humano do supervisor, coordenado com a frente
-     FRESHNESS/PMA;
-  3. so' entao `alembic upgrade 034` no Neon (hoje em 033), DDL humana, fora
-     da janela das cadeias;
-  4. so' depois o publicador novo do ML Full pode ser usado: o `-Commit` do
-     pacote humano passa a um commit com a T-0018, em revisao separada.
+  a. merge em `main` (inerte);
+  b. bump do pin `MKTPLACE_PIPELINES_SHA` do airflow para o merge (o grafo da
+     imagem conhece a 037), com rollout. NAO disparar o `publicar` da DAG
+     `mercadolivre_full_stock_neon_publish` entre b e c;
+  c. so' depois do rollout, `alembic upgrade 037` no Neon (em 036);
+  c2. a identidade do destino inclui `alembic_version_num`: rodar a DAG em
+     modo `identificar`, conferir que so' o alembic mudou e atualizar a
+     Variable `ML_FULL_NEON_DESTINO_ESPERADO` (edicao humana);
+  d. deploy da API;
+  e. republicar as datas que devem ganhar a ancora.
 
 Compatibilidade:
-  - o pacote aprovado (`bad69cf`) funciona com ou sem a 034: as colunas sao
-    NULL-aveis sem default e ele nao as escreve. Piloto RAW e primeira
-    publicacao nao dependem da 034;
-  - a API detecta as colunas a cada request: sem a 034 responde como antes,
+  - publicador anterior a' T-0018 funciona com ou sem a 037: as colunas sao
+    NULL-aveis sem default e ele nao as escreve;
+  - a API detecta as colunas a cada request: sem a 037 responde como antes,
     com SKU/titulo nulos;
-  - GATE: o publicador novo NAO roda antes desta DDL. Sem ela o INSERT falha
-    dentro da transacao (revertida, nada gravado), mas isso e' trava, nao
-    risco aceito: o passo 4 so' vem depois do 3.
+  - GATE: o publicador novo NAO grava antes desta DDL. Sem ela o INSERT falha
+    dentro da transacao (revertida, nada gravado).
 
 `downgrade` remove as tres colunas (os CHECKs de coluna saem junto).
 """
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "034"
-down_revision = "033"
+revision = "037"
+down_revision = "036"
 branch_labels = None
 depends_on = None
 

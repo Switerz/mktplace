@@ -1400,15 +1400,21 @@ def test_kokeshi_48h_e_travados_pelo_export():
 
 
 # ---------------------------------------------------------------------------
-# 035: as seis colunas na PROPRIA 035, head continua 035
+# 035: as seis colunas na PROPRIA 035; as revisoes posteriores (036 CX-KOKESHI,
+# 037 T-0018) sao de outras frentes e nao tocam as tabelas de resumo
 # ---------------------------------------------------------------------------
-def test_035_continua_head_sem_036():
-    assert not list(VERSIONS.glob("036*.py"))
+def test_035_tem_as_seis_colunas_e_nenhuma_posterior_as_toca():
     filhos = [
         p.name for p in VERSIONS.glob("*.py")
         if _meta(p).get("down_revision") == "035"
     ]
-    assert filhos == []
+    assert filhos == ["036_cx_kokeshi_export.py"]  # linear: um unico filho
+    posteriores = [p for p in VERSIONS.glob("*.py") if p.name[:3].isdigit() and p.name[:3] > "035"]
+    assert posteriores
+    for p in posteriores:
+        texto = p.read_text(encoding="utf-8")
+        for alvo in (RUN_TABLE, RUN_EXPORT_TABLE, *ATRASO_7D_COLUMNS):
+            assert alvo not in texto, f"{p.name} toca {alvo}: o atraso de 7 dias e' so' da 035"
     fonte = ARQ_035.read_text(encoding="utf-8")
     assert "over_48h_7d_count" in fonte.split('"""', 2)[1]  # no docstring
     assert "stalled_7d_count" in fonte.split('"""', 2)[1]
