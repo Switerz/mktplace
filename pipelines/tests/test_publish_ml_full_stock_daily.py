@@ -611,8 +611,27 @@ def test_print_durante_o_run_nao_suja_o_stdout(ambiente, monkeypatch, capsys):
 # Diagnostico so' leitura
 # ---------------------------------------------------------------------------
 class ConnLeitura:
+    """Como a Connection legada do SQLAlchemy 1.4 (Airflow): sem `rollback()`/`commit()` proprios.
+
+    A transacao e' a do `begin()`; `begin_em` guarda quantos comandos ja' tinham
+    saido quando ela abriu (tem de ser 0).
+    """
+
     def __init__(self, presentes=(True, True, True)):
-        self.presentes, self.sqls, self.rollbacks = presentes, [], 0
+        self.presentes, self.sqls, self.rollbacks, self.begin_em = presentes, [], 0, None
+
+    def begin(self):
+        conn = self
+        conn.begin_em = len(self.sqls)
+
+        class Transacao:
+            def rollback(self):
+                conn.rollbacks += 1
+
+            def commit(self):
+                pytest.fail("leitura commitou")
+
+        return Transacao()
 
     def execute(self, sql, params=None):
         s = str(sql)
@@ -630,9 +649,6 @@ class ConnLeitura:
             return Res(escalar=False)
         return Res()
 
-    def rollback(self):
-        self.rollbacks += 1
-
 
 class EngineLeitura:
     def __init__(self, conn):
@@ -647,7 +663,7 @@ class EngineLeitura:
 
 
 def _assert_so_leitura(conn):
-    assert conn.sqls[0] == "SET TRANSACTION READ ONLY" and conn.rollbacks == 1
+    assert conn.begin_em == 0 and conn.sqls[0] == "SET TRANSACTION READ ONLY" and conn.rollbacks == 1
     for s in conn.sqls:
         assert not re.search(r"\b(INSERT|UPDATE|DELETE|TRUNCATE)\b|advisory", s, re.I), s
 
