@@ -7,6 +7,7 @@ import ThemeToggle from "@/components/theme/ThemeToggle";
 import ContaUsuario from "@/components/auth/ContaUsuario";
 import { buildPreservedQuery, hrefForPage } from "@/lib/filters/nav-links";
 import NavList from "./NavList";
+import MarcaTorre from "./MarcaTorre";
 
 /**
  * UX-TORRE-B2B-1 — modo da sidebar.
@@ -124,9 +125,7 @@ function SidebarInner() {
       <div className="sticky top-0 flex h-screen flex-col">
         {/* Identidade + botao de recolher */}
         <div className="flex items-center gap-2.5 border-b border-shell-line px-3 py-3">
-          <div className="tc-marca flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent">
-            <span className="text-xs font-bold tracking-tight text-accent-on">TC</span>
-          </div>
+          <MarcaTorre tamanho={32} className="h-8 w-8 rounded-lg" />
           <div className={`min-w-0 flex-1 ${soAberta}`}>
             <p className="truncate text-sm font-semibold leading-tight text-shell-ink">Torre de Controle</p>
             <p className="truncate text-xs leading-tight text-shell-faint">Marketplaces · Gobeaute</p>

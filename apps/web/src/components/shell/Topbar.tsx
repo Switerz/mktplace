@@ -6,6 +6,7 @@ import { Menu } from "lucide-react";
 import ThemeToggle from "@/components/theme/ThemeToggle";
 import ContaUsuario from "@/components/auth/ContaUsuario";
 import { getRouteTitle } from "./nav-config";
+import MarcaTorre from "./MarcaTorre";
 
 interface TopbarProps {
   open: boolean;
@@ -48,9 +49,7 @@ export default function Topbar({ open, onToggleMenu, menuButtonRef }: TopbarProp
           <Menu aria-hidden="true" className="h-5 w-5" strokeWidth={1.75} />
         </button>
 
-        <div className="tc-marca flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent">
-          <span className="text-xs font-bold tracking-tight text-accent-on">TC</span>
-        </div>
+        <MarcaTorre tamanho={28} className="h-7 w-7 rounded-md" />
 
         <div className="flex min-w-0 items-baseline gap-2">
           <h1 className="truncate text-sm font-semibold leading-none text-shell-ink">

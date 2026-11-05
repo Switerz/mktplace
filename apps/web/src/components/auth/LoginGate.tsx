@@ -3,6 +3,7 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { EVENTO_SESSAO_EXPIRADA } from "@/lib/torre-fetch";
 import { MENSAGEM_SESSAO_EXPIRADA, mensagemDeErroLogin } from "@/lib/login-mensagens";
+import MarcaTorre from "@/components/shell/MarcaTorre";
 
 /**
  * AUTH-GOOGLE-6 — porta do LoginGate do GoHunter. Enquanto nao ha sessao, mostra
@@ -179,11 +180,7 @@ export default function LoginGate({ children }: { children: React.ReactNode }) {
         aria-labelledby="login-titulo"
         className="flex w-full max-w-sm flex-col items-center gap-5 rounded-xl border border-line bg-surface px-8 py-10 text-center"
       >
-        <div className="tc-marca flex h-11 w-11 items-center justify-center rounded-md bg-accent">
-          <span aria-hidden="true" className="text-base font-bold tracking-tight text-accent-on">
-            TC
-          </span>
-        </div>
+        <MarcaTorre tamanho={44} className="h-11 w-11 rounded-md" />
         <div className="space-y-1">
           <h1 id="login-titulo" className="text-lg font-semibold text-ink">
             Torre de Controle · Gobeaute

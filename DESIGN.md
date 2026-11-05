@@ -251,7 +251,7 @@ Three layers, defined once in `app/globals.css` (block "UX-VIDRO-1"):
    and dialogs stay almost opaque (`surface / .96`) because they are read over
    content. Without `backdrop-filter` support the card falls back to opaque.
 3. **Frame**: `.tc-shell-fundo` gives the navy shell a top-to-bottom step and a
-   violet halo at the brand corner; `.tc-marca` is the gradient "TC" mark;
+   violet halo at the brand corner; `.tc-marca` is the brand mark, the lighthouse tower of `app/icon.png` (`MarcaTorre`), with the violet glow;
    `.tc-nav-ativo` is the active nav pill (gradient + glow, white ink), and the
    3px left bar stays.
 
