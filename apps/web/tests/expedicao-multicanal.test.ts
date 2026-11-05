@@ -1197,12 +1197,21 @@ test("T-0029 compacta: fila nula com motivo + coorte -> linha de indisponivel ao
   assert.doesNotMatch(html, /Fila por etapa[^<]*\b0\b/, "nunca zero");
 });
 
-test("T-0029: o TikTok segue no modo completo (sem `compacta`)", () => {
+test("EXPEDICAO-TIKTOK-PADRAO: o TikTok usa a Jornada compacta, como a fila", () => {
+  // Antes (T-0029) o TikTok ficava no modo completo e meia secao dizia
+  // "Indisponível neste canal". Agora a Jornada e' a mesma da Shopee/ML: so'
+  // a coorte, na largura toda, sem a metade vazia.
   const tk = readFileSync(join(RAIZ, "src/components/expedicao/TikTokDispatchPanel.tsx"), "utf8");
   const uso = tk.match(/<JornadaPedidos [^>]*\/>/)?.[0] ?? "";
   assert.ok(uso, "o painel do TikTok usa a Jornada");
-  assert.doesNotMatch(uso, /compacta/);
-  const html = render(200, jornadaTikTok(), "tiktok");
-  assert.match(html, /Pedidos aguardando expedição<\/h3>[\s\S]*Indisponível neste canal: o TikTok não publica fila aberta/);
-  assert.doesNotMatch(html, /ainda não publicadas neste canal|Fila por etapa indisponível/);
+  assert.match(uso, /\bcompacta\b/);
+  const html = htmlDe(
+    hj(JornadaPedidos, {
+      carga: { carregando: false, http: 200, erroDeRede: false, resultado: lerJornada(jornadaTikTok(), "tiktok") },
+      aoTentarDeNovo: () => {},
+      compacta: true,
+    }),
+  );
+  assert.doesNotMatch(html, /Pedidos aguardando expedição<\/h3>/);
+  assert.doesNotMatch(html, /Fila por etapa[^<]*\b0\b/, "nunca zero");
 });

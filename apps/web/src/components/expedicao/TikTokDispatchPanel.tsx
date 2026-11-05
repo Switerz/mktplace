@@ -60,7 +60,11 @@ import BarraDeQualidade from "@/components/expedicao/BarraDeQualidade";
 import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/CabecalhoExpedicao";
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
 import JornadaPedidos, { useJornada } from "@/components/expedicao/JornadaPedidos";
-import TikTokPedidosAbertos from "@/components/expedicao/TikTokPedidosAbertos";
+import {
+  BacklogPorMarcaTikTok,
+  RiscoAtualTikTok,
+  useTikTokAbertos,
+} from "@/components/expedicao/TikTokPedidosAbertos";
 import { PopupColetaPerdida } from "@/components/expedicao/TikTokColetaPerdida";
 import { diaDentroDaJanelaDaLista } from "@/lib/expedicao-tiktok-abertos";
 import LayoutExpedicao, {
@@ -95,6 +99,7 @@ import {
   EXPLICACAO_META,
   META_TIKTOK_LDR,
   ROTULO_EVENTO,
+  ROTULO_EVENTO_CURTO,
   ROTULO_LIMIAR_INTERNO,
   ROTULO_META,
   ROTULO_SEVERIDADE,
@@ -399,13 +404,6 @@ export default function TikTokDispatchPanel({
         timeStyle: "short",
       })
     : null;
-  // "Agora" e' o instante da serie. Com ela vencida, a secao diz isso.
-  const quando = publicadaEm
-    ? `Segundo a série publicada em ${publicadaEm}${
-        fotografia?.desatualizada ? " — desatualizada: confirme antes de agir" : ""
-      }.`
-    : undefined;
-
   // Ordenacao client-side sobre `brands`, que vem INTEIRO no payload. Nao ha
   // paginacao aqui, entao ordenar nao esconde linha nenhuma nem recalcula
   // metrica: as taxas continuam sendo as que a API publicou.
@@ -415,72 +413,47 @@ export default function TikTokDispatchPanel({
     COLUNAS_MARCA,
   );
 
+  // EXPEDICAO-TIKTOK-PADRAO: cada controle e' um item da MESMA faixa de
+  // Profundidade e Marca (antes os dois iam juntos e quebravam numa segunda
+  // linha), e a janela se chama "Período", como na Shopee e no ML.
   const controles = (
-    <div className="flex flex-wrap items-center gap-2">
-      <span id="tk-evento" className="text-xs text-ink-faint">
-        Evento
-      </span>
-      <Segmented
-        rotulo="Evento"
-        rotuladoPor="tk-evento"
-        opcoes={EVENTOS.map((e) => ({ valor: e, texto: ROTULO_EVENTO[e] }))}
-        valor={evento}
-        aoEscolher={setEvento}
-      />
-      <span id="tk-janela" className="text-xs text-ink-faint">
-        Janela
-      </span>
-      <Segmented
-        rotulo="Janela"
-        rotuladoPor="tk-janela"
-        opcoes={opcoesDoSeletor(REGRA)}
-        valor={seletor}
-        aoEscolher={escolherJanela}
-      />
-    </div>
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        <span id="tk-evento" className="text-xs text-ink-faint">
+          Evento
+        </span>
+        <Segmented
+          rotulo="Evento"
+          rotuladoPor="tk-evento"
+          opcoes={EVENTOS.map((e) => ({ valor: e, texto: ROTULO_EVENTO_CURTO[e] }))}
+          valor={evento}
+          aoEscolher={setEvento}
+        />
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <span id="tk-janela" className="text-xs text-ink-faint">
+          Período
+        </span>
+        <Segmented
+          rotulo="Período"
+          rotuladoPor="tk-janela"
+          opcoes={opcoesDoSeletor(REGRA)}
+          valor={seletor}
+          aoEscolher={escolherJanela}
+        />
+      </div>
+    </>
   );
 
-  // EXPEDICAO-UX-3 — "Risco atual": o que esta' pendente AGORA, com os
-  // mesmos campos que a LDR ja' publicava (nenhum novo, nenhum recalculado).
+  // EXPEDICAO-TIKTOK-PADRAO — "Risco atual" no MESMO desenho da Shopee e do
+  // ML: os pedidos em aberto agora (vencidos em destaque, com "Onde agir"),
+  // e a lista de atencao da API logo abaixo. Os pendentes da JANELA da LDR
+  // desceram para "Prazo": medem outra coisa e brigavam com estes numeros.
+  const abertos = useTikTokAbertos(BASE, marca);
   const secaoRisco = ldr ? (
-    <SecaoGerencial titulo="Risco atual" dica={quando}>
-      <FaixaKpis rotulo="Risco atual">
-        <KpiComAjuda
-          ajuda="tiktok.pendente_vencido"
-          rotulo="Venceram e não saíram"
-          valor={formatarInteiro(ldr.pending_overdue)}
-          destaque
-          tom={ldr.pending_overdue > 0 ? "critico" : "neutro"}
-        />
-        <KpiComAjuda
-          ajuda="tiktok.vence_hoje_amanha"
-          rotulo="Vencem hoje ou amanhã"
-          valor={formatarInteiro(ldr.pending_at_risk)}
-          destaque
-          tom={ldr.pending_at_risk > 0 ? "atencao" : "neutro"}
-        />
-        <KpiComAjuda
-          ajuda="tiktok.pendente_no_prazo"
-          rotulo="Pendentes no prazo"
-          valor={formatarInteiro(ldr.pending_on_time)}
-          destaque
-        />
-        {/* Sem loja com base suficiente, a contagem nao existe: "—", nunca 0. */}
-        <KpiComAjuda
-          ajuda="tiktok.lojas_acima_meta"
-          rotulo="Lojas acima da meta"
-          valor={dados?.brands.length ? formatarInteiro(piores.length) : VALOR_SEM_TAXA}
-          destaque
-          comparacao={
-            dados?.brands.length
-              ? `De ${formatarInteiro(dados.brands.length)} com base suficiente.`
-              : "Nenhuma loja com base suficiente."
-          }
-          tom={!dados?.brands.length ? "ausente" : piores.length > 0 ? "critico" : "neutro"}
-        />
-      </FaixaKpis>
+    <RiscoAtualTikTok abertos={abertos}>
       <AtencaoAgora itens={atencao} />
-    </SecaoGerencial>
+    </RiscoAtualTikTok>
   ) : null;
 
   // "Prazo": a LDR, que so' o TikTok sustenta. Coleta e despacho continuam
@@ -503,7 +476,7 @@ export default function TikTokDispatchPanel({
         ({ldr.days} {ldr.days === 1 ? "dia" : "dias"} + hoje)
         {dados?.deadline_is_reconstructed ? " · prazo reconstruído" : ""}
       </p>
-      <FaixaKpis rotulo="Indicadores principais" colunas={3}>
+      <FaixaKpis rotulo="Indicadores da janela" colunas={3}>
         <KpiComAjuda
           ajuda="tiktok.ldr"
           rotulo="LDR da janela"
@@ -540,6 +513,33 @@ export default function TikTokDispatchPanel({
           destaque
           comparacao={`${formatarInteiro(ldr.pending_overdue)} venceram e ainda não saíram.`}
           tom={semVencimentoFechado ? "ausente" : ldr.late > 0 ? "critico" : "bom"}
+        />
+        {/* Pendentes DA JANELA (antes no "Risco atual"): mesmos campos da LDR. */}
+        <KpiComAjuda
+          ajuda="tiktok.vence_hoje_amanha"
+          rotulo="Vencem hoje ou amanhã"
+          valor={formatarInteiro(ldr.pending_at_risk)}
+          destaque
+          tom={ldr.pending_at_risk > 0 ? "atencao" : "neutro"}
+        />
+        <KpiComAjuda
+          ajuda="tiktok.pendente_no_prazo"
+          rotulo="Pendentes no prazo"
+          valor={formatarInteiro(ldr.pending_on_time)}
+          destaque
+        />
+        {/* Sem loja com base suficiente, a contagem nao existe: "—", nunca 0. */}
+        <KpiComAjuda
+          ajuda="tiktok.lojas_acima_meta"
+          rotulo="Lojas acima da meta"
+          valor={dados?.brands.length ? formatarInteiro(piores.length) : VALOR_SEM_TAXA}
+          destaque
+          comparacao={
+            dados?.brands.length
+              ? `De ${formatarInteiro(dados.brands.length)} com base suficiente.`
+              : "Nenhuma loja com base suficiente."
+          }
+          tom={!dados?.brands.length ? "ausente" : piores.length > 0 ? "critico" : "neutro"}
         />
       </FaixaKpis>
     </SecaoGerencial>
@@ -897,18 +897,20 @@ export default function TikTokDispatchPanel({
           // RISCO ATUAL -> PRAZO (LDR) -> JORNADA -> EVOLUCAO -> CONCENTRACAO:
           // a ordem e' do esqueleto, a mesma dos tres canais.
           <CorpoGestor
-            risco={
-              <>
-                {/* EXPEDICAO-TIKTOK-ABERTOS: os pedidos em aberto agora, no modelo da Shopee/ML. */}
-                <TikTokPedidosAbertos api={BASE} marca={marca} />
-                {secaoRisco}
-              </>
-            }
+            risco={secaoRisco}
             ldr={faixaTopo}
             prazo={secaoLdr}
-            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} marca={marca} />}
-            evolucao={painelEvolucao}
-            concentracao={painelLojas("")}
+            jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} marca={marca} compacta />}
+            // EXPEDICAO-TIKTOK-PADRAO: "Backlog por marca" no lugar e no
+            // formato da Shopee/ML; a evolucao por vencimento e a LDR por loja
+            // dividem a linha seguinte, como no detalhe.
+            evolucao={<BacklogPorMarcaTikTok abertos={abertos} api={BASE} marca={marca} />}
+            concentracao={
+              <div className="grid gap-3 lg:grid-cols-5">
+                <div className="min-w-0 lg:col-span-3">{painelEvolucao}</div>
+                {painelLojas("lg:col-span-2")}
+              </div>
+            }
             convite={
               aoTrocarVisao ? (
                 <ConviteAoDetalhe
@@ -920,7 +922,8 @@ export default function TikTokDispatchPanel({
           />
         ) : (
           <>
-            <TikTokPedidosAbertos api={BASE} marca={marca} />
+            <RiscoAtualTikTok abertos={abertos} />
+            <BacklogPorMarcaTikTok abertos={abertos} api={BASE} marca={marca} />
             {secaoLdr}
             {/* DETALHE: coorte, loja e fluxo */}
             {painelCoortes}
@@ -933,6 +936,7 @@ export default function TikTokDispatchPanel({
       ) : null}
     </LayoutExpedicao>
     {popupVencidos}
+    {abertos.popup}
     </div>
   );
 }

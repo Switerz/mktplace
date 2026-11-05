@@ -324,15 +324,27 @@ each channel shows only what its source sustains.
    "Vence amanhã", or "Vence ter 03/11" on a Friday —, acima de 48 h,
    travados, marcas em alerta). ML: the Shopee tiles when the photo carries
    the ML dispatch SLA (`snapshot.deadline_published`), labelled "prazo
-   Mercado Livre"; without it, four — no deadline tiles at all. TikTok:
-   pendentes vencidos, vencem hoje/amanhã, pendentes no prazo, lojas acima da
-   meta. Every tile with a count carries its ⓘ next to the label (never in the
+   Mercado Livre"; without it, four — no deadline tiles at all. TikTok
+   (EXPEDICAO-TIKTOK-PADRAO, 05/11/2026): the same hero layout as Shopee,
+   from the live open orders — Vencidos in the hero ("de N em fila", the
+   stage split and "Onde agir"), then Vence hoje, Vence no próximo dia útil
+   and Acima de 48 h. Every tile with a count carries its ⓘ next to the label (never in the
    footer), its share of the queue ("0,7% da fila") and "ver quais", which
    opens the same order list (number, stage, CSV) filtered by that tile.
 3. **Prazo** — Shopee: backlog partitioned by deadline status (ship_by_date),
    plus the sentence that LDR is not computed yet. ML with SLA: the same
    partition; without it, "indisponível" and queue ageing. TikTok: LDR, with collection and dispatch as
-   separate events.
+   separate events, plus the window's pending counts (vencem hoje/amanhã,
+   pendentes no prazo, lojas acima da meta) — they measure the LDR window,
+   not the live queue, so they never sit next to the Risco atual tiles.
+   The reconstructed-deadline caveat is a short chip ("Prazo reconstruído ·
+   medição interna") with the full text in its ⓘ, not a banner.
+
+TikTok controls share the single controls row: Profundidade · Marca · Evento
+(short labels "Coleta" / "Despacho") · Período. Jornada is the compact one, as
+on the queue. "Backlog por marca" (open orders by brand, with "Não coletados
+no prazo" in its footer) sits where the queue's table sits; the evolution
+chart and the LDR by shop share the next row.
 4. **Evolução** — queue: a compact table, one row per account titled by
    brand (Backlog atual · Variação · Acima de 48 h · Travados · Tendência).
    Sparklines in neutral ink, no written scale; a constant series reads

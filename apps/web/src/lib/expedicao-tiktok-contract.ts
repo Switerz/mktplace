@@ -45,6 +45,16 @@ export const ROTULO_EVENTO: Record<Evento, string> = {
   despacho: "Despacho (etiqueta)",
 };
 
+/**
+ * EXPEDICAO-TIKTOK-PADRAO: rotulo do seletor, curto para Evento e Periodo
+ * caberem na MESMA linha de Profundidade e Marca. O nome completo segue na
+ * descricao da secao "Prazo".
+ */
+export const ROTULO_EVENTO_CURTO: Record<Evento, string> = {
+  coleta: "Coleta",
+  despacho: "Despacho",
+};
+
 export const EXPLICACAO_EVENTO: Record<Evento, string> = {
   coleta:
     "Quando a transportadora de fato retirou o pacote. Prazo de 2 dias úteis. " +
@@ -430,7 +440,15 @@ export function montarBarraDeQualidadeTikTok(p: TikTokPayload | null): BarraQual
     });
   }
   if (p.deadline_is_reconstructed) {
-    itens.push({ chave: "prazo_reconstruido", severidade: "atencao", texto: AVISO_PRAZO_RECONSTRUIDO });
+    // EXPEDICAO-TIKTOK-PADRAO: ressalva permanente do canal, nao problema do
+    // dado de hoje. Vira chip curto com o texto inteiro no "ⓘ" (DESIGN.md:
+    // "no methodology on screen"), como a cobertura na Shopee e no ML.
+    itens.push({
+      chave: "prazo_reconstruido",
+      severidade: "info",
+      texto: AVISO_PRAZO_RECONSTRUIDO,
+      curto: "Prazo reconstruído · medição interna",
+    });
   }
   const parciais = p.ldr?.partial_due_days ?? 0;
   if (parciais > 0) {
@@ -440,6 +458,7 @@ export function montarBarraDeQualidadeTikTok(p: TikTokPayload | null): BarraQual
       texto:
         `${parciais} vencimento(s) da janela ainda no prazo: a taxa desses dias ainda ` +
         "vai mudar e fica fora da LDR.",
+      curto: `${parciais} ${parciais === 1 ? "vencimento" : "vencimentos"} ainda no prazo`,
     });
   }
   return consolidarQualidade(itens);

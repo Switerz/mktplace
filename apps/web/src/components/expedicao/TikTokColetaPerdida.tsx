@@ -396,7 +396,16 @@ export function PopupColetaPerdida({
 }
 
 /** Faixa com o seletor do dia de prazo e o atalho para a lista. */
-export default function TikTokColetaPerdida({ api, marca }: { api: string; marca: string | null }) {
+export default function TikTokColetaPerdida({
+  api,
+  marca,
+  embutida = false,
+}: {
+  api: string;
+  marca: string | null;
+  /** EXPEDICAO-TIKTOK-PADRAO: dentro do rodape do "Backlog por marca", sem caixa propria. */
+  embutida?: boolean;
+}) {
   const [vencimento, setVencimento] = useState<string | null>(null);
   const [carga, setCarga] = useState<Carga>({ tipo: "carregando" });
   const [aberto, setAberto] = useState(false);
@@ -423,7 +432,9 @@ export default function TikTokColetaPerdida({ api, marca }: { api: string; marca
   const dias = dados?.deadline_days ?? [];
   return (
     <div
-      className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border border-line bg-surface px-4 py-3"
+      className={`flex flex-wrap items-center gap-x-3 gap-y-2 ${
+        embutida ? "py-1" : "rounded-xl border border-line bg-surface px-4 py-3"
+      }`}
       data-testid="exp-tiktok-coleta-perdida"
     >
       <p className="text-sm font-semibold text-ink">Não coletados no prazo</p>
