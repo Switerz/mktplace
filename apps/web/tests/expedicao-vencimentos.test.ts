@@ -511,3 +511,30 @@ test("serie parcial ignora a conta do export (bot a cada 2 h)", async () => {
   const faltaRegular = [serie("a", horas), serie("b", ["10"]), serie("kokeshi", ["10"])];
   assert.equal(estadoDaTendencia(false, false, faltaRegular, 3, new Set(["kokeshi"])), "parcial");
 });
+
+// EXPEDICAO-PERTO-DE-VENCER-FILTRO — filtro rapido "vence hoje / amanha" no popup.
+test("perto de vencer: filtro por dia do prazo usa o dia de Brasilia da fotografia", async () => {
+  const { filtrarPorVencimento, diaBrtDe } = await import("../src/lib/expedicao-travados.ts");
+  // 23:59 BRT = 02:59Z do dia seguinte: o dia tem de ser o de Brasilia.
+  const linhas = [
+    { id: "a", dispatch_deadline: "2026-11-06T02:59:00Z" },
+    { id: "b", dispatch_deadline: "2026-11-07T02:59:00Z" },
+    { id: "c", dispatch_deadline: null },
+  ];
+  const hoje = diaBrtDe("2026-11-05T15:00:00Z");
+  assert.equal(hoje, "2026-11-05");
+  assert.deepEqual(filtrarPorVencimento(linhas, "hoje", hoje, "2026-11-06").map((l) => l.id), ["a"]);
+  assert.deepEqual(filtrarPorVencimento(linhas, "proximo", hoje, "2026-11-06").map((l) => l.id), ["b"]);
+  assert.equal(filtrarPorVencimento(linhas, "todos", hoje, null).length, 3);
+  // Sem proximo dia publicado, o recorte e' vazio — nunca a lista inteira.
+  assert.deepEqual(filtrarPorVencimento(linhas, "proximo", hoje, null), []);
+});
+
+test("popup perto de vencer: filtro rapido so' nessa lista, recortando etapa, tabela e CSV", () => {
+  const POPUP = fonte("src/components/expedicao/TravadosDialog.tsx");
+  assert.match(POPUP, /lista === "perto_de_vencer"/);
+  assert.match(POPUP, /Vence hoje/);
+  assert.match(POPUP, /travadosPorEtapa\(linhas\)/);
+  assert.match(POPUP, /csvDaLista\(linhas,/);
+  assert.match(POPUP, /\{linhas\.map\(/);
+});
