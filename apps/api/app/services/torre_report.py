@@ -25,6 +25,7 @@ from typing import Optional
 from sqlalchemy import text
 
 from app.services import metas_curva, metas_service
+from app.services import slack_blocks as sb
 from app.services import torre_alertas as ta
 from app.services.gold_service import TZ_OPERACIONAL
 
@@ -287,6 +288,81 @@ def montar_mensagem(rep: Report) -> str:
         linhas.append("_" + " ".join(rep.notas) + "_")
     linhas.append(f"<{URL_DA_TORRE}|Abrir a Torre>")
     return "\n".join(linhas)
+
+
+def _bola_meta(p: Optional[float]) -> str:
+    if p is None:
+        return ":white_circle:"
+    if p >= 1:
+        return ":large_green_circle:"
+    if p >= META_DIA_ATENCAO:
+        return ":large_yellow_circle:"
+    return ":large_orange_circle:" if p >= META_DIA_CRITICO else ":red_circle:"
+
+
+def _plural(n: int, um: str, varios: str) -> str:
+    return f"{n} {um if n == 1 else varios}"
+
+
+def montar_blocos(rep: Report) -> sb.Mensagem:
+    """O report em blocos: numeros do dia, marcas, avancos, problemas, atalhos."""
+    o = rep.ontem
+    dia_sem = DIAS_SEMANA[o.weekday()]
+    t = rep.total
+    resumo = (f"{brl(t.gmv)} de GMV ontem, {_plural(len(rep.avancos), 'avanço', 'avanços')}, "
+              f"{_plural(len(rep.problemas), 'problema', 'problemas')}")
+
+    numeros = [("GMV de ontem", brl(t.gmv))]
+    if t.pct_meta_dia is not None:
+        numeros.append(("Meta do dia", f"{_bola_meta(t.pct_meta_dia)} {pct0(t.pct_meta_dia)}"))
+    if t.var_semana is not None:
+        numeros.append((f"vs {dia_sem} passada", variacao(t.var_semana)))
+    if rep.mes:
+        real, esperado, meta = rep.mes
+        numeros.append((f"{MESES[o.month - 1].capitalize()} até ontem",
+                        f"{brl(real)} · {pct0(real / meta)} da meta"))
+        if esperado > 0:
+            numeros.append(("Ritmo do mês", f"{_bola_meta(real / esperado)} {pct0(real / esperado)} do esperado"))
+
+    blocos: list[dict] = [
+        sb.titulo(f":sunrise: Bom dia! Resumo de ontem · {dia_sem}, {o:%d/%m}"),
+        sb.nota(f"*{resumo}*"),
+        sb.campos(*numeros),
+    ]
+    evento = metas_curva.evento_do_dia(o)
+    rodape = []
+    if evento:
+        rodape.append(f":tada: Dia de evento: *{evento}*")
+    if rep.canais_com_meta:
+        rodape.append(f"Meta e mês contam só {' e '.join(rep.canais_com_meta)}")
+    if rodape:
+        blocos.append(sb.nota("  ·  ".join(rodape)))
+
+    blocos.append(sb.divisor())
+    linhas = ["*GMV por marca*"]
+    for x in rep.linhas:
+        partes = [f"*{ta.rotulo_marca(x.marca)}*  {brl(x.gmv)}"]
+        if x.pct_meta_dia is not None:
+            partes.append(f"{pct0(x.pct_meta_dia)} da meta")
+        if x.var_semana is not None:
+            partes.append(f"{variacao(x.var_semana)} vs {dia_sem}")
+        linhas.append(f"{_bola_meta(x.pct_meta_dia)} " + "  ·  ".join(partes))
+    blocos.append(sb.secao("\n".join(linhas), sb.botao("Ver metas", sb.url_metas())))
+
+    blocos.append(sb.divisor())
+    blocos.append(sb.secao(f":white_check_mark: *Avanços ({len(rep.avancos)})*\n"
+                           + ("\n".join(f"• {a}" for a in rep.avancos) or "• Nenhum destaque ontem.")))
+    blocos.append(sb.secao(f":warning: *Problemas ({len(rep.problemas)})*\n"
+                           + ("\n".join(rep.problemas) or ":tada: Nenhum problema.")))
+    if rep.notas:
+        blocos.append(sb.nota(" ".join(rep.notas)))
+    blocos.append(sb.divisor())
+    blocos.append(sb.atalhos(
+        sb.botao("Metas", sb.url_metas(), "primary"),
+        sb.botao("Expedição", sb.url_expedicao()),
+        sb.botao("Performance", sb.url_performance()),
+    ))
+    return sb.Mensagem(texto=f":sunrise: Bom dia! {resumo}.", blocos=sb.limitar(blocos))
 
 
 def chave_do_report(rep: Report) -> str:

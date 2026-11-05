@@ -24,8 +24,10 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
-from typing import Callable
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional, Union
+
+from app.services.slack_blocks import Mensagem
 
 SLACK_API = "https://slack.com/api"
 SLACK_TIMEOUT_SECONDS = 10
@@ -80,15 +82,26 @@ def _ja_tem_a_chave(mensagens: list[dict], chave: str) -> bool:
     return False
 
 
+def _campos_do_post(canal: str, texto: str, blocos: Optional[list[dict]],
+                    metadata: str) -> dict[str, str]:
+    """`text` vai sempre: e' a notificacao e o que aparece sem blocos."""
+    campos = {"channel": canal, "text": texto, "metadata": metadata,
+              "unfurl_links": "false", "unfurl_media": "false"}
+    if blocos:
+        campos["blocks"] = json.dumps(blocos, ensure_ascii=False)
+    return campos
+
+
 def enviar_dm_sem_repetir(
     token: str,
     destinatarios: list[str],
     texto: str,
     chave: str,
     *,
+    blocos: Optional[list[dict]] = None,
     chamar: Chamador = _slack,
 ) -> ResultadoEnvio:
-    """Manda `texto` no privado de cada destinatario (e-mail do Slack) que
+    """Manda `texto` (e `blocos`, quando houver) no privado de cada destinatario (e-mail do Slack) que
     ainda nao recebeu a `chave`.
 
     Cada destinatario e' independente: uma falha (e-mail de quem saiu da
@@ -111,8 +124,7 @@ def enviar_dm_sem_repetir(
             if _ja_tem_a_chave(historico.get("messages") or [], chave):
                 ja_tinham += 1
                 continue
-            chamar(token, "chat.postMessage",
-                   {"channel": canal, "text": texto, "metadata": metadata})
+            chamar(token, "chat.postMessage", _campos_do_post(canal, texto, blocos, metadata))
             enviados += 1
         except SlackFalhou as exc:
             falhas.append(str(exc))
@@ -136,9 +148,14 @@ HISTORICO_ITENS_LIMITE = 100
 
 @dataclass(frozen=True)
 class Item:
-    """Um aviso com identidade propria (`chave`) dentro de uma mensagem."""
+    """Um aviso com identidade propria (`chave`) dentro de uma mensagem.
+
+    `dados` leva o objeto de origem (celula de LDR, leitura de vencidos...)
+    para quem monta os blocos; nao entra na igualdade.
+    """
     chave: str
     texto: str
+    dados: Any = field(default=None, compare=False, repr=False)
 
 
 def _chaves_ja_enviadas(mensagens: list[dict]) -> set[str]:
@@ -157,7 +174,7 @@ def enviar_itens_sem_repetir(
     token: str,
     destinatarios: list[str],
     itens: list[Item],
-    montar: Callable[[list[Item]], str],
+    montar: Callable[[list[Item]], Union[str, Mensagem]],
     *,
     chamar: Chamador = _slack,
 ) -> ResultadoEnvio:
@@ -187,8 +204,9 @@ def enviar_itens_sem_repetir(
                 continue
             metadata = json.dumps({"event_type": EVENTO_ITENS,
                                    "event_payload": {"chaves": [i.chave for i in novos]}})
-            chamar(token, "chat.postMessage",
-                   {"channel": canal, "text": montar(novos), "metadata": metadata})
+            m = montar(novos)
+            texto, blocos = (m.texto, m.blocos) if isinstance(m, Mensagem) else (m, None)
+            chamar(token, "chat.postMessage", _campos_do_post(canal, texto, blocos, metadata))
             enviados += 1
         except SlackFalhou as exc:
             falhas.append(str(exc))

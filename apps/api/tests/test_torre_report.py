@@ -113,3 +113,25 @@ def test_curva_python_igual_a_do_web():
         web = [(None if e == "null" else e.strip('"'), float(m), float(s)) for e, m, s in re.findall(
             r'\{ evento: (null|"[^"]*"), ml: ([\d.]+), shopee: ([\d.]+) \}', bloco)]
         assert web == [(e, float(m), float(s)) for e, m, s in dias]
+
+
+def test_blocos_do_report_numeros_marcas_e_atalhos():
+    meta = 3_000_000.0
+    alvo = meta * metas_curva.fracao_do_dia(ONTEM, "ml")
+    gmv = {("kokeshi", "ml", ONTEM): alvo * 0.75, ("kokeshi", "ml", SEMANA): alvo}
+    m = tr.montar_blocos(tr.compor_report(_dados(gmv, {("kokeshi", "ml"): meta})))
+    assert m.texto.startswith(":sunrise: Bom dia! R$ ")
+    titulo, resumo, numeros = m.blocos[:3]
+    assert titulo["text"]["text"] == ":sunrise: Bom dia! Resumo de ontem · qua, 04/11"
+    rotulos = [f["text"].split("\n")[0] for f in numeros["fields"]]
+    assert rotulos[:3] == ["*GMV de ontem*", "*Meta do dia*", "*vs qua passada*"]
+    marcas = next(b for b in m.blocos if "GMV por marca" in b.get("text", {}).get("text", ""))
+    assert ":large_orange_circle: *KOKESHI*" in marcas["text"]["text"]  # 75%: entre 70% e 80%
+    assert marcas["accessory"]["url"].endswith("/metas")
+    assert [b["text"]["text"] for b in m.blocos[-1]["elements"]] == ["Metas", "Expedição", "Performance"]
+
+
+def test_bolas_da_meta():
+    assert [tr._bola_meta(p) for p in (None, 1.0, 0.85, 0.72, 0.5)] == [
+        ":white_circle:", ":large_green_circle:", ":large_yellow_circle:",
+        ":large_orange_circle:", ":red_circle:"]

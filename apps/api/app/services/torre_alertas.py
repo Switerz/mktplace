@@ -37,6 +37,7 @@ from app.services import performance_oficial_service as perf_oficial
 from app.services import shopee_ldr_dm_service as shopee_dm
 from app.services.alerta_vencidos import HORAS_LEMBRETE, LIMIAR_VENCIDOS
 from app.services.gold_service import BRAND_LABELS, TZ_OPERACIONAL
+from app.services import slack_blocks as sb
 from app.services.slack_dm import Item
 
 logger = logging.getLogger(__name__)
@@ -197,7 +198,7 @@ def texto_celula(c: CelulaLdr) -> str:
 
 def itens_ldr_criticos(leitura: LeituraLdr, dia: date) -> list[Item]:
     return [
-        Item(f"ldr:{c.canal}:{c.marca}:{dia.isoformat()}", texto_celula(c))
+        Item(f"ldr:{c.canal}:{c.marca}:{dia.isoformat()}", texto_celula(c), c)
         for c in leitura.celulas
         if c.faixa == CRITICO and c.base >= BASE_MINIMA
     ]
@@ -285,7 +286,7 @@ def ler_saude(agora: datetime,
 
 
 def itens_saude_criticos(leitura: LeituraSaude) -> list[Item]:
-    return [Item(s.chave, s.texto) for s in leitura.sinais if s.nivel == CRITICO]
+    return [Item(s.chave, s.texto, s) for s in leitura.sinais if s.nivel == CRITICO]
 
 
 # ---------------------------------------------------------------------------
@@ -386,7 +387,7 @@ def itens_vencidos(leitura: Optional[LeituraVencidos], agora: datetime) -> list[
             f"{rotulo_marca(m.marca)} {inteiro(m.vencidos)} ({pct(m.fracao or 0)})" for m in acima)
     texto += ". _Prazo reconstruído pela regra de 2 dias úteis._"
     dia = agora.astimezone(TZ_OPERACIONAL).date().isoformat()
-    return [Item(f"vencidos:{leitura.canal}:{dia}:{turno(agora)}", texto)]
+    return [Item(f"vencidos:{leitura.canal}:{dia}:{turno(agora)}", texto, leitura)]
 
 
 def _ler_vencidos(db, agora: datetime) -> tuple[Optional[LeituraVencidos], bool]:
@@ -421,19 +422,96 @@ def avaliar_criticos(db, agora: datetime) -> AvaliacaoCriticos:
     return AvaliacaoCriticos(itens, indisponiveis, saude.indisponivel)
 
 
-def montar_mensagem_criticos(itens: list[Item]) -> str:
-    ldr = [i for i in itens if i.chave.startswith("ldr:")]
-    vencidos = [i for i in itens if i.chave.startswith("vencidos:")]
-    saude = [i for i in itens if not i.chave.startswith(("ldr:", "vencidos:"))]
-    linhas = [":rotating_light: *Torre: alerta crítico*"]
+def _sem_prefixo(texto: str) -> str:
+    """"KOKESHI no Mercado Livre: termometro..." -> "termometro..." (o grupo ja' diz)."""
+    _, _, resto = texto.partition(": ")
+    return (resto or texto).rstrip(".")
+
+
+def _bloco_ldr(canal: str, celulas: list[CelulaLdr]) -> dict:
+    meta, teto = META_TETO[canal]
+    linhas = [f"{sb.EMOJI_CANAL[canal]} *LDR acima do teto · {ROTULO_CANAL[canal]}*  "
+              f"_(meta {pct(meta)} · teto {pct(teto)})_"]
+    for c in sorted(celulas, key=lambda x: x.taxa, reverse=True):
+        extra = f"  _{c.parcial}_" if c.parcial else ""
+        linhas.append(f":red_circle: *{rotulo_marca(c.marca)}*  {pct(c.taxa)}  ·  "
+                      f"{inteiro(c.atrasados)} de {inteiro(c.base)} pedidos{extra}")
+    marca = celulas[0].marca if len(celulas) == 1 else None
+    return sb.secao("\n".join(linhas), sb.botao(
+        f"Ver {ROTULO_CANAL[canal]}", sb.url_expedicao(canal, marca)))
+
+
+def _bloco_vencidos(v: "LeituraVencidos") -> list[dict]:
+    canal = ROTULO_CANAL[v.canal]
+    linhas = [f"{sb.EMOJI_CANAL[v.canal]} *Pedidos vencidos parados · {canal}*",
+              f"*{inteiro(v.vencidos)}* de {inteiro(v.fila)} pedidos parados passaram do prazo de "
+              f"coleta: *{pct(v.fracao or 0)}* _(limite {LIMIAR_VENCIDOS:.0%})_"]
+    marcas = sorted((m for m in v.marcas if m.fila >= BASE_MINIMA and m.vencidos > 0),
+                    key=lambda m: m.fracao or 0, reverse=True)
+    for m in marcas:
+        bola = ":red_circle:" if (m.fracao or 0) > LIMIAR_VENCIDOS else ":large_green_circle:"
+        linhas.append(f"{bola} *{rotulo_marca(m.marca)}*  {pct(m.fracao or 0)}  ·  "
+                      f"{inteiro(m.vencidos)} de {inteiro(m.fila)}")
+    return [sb.secao("\n".join(linhas), sb.botao(f"Ver fila do {canal}",
+                                                  sb.url_expedicao(v.canal, detalhe=True))),
+            sb.nota("Prazo reconstruído pela regra de 2 dias úteis (não é o SLA oficial do TikTok).")]
+
+
+def _bloco_saude(marca: str, canal: str, sinais: list[str]) -> dict:
+    linhas = [f"{sb.EMOJI_CANAL[canal]} *Performance oficial · {rotulo_marca(marca)} no "
+              f"{ROTULO_CANAL[canal]}*"]
+    linhas += [f":red_circle: {t}" for t in sinais]
+    return sb.secao("\n".join(linhas), sb.botao("Ver performance", sb.url_performance(canal, marca)))
+
+
+def _resumo_criticos(ldr: list[CelulaLdr], vencidos: list["LeituraVencidos"], saude: int) -> str:
+    partes = []
     if ldr:
-        linhas.append("*LDR acima do teto* (últimos 7 dias):")
-        linhas += [f"• {i.texto}" for i in ldr]
-    if vencidos:
-        linhas.append("*Pedidos vencidos parados*:")
-        linhas += [f"• {i.texto}" for i in vencidos]
+        partes.append(f"LDR acima do teto em {len(ldr)} conta{'s' if len(ldr) != 1 else ''}")
+    for v in vencidos:
+        partes.append(f"{pct(v.fracao or 0)} dos pedidos parados vencidos no {ROTULO_CANAL[v.canal]}")
     if saude:
-        linhas.append("*Performance oficial*:")
-        linhas += [f"• {i.texto}" for i in saude]
-    linhas.append(f"<{URL_DA_EXPEDICAO}|Abrir a Expedição na Torre>")
-    return "\n".join(linhas)
+        partes.append(f"{saude} sinal{'is' if saude != 1 else ''} na performance oficial")
+    return " · ".join(partes) or "alerta crítico"
+
+
+def montar_mensagem_criticos(itens: list[Item], agora: Optional[datetime] = None) -> sb.Mensagem:
+    """DM dos alertas criticos: um grupo por canal, cada um com o seu botao."""
+    agora = agora or datetime.now(TZ_OPERACIONAL)
+    ldr = [i.dados for i in itens if i.chave.startswith("ldr:") and isinstance(i.dados, CelulaLdr)]
+    vencidos = [i.dados for i in itens
+                if i.chave.startswith("vencidos:") and isinstance(i.dados, LeituraVencidos)]
+    saude = [i for i in itens if i.chave.startswith("saude:")]
+    soltos = [i for i in itens if not i.chave.startswith(("ldr:", "vencidos:", "saude:"))
+              or (i.chave.startswith(("ldr:", "vencidos:")) and i.dados is None)]
+
+    resumo = _resumo_criticos(ldr, vencidos, len(saude))
+    blocos: list[dict] = [
+        sb.titulo(":rotating_light: Torre · alerta crítico"),
+        sb.nota(f"*{resumo[0].upper() + resumo[1:]}*  ·  "
+                f"{agora.astimezone(TZ_OPERACIONAL):%d/%m às %H:%M}"),
+        sb.divisor(),
+    ]
+    for canal in ROTULO_CANAL:
+        doc = [c for c in ldr if c.canal == canal]
+        if doc:
+            blocos.append(_bloco_ldr(canal, doc))
+    if ldr:
+        blocos.append(sb.nota("LDR dos últimos 7 dias = pedidos atrasados ÷ "
+                              "pedidos que venceram no período."))
+    for v in vencidos:
+        blocos.append(sb.divisor())
+        blocos += _bloco_vencidos(v)
+    grupos: dict[tuple[str, str], list[str]] = {}
+    for i in saude:
+        d = i.dados
+        chave = (d.marca, d.canal) if isinstance(d, SinalSaude) else ("kokeshi", "mercadolivre")
+        grupos.setdefault(chave, []).append(_sem_prefixo(i.texto))
+    for (marca, canal), sinais in grupos.items():
+        blocos.append(sb.divisor())
+        blocos.append(_bloco_saude(marca, canal, sinais))
+    if soltos:
+        blocos.append(sb.secao("\n".join(f"• {i.texto}" for i in soltos)))
+    blocos.append(sb.divisor())
+    blocos.append(sb.atalhos(sb.botao("Abrir a Expedição", sb.url_expedicao(), "primary")))
+    return sb.Mensagem(texto=f":rotating_light: Torre: {resumo}", blocos=sb.limitar(blocos))

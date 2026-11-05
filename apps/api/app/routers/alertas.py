@@ -72,12 +72,12 @@ def disparar_alerta_vencidos(
     corpo = {"canal": a.canal, "situacao": a.situacao, "evento": a.evento,
              "enviados": 0, "ja_tinham": 0}
     if simular:
-        corpo["mensagem"] = a.mensagem
+        corpo["mensagem"], corpo["blocos"] = a.mensagem, a.blocos
         return corpo
     if a.situacao != EVENTO:
         return corpo
     try:
-        r = enviar_dm_sem_repetir(token, destinatarios, a.mensagem, a.chave)
+        r = enviar_dm_sem_repetir(token, destinatarios, a.mensagem, a.chave, blocos=a.blocos)
     except SlackFalhou as exc:
         # `SlackFalhou` nunca carrega o token; mesmo assim so' o metodo/erro vai ao log.
         logger.warning("alerta de vencidos: Slack falhou (%s)", exc)
@@ -126,7 +126,8 @@ def disparar_alertas_criticos(
              "canais_indisponiveis": a.canais_indisponiveis,
              "saude_indisponivel": a.saude_indisponivel, "enviados": 0, "ja_tinham": 0}
     if simular:
-        corpo["mensagem"] = torre_alertas.montar_mensagem_criticos(a.itens) if a.itens else None
+        m = torre_alertas.montar_mensagem_criticos(a.itens) if a.itens else None
+        corpo["mensagem"], corpo["blocos"] = (m.texto, m.blocos) if m else (None, None)
         return corpo
     if not a.itens:
         return corpo
@@ -150,11 +151,12 @@ def disparar_report_diario(
         raise HTTPException(503, "Dados indisponiveis.") from None
     rep = torre_report.compor_report(dados)
     texto = torre_report.montar_mensagem(rep)
+    msg = torre_report.montar_blocos(rep)
     corpo = {"dia": rep.ontem.isoformat(), "avancos": len(rep.avancos),
              "problemas": len(rep.problemas), "enviados": 0, "ja_tinham": 0}
     if simular:
-        corpo["mensagem"] = texto
+        corpo["mensagem"], corpo["blocos"] = texto, msg.blocos
         return corpo
     item = Item(torre_report.chave_do_report(rep), texto)
-    corpo.update(_enviar("report diario", token, destinatarios, [item], lambda _novos: texto))
+    corpo.update(_enviar("report diario", token, destinatarios, [item], lambda _novos: msg))
     return corpo

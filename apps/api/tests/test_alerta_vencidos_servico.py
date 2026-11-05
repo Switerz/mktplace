@@ -281,3 +281,18 @@ def test_avaliar_sem_fotografia():
 def test_avaliar_encerra_a_transacao_de_leitura(db_em_alerta):
     av.avaliar(db_em_alerta, agora=EFFECTIVE)
     assert db_em_alerta.rollbacks >= 1
+
+
+def test_blocos_tem_titulo_marcas_e_botao_da_fila():
+    blocos = av.montar_blocos(_leitura_com_marcas(), av.ENTROU)
+    assert blocos[0]["type"] == "header" and blocos[0]["text"]["text"].startswith(":rotating_light: Shopee:")
+    marcas = next(b for b in blocos if b["type"] == "section" and "Por marca" in b["text"]["text"])
+    assert ":red_circle:" in marcas["text"]["text"]
+    (botao,) = blocos[-1]["elements"]
+    assert botao["url"].endswith("/expedicao?channel=shopee&visao=detalhe")
+
+
+def test_blocos_saiu_nao_lista_marcas():
+    blocos = av.montar_blocos(_leitura_com_marcas(), av.SAIU)
+    assert blocos[0]["text"]["text"].startswith(":white_check_mark:")
+    assert not any(b["type"] == "section" and "Por marca" in b["text"]["text"] for b in blocos)

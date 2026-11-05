@@ -2,6 +2,7 @@
 protecoes da rota de vencidos: segredo, mensagens fixas, simular sem enviar."""
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import pytest
@@ -87,7 +88,8 @@ def test_criticos_simular_devolve_mensagem_sem_enviar(ambiente):
     corpo = _post(cliente, CRITICOS, simular="true").json()
     assert corpo["itens"] == 1 and corpo["chaves"] == [ITENS[0].chave]
     assert corpo["canais_indisponiveis"] == ["Shopee"]
-    assert "RITUÁRIA acima do teto" in corpo["mensagem"]
+    assert corpo["mensagem"].startswith(":rotating_light: Torre:")
+    assert "RITUÁRIA acima do teto" in json.dumps(corpo["blocos"], ensure_ascii=False)
     assert enviar.chamadas == []
 
 
@@ -127,7 +129,9 @@ def test_report_envia_com_a_chave_do_dia(ambiente):
     assert _post(cliente, REPORT).json()["enviados"] == 1
     ((_, _, itens, montar),) = enviar.chamadas
     (item,) = itens
-    assert item.chave == "report:2026-11-04" and montar(itens) == item.texto
+    msg = montar(itens)
+    assert item.chave == "report:2026-11-04" and msg.texto.startswith(":sunrise: Bom dia!")
+    assert msg.blocos[0]["type"] == "header"
 
 
 def test_report_leitura_falhou_503_sem_texto_da_excecao(ambiente):
