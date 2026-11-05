@@ -12,13 +12,14 @@
  * RECONSTRUIDO da politica (despacho 1 dia util, coleta 2 dias uteis), como
  * na LDR do TikTok — dito na descricao da secao e no rodape do popup.
  */
-import { ChevronLeft, ChevronRight, Download } from "lucide-react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
 import DrilldownSecao from "@/components/drilldown/DrilldownSecao";
 import EvidenceRow from "@/components/drilldown/EvidenceRow";
 import CartaoDeRisco from "@/components/expedicao/CartaoDeRisco";
+import TikTokColetaPerdida, { BotaoCsvCompleto, baixarCsv } from "@/components/expedicao/TikTokColetaPerdida";
 import { CLASSE_CABECALHO, CLASSE_TABELA, EstadoSecao } from "@/components/expedicao/LayoutExpedicao";
 import { FaixaKpis, SecaoGerencial, SeloLeitura } from "@/components/expedicao/SecoesExpedicao";
 import { formatarHoras } from "@/lib/expedicao-contract";
@@ -28,6 +29,7 @@ import {
   CAMPO_DA_LISTA,
   CONFIG_LISTA,
   ROTULO_ETAPA,
+  buscarTodasAsPaginas,
   csvDosAbertos,
   diaCurto,
   etapasDaLista,
@@ -41,21 +43,6 @@ import {
 import { brandLabel } from "@/lib/filters/brands";
 
 type Carga = { tipo: "carregando" } | { tipo: "erro" } | { tipo: "ok"; dados: RespostaAbertos };
-
-function baixarCsv(conteudo: string, nome: string): void {
-  let url: string | null = null;
-  try {
-    url = URL.createObjectURL(new Blob([conteudo], { type: "text/csv;charset=utf-8;" }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = nome;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  } finally {
-    if (url) URL.revokeObjectURL(url);
-  }
-}
 
 function pct(n: number, base: number): string {
   return base > 0 ? `${((n / base) * 100).toLocaleString("pt-BR", { maximumFractionDigits: 1 })}%` : "—";
@@ -169,16 +156,20 @@ function PopupAbertos({
                         ? `${faixaDaPagina(pagina, dados.page_size, pedidos.length, totalLista)} · prazo mais antigo primeiro`
                         : "prazo mais antigo primeiro"}
                     </span>
-                    <button
-                      type="button"
-                      data-testid="exp-tiktok-abertos-csv"
-                      title={`Baixa os ${formatarInteiro(pedidos.length)} pedidos desta página em CSV`}
-                      onClick={() => baixarCsv(csvDosAbertos(pedidos), nomeDoCsvAbertos(lista, marca, new Date()))}
-                      className="-my-3 ml-2 inline-flex min-h-[44px] items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-accent-ink hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-                    >
-                      <Download aria-hidden="true" className="h-3.5 w-3.5" />
-                      Exportar CSV
-                    </button>
+                    <BotaoCsvCompleto
+                      total={totalLista}
+                      testId="exp-tiktok-abertos-csv"
+                      baixar={async (aoAvancar) => {
+                        const todos = await buscarTodasAsPaginas(async (p) => {
+                          const r = await buscarExpedicao(`${api}${queryAbertos(marca, lista, p)}`, { cache: "no-store" });
+                          if (!r.ok) throw new Error(String(r.status));
+                          const d = (await r.json()) as RespostaAbertos;
+                          if (d.availability !== "available" || d.orders_unavailable) throw new Error("indisponivel");
+                          return d;
+                        }, aoAvancar);
+                        baixarCsv(csvDosAbertos(todos), nomeDoCsvAbertos(lista, marca, new Date()));
+                      }}
+                    />
                   </>
                 }
               >
@@ -391,6 +382,9 @@ export default function TikTokPedidosAbertos({ api, marca }: { api: string; marc
         ) : (
           <p className="text-sm text-ink-muted">Nenhum pedido do TikTok em aberto neste recorte.</p>
         )}
+
+        {/* EXPEDICAO-TIKTOK-COLETA-PERDIDA: por dia de prazo, inclusive os ja' coletados depois. */}
+        <TikTokColetaPerdida api={api} marca={marca} />
       </div>
 
       <PopupAbertos
