@@ -488,11 +488,30 @@ def _lista_json(v: Any) -> list[dict]:
     return [dict(x) for x in v] if isinstance(v, list) else []
 
 
+#: Status RECONSTRUIDO no fim do dia do prazo. Por definicao da lista, nenhum
+#: pedido estava coletado nem cancelado naquele instante; o que resta e' se a
+#: etiqueta ja' estava pronta. O log de status nao serve para isto: medido, a
+#: maioria dos pedidos nao tem a linha AWAITING_COLLECTION.
+STATUS_NO_DIA = ("ON_HOLD", "AWAITING_SHIPMENT", "AWAITING_COLLECTION")
+
+
+def status_no_dia(p: dict, fim_do_prazo: datetime) -> str:
+    """Como o pedido estava no fim do dia do prazo (Brasilia)."""
+    pronto = _como_instante(p.get("pronto_em"))
+    if pronto is not None and pronto < fim_do_prazo:
+        return "AWAITING_COLLECTION"
+    # Retido hoje e sem etiqueta: estava retido tambem naquele dia.
+    if p.get("order_status") == "ON_HOLD":
+        return "ON_HOLD"
+    return "AWAITING_SHIPMENT"
+
+
 def obter_coleta_perdida(
     *,
     vencimento: date,
     brands: Optional[list[str]] = None,
     status: Optional[list[str]] = None,
+    status_dia: Optional[list[str]] = None,
     escopo: str = "etiqueta_pronta",
     pagina: int = 1,
     consultar: Optional[Consultar] = None,
@@ -510,7 +529,8 @@ def obter_coleta_perdida(
         "paid_to": faixa[1].isoformat() if faixa else None,
         "deadline_days": dias_de_prazo(agora_brt.date()),
         "excluded_brands": list(MARCAS_FORA_DO_ESCOPO),
-        "filters": {"brands": marcas or None, "status": status or None},
+        "filters": {"brands": marcas or None, "status": status or None,
+                    "status_on_day": status_dia or None},
         "brands": [], "all_brands": [], "status_counts": {}, "list_total": 0,
         "still_waiting": 0, "orders": [],
         "page": pagina, "page_size": TAMANHO_PAGINA, "has_more": False,
@@ -532,15 +552,24 @@ def obter_coleta_perdida(
         todos = [p for p in todos
                  if (pronto := _como_instante(p.get("pronto_em"))) is not None and pronto < fim_do_prazo]
 
-    # Marca recorta tudo; status recorta so' a lista (as contagens por status
-    # sao o que o filtro de status mostra ao lado de cada opcao).
+    for p in todos:
+        p["status_no_dia"] = status_no_dia(p, fim_do_prazo)
+
+    # Marca recorta tudo; cada status recorta a lista e as contagens de um sao
+    # feitas com o OUTRO ja' aplicado (o que cada filtro mostra ao lado de cada
+    # opcao bate com o que a lista vai mostrar ao escolher).
     todas_marcas = sorted({str(p.get("brand")) for p in todos})
     da_marca = [p for p in todos if not marcas or p.get("brand") in marcas]
+    ok_hoje = [p for p in da_marca if not status or p.get("order_status") in status]
+    ok_dia = [p for p in da_marca if not status_dia or p["status_no_dia"] in status_dia]
     contagem_status: dict[str, int] = {}
-    for p in da_marca:
+    for p in ok_dia:
         st = str(p.get("order_status"))
         contagem_status[st] = contagem_status.get(st, 0) + 1
-    filtrados = [p for p in da_marca if not status or p.get("order_status") in status]
+    contagem_dia: dict[str, int] = {}
+    for p in ok_hoje:
+        contagem_dia[p["status_no_dia"]] = contagem_dia.get(p["status_no_dia"], 0) + 1
+    filtrados = [p for p in ok_hoje if not status_dia or p["status_no_dia"] in status_dia]
 
     por_marca: dict[str, dict] = {}
     for p in filtrados:
@@ -560,12 +589,14 @@ def obter_coleta_perdida(
         pedidos.append({
             "brand": str(p.get("brand")), "order_id": str(p.get("order_id")),
             "shop_name": p.get("shop_name"), "status": p.get("order_status"),
+            "status_on_day": p["status_no_dia"],
             "paid_at": _iso(pago), "ready_at": _iso(pronto), "collected_at": _iso(coletado),
             "hours_late": round(atraso, 1),
         })
     return {
         **base, "availability": "available", "brands": marcas_out,
         "all_brands": todas_marcas, "status_counts": contagem_status,
+        "status_on_day_counts": contagem_dia,
         "list_total": len(filtrados),
         "still_waiting": sum(b["still_waiting"] for b in marcas_out),
         "orders": pedidos, "has_more": ini + TAMANHO_PAGINA < len(filtrados),

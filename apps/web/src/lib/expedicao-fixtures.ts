@@ -584,6 +584,7 @@ export function respostaFicticia(url: string, cenarioPedido: CenarioDemo): { sta
         Number(u.searchParams.get("page") ?? "1"),
         u.searchParams.get("brands"),
         u.searchParams.get("status"),
+        u.searchParams.get("status_dia"),
       ),
     };
   if (caminho === "/api/v1/expedicao/tiktok/abertos")
@@ -649,26 +650,32 @@ function tiktokColetaPerdida(
   pagina: number,
   marca: string | null = null,
   status: string | null = null,
+  statusDia: string | null = null,
 ): unknown {
   const dia = vencimento ?? "2026-11-04";
   const marcas = ["kokeshi", "apice", "barbours", "lescent"];
   const todos = Array.from({ length: 430 }, (_, k) => ({
     brand: marcas[k % 4], order_id: `58${String(k).padStart(4, "0")}9912345678`, shop_name: marcas[k % 4],
     status: k % 3 === 0 ? "AWAITING_COLLECTION" : "IN_TRANSIT", paid_at: "2026-10-31T10:12:00",
+    status_on_day: k % 5 === 0 ? "AWAITING_SHIPMENT" : "AWAITING_COLLECTION",
     ready_at: "2026-11-03T16:40:00", collected_at: k % 3 === 0 ? null : "2026-11-05T09:15:00",
     hours_late: k % 3 === 0 ? 13 : 9.3,
   }));
   const daMarca = todos.filter((t) => !marca || t.brand === marca);
+  const okHoje = daMarca.filter((t) => !status || t.status === status);
+  const okDia = daMarca.filter((t) => !statusDia || t.status_on_day === statusDia);
   const statusCounts: Record<string, number> = {};
-  for (const t of daMarca) statusCounts[t.status] = (statusCounts[t.status] ?? 0) + 1;
-  const filtrados = daMarca.filter((t) => !status || t.status === status);
+  for (const t of okDia) statusCounts[t.status] = (statusCounts[t.status] ?? 0) + 1;
+  const statusDiaCounts: Record<string, number> = {};
+  for (const t of okHoje) statusDiaCounts[t.status_on_day] = (statusDiaCounts[t.status_on_day] ?? 0) + 1;
+  const filtrados = okHoje.filter((t) => !statusDia || t.status_on_day === statusDia);
   const ini = (Math.max(1, pagina) - 1) * 200;
   return {
     channel: "tiktokshop", availability: "available", deadline: dia, paid_from: "2026-10-30", paid_to: "2026-11-02",
     deadline_days: ["2026-11-05", "2026-11-04", "2026-11-03", "2026-10-30", "2026-10-29"],
     brands: marcas.filter((m) => !marca || m === marca).map((m) => ({ brand: m, missed: filtrados.filter((t) => t.brand === m).length,
       still_waiting: filtrados.filter((t) => t.brand === m && !t.collected_at).length })),
-    all_brands: marcas, status_counts: statusCounts,
+    all_brands: marcas, status_counts: statusCounts, status_on_day_counts: statusDiaCounts,
     list_total: filtrados.length, still_waiting: filtrados.filter((t) => !t.collected_at).length,
     orders: filtrados.slice(ini, ini + 200), page: Math.max(1, pagina), page_size: 200, has_more: ini + 200 < filtrados.length,
   };

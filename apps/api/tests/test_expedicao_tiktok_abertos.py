@@ -189,3 +189,16 @@ def test_escopo_todos_inclui_sem_etiqueta_no_prazo():
     assert [p["order_id"] for p in pronta["orders"]] == ["1"]
     assert [p["order_id"] for p in todos["orders"]] == ["1", "2", "3"]
     assert todos["status_counts"] == {"AWAITING_COLLECTION": 1, "IN_TRANSIT": 1, "AWAITING_SHIPMENT": 1}
+
+    # Status NO DIA do prazo: 1 tinha etiqueta pronta; 2 (etiqueta so' depois)
+    # e 3 (sem etiqueta) estavam aguardando despacho no fim de 04/11.
+    assert [p["status_on_day"] for p in todos["orders"]] == [
+        "AWAITING_COLLECTION", "AWAITING_SHIPMENT", "AWAITING_SHIPMENT"]
+    assert todos["status_on_day_counts"] == {"AWAITING_COLLECTION": 1, "AWAITING_SHIPMENT": 2}
+
+    # Filtro pelo status no dia; as contagens de "hoje" ja' vem com ele aplicado.
+    so_despacho = svc.obter_coleta_perdida(vencimento=date(2026, 11, 4), escopo="todos",
+                                           status_dia=["AWAITING_SHIPMENT"], consultar=consultar, agora=AGORA)
+    assert [p["order_id"] for p in so_despacho["orders"]] == ["2", "3"]
+    assert so_despacho["status_counts"] == {"IN_TRANSIT": 1, "AWAITING_SHIPMENT": 1}
+    assert so_despacho["status_on_day_counts"] == {"AWAITING_COLLECTION": 1, "AWAITING_SHIPMENT": 2}
