@@ -95,7 +95,7 @@ def test_kokeshi_metrica_fora_e_critica_e_perto_e_atencao():
                              _metrica("ml_delayed_handling_time", 5.0, 6.0, "ok")])
     s1, s2 = ta.sinais_da_conta(conta)
     assert (s1.nivel, s1.chave) == (ta.CRITICO, "saude:mercadolivre:kokeshi:ml_claims:2026-11-04")
-    assert "1,2%, fora da meta (<= 1% para MercadoLíder)" in s1.texto
+    assert "1,2%, fora da meta (máximo 1% para MercadoLíder)" in s1.texto
     assert s2.nivel == ta.ATENCAO and "5%, perto do limite de 6%" in s2.texto
 
 
@@ -128,6 +128,7 @@ def test_mensagem_criticos_um_grupo_por_canal_com_link_filtrado():
     m = ta.montar_mensagem_criticos(itens, AGORA)
     assert m.texto == (":rotating_light: Torre: LDR acima do teto em 3 contas · "
                        "1 sinal na performance oficial")
+    assert "2 sinais" in ta._resumo_criticos([], [], 2)
     assert m.blocos[0] == {"type": "header", "text": {
         "type": "plain_text", "text": ":rotating_light: Torre · alerta crítico", "emoji": True}}
     secoes = [b for b in m.blocos if b["type"] == "section"]
@@ -241,7 +242,7 @@ def test_shopee_nota_punicao_pontos_e_metricas():
     assert por_codigo["nota"].nivel == ta.CRITICO and por_codigo["punicoes"].nivel == ta.CRITICO
     assert por_codigo["pontos"].nivel == ta.ATENCAO
     assert por_codigo["shopee_1"].texto == (
-        "BARBOURS na Shopee: Taxa de envio atrasado em 9,5%, fora da meta (<= 8% da Shopee).")
+        "BARBOURS na Shopee: Taxa de envio atrasado em 9,5%, fora da meta (máximo 8% da Shopee).")
     assert por_codigo["shopee_4"].nivel == ta.ATENCAO and "1,8 dias, perto do limite de 2 dias" in por_codigo["shopee_4"].texto
     assert por_codigo["shopee_1"].chave == "saude:shopee:barbours:shopee_1:2026-11-04"
 
