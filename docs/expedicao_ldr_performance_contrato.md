@@ -28,7 +28,7 @@ Janela: os últimos 7 dias. Ausência de base é "—", nunca 0%.
 |---|---|---|---|---|
 | Shopee | `ship_by_date` da Shopee (dias úteis já aplicados) | coleta (`pickup_done_time`) | `GET /expedicao/shopee/ldr?days=7`, LDR operacional (EXPEDICAO-SHOPEE-LDR-1; FBS fora; cancelado sem coleta fora) | Pronto, atrás de flag: falta a migration 030 no Neon, as flags e despausar a publicação |
 | TikTok | 2 dias úteis após o pagamento (prazo reconstruído; o oficial `tts_sla_time` substitui quando ingerido) | coleta | `GET /expedicao/tiktok?event=coleta&days=7` | No ar |
-| Mercado Livre | SLA oficial de despacho (`/shipments/{id}/sla` → `expected_date`; no Mercado Coleta é o horário AGENDADO da coleta) | coleta até o **fim do dia** do prazo (`picked_up`/`dropped_off`/`in_hub` em `substatus_history`) | `GET /expedicao/ml/ldr?days=7` (lê `raw.ml_shipments` no Data Mart) | Série desde 03/11/2026; com menos de 7 dias fechados a célula diz "janela parcial: N de 7 dias" |
+| Mercado Livre | SLA oficial de despacho (`/shipments/{id}/sla` → `expected_date`; no Mercado Coleta é o horário AGENDADO da coleta) | coleta até o **fim do dia** do prazo (`picked_up`/`dropped_off`/`in_hub` em `substatus_history`), exceto quando o ML marca `delayed` | `GET /expedicao/ml/ldr?days=7` (lê `raw.ml_shipments` no Data Mart) | Série desde 03/11/2026; com menos de 7 dias fechados a célula diz "janela parcial: N de 7 dias" |
 
 **Regra do ML (validada no Data Mart em 03/11/2026).** Comparar a coleta com o horário exato do SLA daria ~80% de
 "atraso" que o próprio ML não marca: no Mercado Coleta o SLA é o horário agendado e a coleta é registrada minutos ou
@@ -40,6 +40,10 @@ horas depois (mediana +0,5 h). A regra que bate com o `sla_status = 'delayed'` d
 - fora da base (contado): enviado/entregue sem marco de coleta.
 
 Conferência: "coletado depois do dia" = `delayed` do ML em 31/10 (Kokeshi, 15 de 15) e 30/10 (Rituária, 3 de 3).
+
+O `delayed` do ML vale mesmo com coleta no mesmo dia: em 04/11/2026 a Rituária entregou 78 envios na agência às
+16:21 com SLA às 14:30/15:00, e o ML marcou todos como `delayed` (44% na janela de 03–04/11). A regra da Torre já
+os conta como atrasados; o texto da tela (ⓘ e subtítulo da coluna) passou a dizer isso (05/11/2026).
 Prévia de 03/11 (dia ainda aberto): Barbour's 1/99, Kokeshi 0/340, Lescent 0/51, Rituária 3/82. A série começa em
 03/11 porque antes disso só envios presos tinham SLA gravado (taxa enviesada).
 
