@@ -247,10 +247,13 @@ SELECT shop_account AS marca, COUNT(*) AS em_devolucao
 """
 
 
-#: Pedido nao pago cancelado pela Shopee, no texto em portugues do export
-#: (`Cancelar Motivo`). Sem acento e minusculo antes de comparar.
-_NAO_PAGO_EXPORT = ("translate(lower(coalesce(cancel_reason, '')), 'ãáàâéêíóôõúç', 'aaaaeeiooouc')"
-                    " ~ '(nao pago|nao foi pago|nao pagou|sem pagamento|pagamento nao)'")
+#: Pedido nao pago cancelado pela Shopee. O sinal principal e' o export nao
+#: ter "Hora do pagamento do pedido" (`pay_time` NULL): pedido cancelado que
+#: nunca foi pago nao depende do texto. O texto do motivo (portugues, sem
+#: acento) fica como reforco para o caso de a hora vir preenchida.
+_NAO_PAGO_EXPORT = ("(pay_time IS NULL OR translate(lower(coalesce(cancel_reason, '')),"
+                    " 'ãáàâéêíóôõúç', 'aaaaeeiooouc')"
+                    " ~ '(nao pago|nao foi pago|nao pagou|sem pagamento|pagamento nao)')")
 
 #: Mesma regra de `SQL_SHOPEE_MARCAS`, no export de pedidos da Kokeshi (034).
 #: O export nao diz quem cancelou: `cancelados_comprador` fica NULL (nunca 0).

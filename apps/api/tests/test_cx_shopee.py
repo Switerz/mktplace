@@ -327,6 +327,7 @@ def test_rotulo_pt_do_export():
 def test_sql_do_export_tira_o_nao_pago_e_usa_o_dia_de_brasilia():
     for sql in (svc.SQL_SHOPEE_EXPORT_MARCAS, svc.SQL_SHOPEE_EXPORT_MOTIVOS):
         assert "marts.expedicao_shopee_export_pedido" in sql and "nao pago" in sql
+        assert "pay_time IS NULL OR" in sql, "cancelado sem pagamento = nao pago, sem depender do texto"
         assert "AT TIME ZONE 'America/Sao_Paulo'" in sql
     assert "NULL::int AS cancelados_comprador" in svc.SQL_SHOPEE_EXPORT_MARCAS
 
