@@ -43,6 +43,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.services import slack_blocks as sb
 from app.services.expedicao_service import FILA, RUN
 
 #: Limite de negocio: acima disto (estritamente) o canal entra em alerta.
@@ -114,6 +115,8 @@ class Avaliacao:
     mensagem: str | None
     chave: str | None
     fracao: float | None
+    #: Blocos do Slack da mesma mensagem (`montar_blocos`); `None` sem evento.
+    blocos: list[dict] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +268,38 @@ def montar_mensagem(leitura: Leitura, evento: str) -> str:
     return "\n".join(linhas)
 
 
+def montar_blocos(leitura: Leitura, evento: str) -> list[dict]:
+    """A mesma mensagem em blocos: titulo, numero, marcas e o botao da fila."""
+    canal = ROTULO_CANAL[leitura.canal]
+    t = leitura.total
+    pct = _pct(t.fracao or 0.0)
+    limite = f"{LIMIAR_VENCIDOS:.0%}"
+    quando = leitura.effective_at.astimezone(BRT).strftime("%d/%m às %H:%M")
+    if evento == SAIU:
+        cab = f":white_check_mark: {canal}: vencidos voltaram a {pct} da fila"
+    elif evento == ENTROU:
+        cab = f":rotating_light: {canal}: {pct} da fila vencida"
+    else:
+        cab = f":warning: {canal}: continua com {pct} da fila vencida"
+    blocos = [
+        sb.titulo(cab),
+        sb.nota(f"Limite {limite}  ·  fotografia de {quando}"),
+        sb.secao(f"*{_inteiro(t.vencidos)}* de {_inteiro(t.backlog)} pedidos da fila passaram do "
+                 f"prazo de despacho."),
+    ]
+    if evento != SAIU:
+        marcas = sorted(((m, x) for m, x in leitura.por_marca.items() if x.vencidos > 0),
+                        key=lambda par: par[1].fracao or 0.0, reverse=True)
+        if marcas:
+            linhas = [f"{':red_circle:' if x.acima else ':large_green_circle:'} "
+                      f"*{_rotulo_marca(m)}*  {_pct(x.fracao or 0.0)}  ·  "
+                      f"{_inteiro(x.vencidos)} de {_inteiro(x.backlog)}" for m, x in marcas]
+            blocos.append(sb.secao("*Por marca*\n" + "\n".join(linhas)))
+    blocos.append(sb.atalhos(sb.botao(f"Ver fila da {canal}",
+                                      sb.url_expedicao(leitura.canal, detalhe=True), "primary")))
+    return blocos
+
+
 # ---------------------------------------------------------------------------
 # Avaliacao (o que a rota chama)
 # ---------------------------------------------------------------------------
@@ -285,5 +320,5 @@ def avaliar(db: Session, agora: datetime) -> Avaliacao:
         return Avaliacao(CANAL, SEM_EVENTO, None, None, None, fracao)
     return Avaliacao(
         CANAL, EVENTO, evento, montar_mensagem(leitura, evento),
-        chave_da_fotografia(leitura), fracao,
+        chave_da_fotografia(leitura), fracao, montar_blocos(leitura, evento),
     )

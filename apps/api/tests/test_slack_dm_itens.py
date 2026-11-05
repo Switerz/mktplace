@@ -98,3 +98,13 @@ def test_um_destinatario_com_falha_nao_bloqueia_o_outro():
     with pytest.raises(SlackFalhou):
         enviar_itens_sem_repetir("xoxb-t", ["saiu@x.com", "b@x.com"], ITENS, _juntar, chamar=slack)
     assert len(slack.posts()) == 1
+
+
+def test_mensagem_com_blocos_posta_texto_e_blocos():
+    from app.services.slack_blocks import Mensagem, secao
+    slack = _SlackFalso()
+    enviar_itens_sem_repetir("xoxb-t", ["a@x.com"], ITENS,
+                             lambda novos: Mensagem("resumo", [secao("*oi*")]), chamar=slack)
+    (post,) = slack.posts()
+    assert post["text"] == "resumo" and post["unfurl_links"] == "false"
+    assert json.loads(post["blocks"]) == [{"type": "section", "text": {"type": "mrkdwn", "text": "*oi*"}}]

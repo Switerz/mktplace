@@ -123,7 +123,7 @@ def test_mesma_fotografia_duas_vezes_so_envia_uma(ambiente):
     cliente, _, enviar = ambiente
     vistas: set[tuple[str, str]] = set()
 
-    def envio(token, destinatarios, texto, chave):
+    def envio(token, destinatarios, texto, chave, **_):
         novos = [d for d in destinatarios if (d, chave) not in vistas]
         vistas.update((d, chave) for d in novos)
         return ResultadoEnvio(enviados=len(novos), ja_tinham=len(destinatarios) - len(novos))

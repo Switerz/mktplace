@@ -1,6 +1,7 @@
 """Alertas criticos do bot (A2 LDR acima do teto, A3 performance da Kokeshi)."""
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timezone
 
 from app.schemas.performance_oficial import ContaOficial, Destaque, MetricaOficial
@@ -112,10 +113,37 @@ def test_ler_saude_fonte_fora_marca_indisponivel():
     assert ta.ler_saude(AGORA, montar=quebra).indisponivel
 
 
-def test_mensagem_criticos_agrupa_ldr_e_saude():
-    texto = ta.montar_mensagem_criticos([Item("ldr:a", "L1"), Item("saude:b", "S1")])
-    assert texto.index("LDR acima do teto") < texto.index("L1") < texto.index("Performance oficial")
-    assert "S1" in texto and "Abrir a Expedição" in texto
+def _blocos_em_texto(m) -> str:
+    return json.dumps(m.blocos, ensure_ascii=False)
+
+
+def test_mensagem_criticos_um_grupo_por_canal_com_link_filtrado():
+    rit = ta.CelulaLdr("mercadolivre", "rituaria", 0.444, 87, 196, ta.CRITICO, "janela parcial: 2 de 7 dias")
+    api = ta.CelulaLdr("tiktokshop", "apice", 0.231, 1844, 7990, ta.CRITICO)
+    koke = ta.CelulaLdr("tiktokshop", "kokeshi", 0.116, 2801, 24140, ta.CRITICO)
+    sinal = ta.SinalSaude("kokeshi", "mercadolivre", ta.CRITICO, "ml_claims",
+                          "KOKESHI no Mercado Livre: Reclamações em 1,2%.", date(2026, 11, 4))
+    itens = [Item("ldr:ml", ta.texto_celula(rit), rit), Item("ldr:tk1", ta.texto_celula(api), api),
+             Item("ldr:tk2", ta.texto_celula(koke), koke), Item(sinal.chave, sinal.texto, sinal)]
+    m = ta.montar_mensagem_criticos(itens, AGORA)
+    assert m.texto == (":rotating_light: Torre: LDR acima do teto em 3 contas · "
+                       "1 sinal na performance oficial")
+    assert m.blocos[0] == {"type": "header", "text": {
+        "type": "plain_text", "text": ":rotating_light: Torre · alerta crítico", "emoji": True}}
+    secoes = [b for b in m.blocos if b["type"] == "section"]
+    ml, tk, saude = secoes
+    assert "*RITUÁRIA*  44,4%" in ml["text"]["text"] and "_janela parcial: 2 de 7 dias_" in ml["text"]["text"]
+    # Uma marca so' no canal: o botao ja' abre filtrado nela.
+    assert ml["accessory"]["url"].endswith("/expedicao?channel=mercadolivre&marca=rituaria")
+    assert tk["text"]["text"].index("ÁPICE") < tk["text"]["text"].index("KOKESHI")
+    assert tk["accessory"]["url"].endswith("/expedicao?channel=tiktokshop")
+    assert ":red_circle: Reclamações em 1,2%" in saude["text"]["text"]
+    assert saude["accessory"]["url"].endswith("/performance-contas?canal=mercado_livre&brands=kokeshi")
+
+
+def test_mensagem_criticos_item_sem_dados_ainda_aparece():
+    m = ta.montar_mensagem_criticos([Item("ldr:a", "L1"), Item("saude:b", "S1")], AGORA)
+    assert "L1" in _blocos_em_texto(m) and "S1" in _blocos_em_texto(m)
 
 
 # --- A4: vencidos parados no TikTok -----------------------------------------
@@ -181,6 +209,12 @@ def test_turno_de_brasilia():
     assert ta.turno(datetime(2026, 11, 5, 23, 0, tzinfo=timezone.utc)) == "17"
 
 
-def test_mensagem_criticos_tem_secao_de_vencidos():
-    texto = ta.montar_mensagem_criticos([Item("vencidos:tiktokshop:d:09", "V1"), Item("saude:b", "S1")])
-    assert texto.index("Pedidos vencidos parados") < texto.index("V1") < texto.index("Performance oficial")
+def test_mensagem_criticos_vencidos_com_marcas_e_fila_detalhada():
+    v = _leitura(("apice", 716, 2971), ("rituaria", 21, 500))
+    m = ta.montar_mensagem_criticos([Item("vencidos:tiktokshop:d:09", "V1", v)], AGORA)
+    (sec,) = [b for b in m.blocos if b["type"] == "section"]
+    assert "*737* de 3.471 pedidos parados" in sec["text"]["text"]
+    assert ":red_circle: *ÁPICE*  24,1%" in sec["text"]["text"]
+    assert ":red_circle: *RITUÁRIA*  4,2%" in sec["text"]["text"]
+    assert sec["accessory"]["url"].endswith("/expedicao?channel=tiktokshop&visao=detalhe")
+    assert "vencidos no TikTok Shop" in m.texto
