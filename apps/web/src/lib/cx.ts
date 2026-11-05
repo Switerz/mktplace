@@ -38,6 +38,20 @@ export interface NaoLidas {
   aguardando_resposta?: number | null;
   /** true = a leitura bateu o teto de paginas: o numero e' um piso. */
   conversas_truncado?: boolean | null;
+  /** Fila: das que aguardam resposta, quantas esperam ate' 1 h, 1-4 h, 4-24 h, mais de 24 h. */
+  aguardando_ate_1h?: number | null;
+  aguardando_1a4h?: number | null;
+  aguardando_4a24h?: number | null;
+  aguardando_mais_24h?: number | null;
+  /** Espera da conversa mais antiga sem resposta (segundos). */
+  espera_max_s?: number | null;
+  /** Tempo de resposta no periodo (segundos): mediana (lojas com app) ou media do Seller Centre (Kokeshi). */
+  tempo_resposta_s?: number | null;
+  tempo_resposta_p90_s?: number | null;
+  respostas?: number | null;
+  respostas_ate_1h_pct?: number | null;
+  respostas_desde?: string | null;
+  tempo_resposta_fonte?: "mediana" | "media_seller_centre" | null;
 }
 
 export interface ChatShopee {
@@ -221,16 +235,59 @@ export interface LinhaAtendimentoCx {
   respondido: CelulaMeta | null;
   nota: CelulaMeta | null;
   contactRate: string;
+  /** Mediana (ou media, Kokeshi) do tempo de resposta; "—" sem medida. */
+  tempoResposta: string;
+  /** Detalhe do tempo (p90, % em ate' 1 h), para o title da celula. */
+  tempoDetalhe: string | null;
+}
+
+export interface LinhaFilaCx {
+  chave: string;
+  marca: string;
+  ate1h: string;
+  de1a4h: string;
+  de4a24h: string;
+  mais24h: string;
+  /** true = ha' conversa esperando ha' mais de 24 h. */
+  atrasada: boolean;
+  maisAntiga: string;
 }
 
 export interface VisaoAtendimentoCx {
   estado: "dado" | "sem_fonte" | "erro";
   motivo: string | null;
   rotuloConversas: string;
-  totais: { conversas: string; aguardando: string; naoLidas: string; foraDaMeta: string[] };
+  totais: { conversas: string; aguardando: string; naoLidas: string; mais24h: string; foraDaMeta: string[] };
   linhas: LinhaAtendimentoCx[];
+  /** Fila do chat por loja (so' lojas com a leitura das faixas). */
+  fila: LinhaFilaCx[];
   /** Uma nota por coisa que falta, no rodape (ausencia nunca parece zero). */
   notas: string[];
+}
+
+/** Duracao legivel: "< 1 min", "12 min", "2 h 05", "3 d 4 h". */
+export function duracao(s: number | null | undefined): string {
+  if (s == null || !Number.isFinite(s) || s < 0) return "—";
+  if (s < 60) return "< 1 min";
+  const min = Math.round(s / 60);
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h} h ${String(min % 60).padStart(2, "0")}`;
+  const d = Math.floor(h / 24);
+  return h % 24 ? `${d} d ${h % 24} h` : `${d} d`;
+}
+
+function tempoDaLoja(n: NaoLidas | undefined): { tempo: string; detalhe: string | null } {
+  if (!n || n.tempo_resposta_s == null) return { tempo: "—", detalhe: null };
+  if (n.tempo_resposta_fonte === "media_seller_centre") {
+    return { tempo: `${duracao(n.tempo_resposta_s)} (média)`, detalhe: "Média do Seller Centre (bot)." };
+  }
+  const partes = [
+    n.respostas != null ? `${inteiro(n.respostas)} respostas` : null,
+    n.tempo_resposta_p90_s != null ? `9 em cada 10 em até ${duracao(n.tempo_resposta_p90_s)}` : null,
+    n.respostas_ate_1h_pct != null ? `${pct(n.respostas_ate_1h_pct)} em até 1 h` : null,
+  ].filter(Boolean);
+  return { tempo: duracao(n.tempo_resposta_s), detalhe: partes.length ? partes.join(" · ") : null };
 }
 
 function celulaMeta(conta: ContaOficial | undefined, codigo: string): CelulaMeta | null {
@@ -267,7 +324,21 @@ export function montarAtendimentoCx(
     respondido: celulaMeta(contas.get(m), COD_RESPONDIDO),
     nota: celulaMeta(contas.get(m), COD_NOTA),
     contactRate: comContactRate && conv != null && ped ? pct((conv / ped) * 100) : "—",
+    tempoResposta: tempoDaLoja(n).tempo,
+    tempoDetalhe: tempoDaLoja(n).detalhe,
   }));
+  const fila: LinhaFilaCx[] = brutas
+    .filter(({ n }) => n?.aguardando_ate_1h != null)
+    .map(({ m, n }) => ({
+      chave: m,
+      marca: rotuloMarca(m),
+      ate1h: inteiro(n?.aguardando_ate_1h),
+      de1a4h: inteiro(n?.aguardando_1a4h),
+      de4a24h: inteiro(n?.aguardando_4a24h),
+      mais24h: inteiro(n?.aguardando_mais_24h),
+      atrasada: (n?.aguardando_mais_24h ?? 0) > 0,
+      maisAntiga: duracao(n?.espera_max_s),
+    }));
 
   const notas: string[] = [];
   if (chat.nao_lidas_estado === "erro") {
@@ -276,7 +347,20 @@ export function montarAtendimentoCx(
     notas.push("Conversas e contact rate: aguardando a coleta com a lista de conversas (shopee_cx_coleta, a cada 2 h).");
   }
   if (!comContactRate) notas.push("Conversas cobrem os últimos 30 dias; contact rate só em 7 e 30 dias.");
-  notas.push("Tempo de resposta: a Shopee não manda esse número pela API; ele será calculado pelas mensagens.");
+  if (brutas.every((b) => b.n?.tempo_resposta_s == null)) {
+    notas.push("Tempo de resposta: aguardando as primeiras respostas medidas pela coleta (a cada 2 h).");
+  } else {
+    const inicio = new Date(`${dados.janela.inicio}T00:00:00-03:00`).getTime();
+    const desde = brutas
+      .map((b) => b.n?.respostas_desde)
+      .filter((d): d is string => !!d)
+      .map((d) => new Date(d).getTime())
+      .filter((t) => Number.isFinite(t) && t > inicio);
+    if (desde.length) {
+      const dia = new Date(Math.min(...desde)).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", timeZone: "America/Sao_Paulo" });
+      notas.push(`Tempo de resposta medido desde ${dia} (início da coleta): o período ainda não está completo.`);
+    }
+  }
   if (brutas.some((b) => b.n?.conversas_truncado)) {
     notas.push("“≥” = a loja tem mais conversas do que a coleta leu: o número é um piso.");
   }
@@ -290,9 +374,11 @@ export function montarAtendimentoCx(
       conversas: inteiro(somar(brutas.map((b) => b.conv))),
       aguardando: inteiro(somar(brutas.map((b) => b.n?.aguardando_resposta))),
       naoLidas: inteiro(somar(brutas.map((b) => b.n?.valor))),
+      mais24h: inteiro(somar(brutas.map((b) => b.n?.aguardando_mais_24h))),
       foraDaMeta: linhas.filter((l) => l.respondido?.fora).map((l) => l.marca),
     },
     linhas,
+    fila,
     notas,
   };
 }
@@ -306,6 +392,11 @@ export const AJUDA_CX = {
   aguardando: "Conversas em que a última mensagem é do comprador: ele está esperando a loja responder.",
   naoLidas: "Conversas com mensagem ainda não aberta pela loja, na última leitura do chat (a cada 2 h).",
   contactRate: "Conversas ÷ pedidos do período: de cada 100 pedidos, quantos viraram conversa no chat.",
+  tempoResposta:
+    "Mediana do tempo entre a primeira mensagem do comprador e a resposta da loja, no período (relógio corrido, sem as respostas automáticas). Metade das respostas sai mais rápido que isso. Kokeshi: média do Seller Centre.",
+  fila:
+    "Conversas em que a última mensagem é do comprador, separadas por quanto tempo ele está esperando, na última leitura do chat (a cada 2 h).",
+  mais24h: "Conversas em que o comprador está esperando a resposta da loja há mais de 24 horas.",
   cancelamentos:
     "Pedidos criados no período e cancelados, por qualquer autor (comprador, loja, Shopee ou logística). Os pedidos não pagos, que a Shopee cancela sozinha, ficam de fora.",
   devolucoes:

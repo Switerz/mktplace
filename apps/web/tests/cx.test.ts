@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   AJUDA_CX,
   carregarCxShopee,
+  duracao,
   carregarPedidosMotivo,
   csvPedidosMotivo,
   hrefCx,
@@ -171,7 +172,7 @@ test("atendimento: conversas, aguardando, % respondido e contact rate por loja",
   assert.equal(rit.conversas, "—", "sem a leitura nova: traco, nunca zero");
   assert.equal(rit.contactRate, "—");
   assert.equal(rit.respondido?.fora, true);
-  assert.deepEqual(v.totais, { conversas: "200", aguardando: "3", naoLidas: "10", foraDaMeta: ["RITUARIA"] });
+  assert.deepEqual(v.totais, { conversas: "200", aguardando: "3", naoLidas: "10", mais24h: "—", foraDaMeta: ["RITUARIA"] });
   assert.ok(v.notas.some((n) => /Tempo de resposta/.test(n)));
 });
 
@@ -332,4 +333,55 @@ test("pareto: cada motivo abre a lista de pedidos (botao com aria-expanded)", ()
   assert.match(tela, /carregarPedidosMotivo\(filtros, tipo, item\.codigo, torreFetch as typeof fetch\)/);
   const v = montarPareto(comConversas(30), rotulo);
   assert.ok(v.itens.every((i) => i.codigo && i.chave.endsWith(i.codigo)));
+});
+
+
+// ---------------------------------------------------------------------------
+// Fila do chat e tempo de resposta (05/11/2026)
+// ---------------------------------------------------------------------------
+test("duracao: minutos, horas e dias legiveis; ausencia vira traco", () => {
+  assert.deepEqual(
+    [duracao(20), duracao(754), duracao(2 * 3600 + 300), duracao(3 * 86400), duracao(26 * 3600), duracao(null)],
+    ["< 1 min", "13 min", "2 h 05", "3 d", "1 d 2 h", "—"],
+  );
+});
+
+test("atendimento: tempo de resposta (mediana) e fila por faixa de espera", () => {
+  const p = comConversas(30);
+  Object.assign(p.chat.nao_lidas[0], {
+    aguardando_ate_1h: 1, aguardando_1a4h: 0, aguardando_4a24h: 1, aguardando_mais_24h: 1, espera_max_s: 2 * 86400,
+    tempo_resposta_s: 754, tempo_resposta_p90_s: 7200, respostas: 40, respostas_ate_1h_pct: 75,
+    respostas_desde: "2026-11-05T13:00:00Z", tempo_resposta_fonte: "mediana",
+  });
+  const v = montarAtendimentoCx(p, rotulo);
+  const apice = v.linhas.find((l) => l.chave === "apice")!;
+  assert.equal(apice.tempoResposta, "13 min");
+  assert.match(apice.tempoDetalhe ?? "", /40 respostas · 9 em cada 10 em até 2 h 00 · 75,0% em até 1 h/);
+  const rit = v.linhas.find((l) => l.chave === "rituaria")!;
+  assert.equal(rit.tempoResposta, "—", "sem medida: traco, nunca zero");
+  assert.deepEqual(v.fila, [{ chave: "apice", marca: "APICE", ate1h: "1", de1a4h: "0", de4a24h: "1", mais24h: "1",
+    atrasada: true, maisAntiga: "2 d" }]);
+  assert.equal(v.totais.mais24h, "1");
+  assert.ok(v.notas.some((n) => /medido desde 05\/11/.test(n)), "periodo incompleto avisa");
+  assert.ok(!v.notas.some((n) => /aguardando as primeiras respostas/.test(n)));
+});
+
+test("atendimento: Kokeshi mostra a media do Seller Centre", () => {
+  const p = comConversas(30);
+  Object.assign(p.chat.nao_lidas[0], { tempo_resposta_s: 2100, tempo_resposta_fonte: "media_seller_centre" });
+  const v = montarAtendimentoCx(p, rotulo);
+  assert.equal(v.linhas.find((l) => l.chave === "apice")!.tempoResposta, "35 min (média)");
+});
+
+test("atendimento: sem respostas medidas, o rodape diz que a coleta ainda vai medir", () => {
+  const v = montarAtendimentoCx(comConversas(30), rotulo);
+  assert.ok(v.notas.some((n) => /aguardando as primeiras respostas/.test(n)));
+  assert.deepEqual(v.fila, []);
+});
+
+test("tela: fila do chat e coluna de tempo com ⓘ", () => {
+  const tela = readFileSync(new URL("../app/cx/CxConteudo.tsx", import.meta.url), "utf8");
+  assert.ok(tela.includes("<ThAjuda ajuda={AJUDA_CX.tempoResposta}>Tempo resp.</ThAjuda>"));
+  assert.ok(tela.includes('data-testid="cx-fila"'));
+  assert.ok(tela.includes("<InfoDica texto={AJUDA_CX.fila}"));
 });

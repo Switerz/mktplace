@@ -689,7 +689,8 @@ MOTIVO_SEM_COLETA = "Aguardando a primeira coleta de CX da Shopee no Airflow (DA
 
 SQL_TABELAS_CX = (
     "SELECT to_regclass('raw.shopee_returns') IS NOT NULL AS returns, "
-    "to_regclass('raw.shopee_chat_snapshot') IS NOT NULL AS chat"
+    "to_regclass('raw.shopee_chat_snapshot') IS NOT NULL AS chat, "
+    "to_regclass('raw.shopee_chat_respostas') IS NOT NULL AS respostas"
 )
 
 #: Status da devolucao na Shopee (04/11/2026: ACCEPTED, CANCELLED, PROCESSING,
@@ -736,13 +737,36 @@ SELECT DISTINCT ON (brand) brand AS marca, unread_count, captured_at,
        (to_jsonb(s) ->> 'conversas_7d')::int        AS conversas_7d,
        (to_jsonb(s) ->> 'conversas_30d')::int       AS conversas_30d,
        (to_jsonb(s) ->> 'aguardando_resposta')::int AS aguardando_resposta,
-       (to_jsonb(s) ->> 'conversas_truncado')::boolean AS conversas_truncado
+       (to_jsonb(s) ->> 'conversas_truncado')::boolean AS conversas_truncado,
+       (to_jsonb(s) ->> 'aguardando_ate_1h')::int   AS aguardando_ate_1h,
+       (to_jsonb(s) ->> 'aguardando_1a4h')::int     AS aguardando_1a4h,
+       (to_jsonb(s) ->> 'aguardando_4a24h')::int    AS aguardando_4a24h,
+       (to_jsonb(s) ->> 'aguardando_mais_24h')::int AS aguardando_mais_24h,
+       (to_jsonb(s) ->> 'espera_max_s')::int        AS espera_max_s,
+       (to_jsonb(s) ->> 'tempo_resposta_medio_s')::int AS tempo_resposta_medio_s
   FROM {tabela} s
  WHERE brand = ANY(:marcas)
  ORDER BY brand, captured_at DESC
 """
 SQL_NAO_LIDAS = _SQL_NAO_LIDAS.format(tabela="raw.shopee_chat_snapshot")
 SQL_NAO_LIDAS_EXPORT = _SQL_NAO_LIDAS.format(tabela="marts.shopee_chat_export")
+
+#: Tempo de resposta do chat (05/11/2026): uma linha por resposta da loja
+#: (`shopee_cx_coleta` + `get_message`). Mediana e p90 da espera, sem as
+#: respostas automaticas (origem com "auto" ou "bot").
+SQL_TEMPO_RESPOSTA = """
+SELECT brand AS marca,
+       COUNT(*) AS respostas,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY espera_s) AS mediana_s,
+       percentile_cont(0.9) WITHIN GROUP (ORDER BY espera_s) AS p90_s,
+       COUNT(*) FILTER (WHERE espera_s <= 3600) AS ate_1h,
+       MIN(respondido_em) AS desde
+  FROM raw.shopee_chat_respostas
+ WHERE brand = ANY(:marcas)
+   AND respondido_em >= :desde
+   AND COALESCE(origem, '') !~* '(auto|bot)'
+ GROUP BY brand
+"""
 
 #: O bot manda a lista inteira de devolucoes dos ultimos 30 dias: a Kokeshi so'
 #: tem "zero medido" depois da primeira carga de devolucoes.
@@ -797,7 +821,8 @@ def _tabelas_cx(consultar: Consultar) -> Optional[dict]:
     if linhas is None:
         return None
     r = linhas[0] if linhas else {}
-    return {"returns": bool(r.get("returns")), "chat": bool(r.get("chat"))}
+    return {"returns": bool(r.get("returns")), "chat": bool(r.get("chat")),
+            "respostas": bool(r.get("respostas"))}
 
 
 def _devolucoes_shopee(consultar: Consultar, marcas: list[str], janela: Janela,
@@ -895,9 +920,49 @@ def _nao_lidas(consultar: Consultar, marcas: list[str],
                  conversas_30d=_int(r.get("conversas_30d")),
                  aguardando_resposta=_int(r.get("aguardando_resposta")),
                  conversas_truncado=(r.get("conversas_truncado")
-                                     if isinstance(r.get("conversas_truncado"), bool) else None))
+                                     if isinstance(r.get("conversas_truncado"), bool) else None),
+                 aguardando_ate_1h=_int(r.get("aguardando_ate_1h")),
+                 aguardando_1a4h=_int(r.get("aguardando_1a4h")),
+                 aguardando_4a24h=_int(r.get("aguardando_4a24h")),
+                 aguardando_mais_24h=_int(r.get("aguardando_mais_24h")),
+                 espera_max_s=_int(r.get("espera_max_s")),
+                 tempo_resposta_s=_int(r.get("tempo_resposta_medio_s")),
+                 tempo_resposta_fonte=("media_seller_centre"
+                                       if _int(r.get("tempo_resposta_medio_s")) is not None else None))
         for r in linhas if str(r.get("marca")) in marcas
     ]
+
+
+def _com_tempo_resposta(consultar: Consultar, nao_lidas: list[NaoLidas], marcas: list[str],
+                        existe: Optional[bool], desde: datetime) -> list[NaoLidas]:
+    """Junta a mediana do tempo de resposta (lojas com app) em cada foto.
+
+    Tabela ausente ou falha: as fotos seguem sem tempo (None, nunca zero).
+    """
+    if not existe or not marcas:
+        return nao_lidas
+    linhas = _rodar(consultar, "tempo_resposta", SQL_TEMPO_RESPOSTA, {"marcas": marcas, "desde": desde})
+    if not linhas:
+        return nao_lidas
+    por_marca = {str(r.get("marca")): r for r in linhas}
+    out = []
+    for n in nao_lidas:
+        r = por_marca.get(n.marca)
+        total = _int(r.get("respostas")) if r else None
+        if not r or not total:
+            out.append(n)
+            continue
+        ate_1h = _int(r.get("ate_1h")) or 0
+        mediana, p90 = r.get("mediana_s"), r.get("p90_s")
+        out.append(n.model_copy(update={
+            "tempo_resposta_s": None if mediana is None else int(round(float(mediana))),
+            "tempo_resposta_p90_s": None if p90 is None else int(round(float(p90))),
+            "respostas": total,
+            "respostas_ate_1h_pct": round(ate_1h * 100 / total, 1),
+            "respostas_desde": _utc(r.get("desde")),
+            "tempo_resposta_fonte": "mediana",
+        }))
+    return out
 
 
 def _juntar_estados(a: str, b: str) -> str:
@@ -999,6 +1064,9 @@ def montar_cx_shopee(*, brands: Optional[list[str]] = None, dias: int = JANELA_P
 
     estado_nl, nao_lidas = _nao_lidas(consultar, marcas_shopee,
                                       None if tabelas is None else tabelas["chat"])
+    nao_lidas = _com_tempo_resposta(consultar, nao_lidas, marcas_shopee,
+                                    None if tabelas is None else tabelas.get("respostas"),
+                                    agora - timedelta(days=janela.dias))
     if marcas_exp:
         estado_exp, nl_exp = _nao_lidas(consultar_torre, marcas_exp,
                                         None if tab_exp is None else tab_exp["chat"],

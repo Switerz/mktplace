@@ -121,6 +121,23 @@ class NaoLidas(BaseModel):
     aguardando_resposta: Optional[int] = None
     #: True = bateu o teto de paginas: o numero e' um piso.
     conversas_truncado: Optional[bool] = None
+    #: Fila (05/11/2026): das que aguardam resposta, quantas esperam ate' 1 h,
+    #: 1-4 h, 4-24 h e mais de 24 h, e a espera da mais antiga (segundos).
+    aguardando_ate_1h: Optional[int] = None
+    aguardando_1a4h: Optional[int] = None
+    aguardando_4a24h: Optional[int] = None
+    aguardando_mais_24h: Optional[int] = None
+    espera_max_s: Optional[int] = None
+    #: Tempo de resposta no periodo (segundos). Lojas com app: mediana das
+    #: respostas da loja (`raw.shopee_chat_respostas`, sem automaticas);
+    #: Kokeshi: media que o bot le no Seller Centre.
+    tempo_resposta_s: Optional[int] = None
+    tempo_resposta_p90_s: Optional[int] = None
+    respostas: Optional[int] = None
+    respostas_ate_1h_pct: Optional[float] = None
+    #: Primeira resposta medida (a coleta comecou em 05/11/2026).
+    respostas_desde: Optional[datetime] = None
+    tempo_resposta_fonte: Optional[Literal["mediana", "media_seller_centre"]] = None
 
 
 class LinhaDevolucao(BaseModel):

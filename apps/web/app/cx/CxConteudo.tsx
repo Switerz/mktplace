@@ -31,6 +31,7 @@ import {
   nomeDoCsvPedidos,
   tipoDoItem,
   type ItemPareto,
+  type LinhaFilaCx,
   type ResultadoPedidos,
   montarAtendimentoCx,
   montarPareto,
@@ -177,7 +178,7 @@ function Atendimento({ v }: { v: VisaoAtendimentoCx }) {
             itens={[
               [v.rotuloConversas, v.totais.conversas, AJUDA_CX.conversas],
               ["Aguardando resposta", v.totais.aguardando, AJUDA_CX.aguardando],
-              ["Não lidas agora", v.totais.naoLidas, AJUDA_CX.naoLidas],
+              ["Esperando há mais de 24 h", v.totais.mais24h, AJUDA_CX.mais24h],
               ["Lojas fora da meta", v.totais.foraDaMeta.length ? v.totais.foraDaMeta.join(", ") : "Nenhuma"],
             ]}
           />
@@ -192,7 +193,7 @@ function Atendimento({ v }: { v: VisaoAtendimentoCx }) {
                   <ThAjuda ajuda={AJUDA_CX.naoLidas}>Não lidas</ThAjuda>
                   <th scope="col" className={TH}>% respondido</th>
                   <th scope="col" className={TH}>Nota</th>
-                  <th scope="col" className={TH}>Tempo resp.</th>
+                  <ThAjuda ajuda={AJUDA_CX.tempoResposta}>Tempo resp.</ThAjuda>
                   <ThAjuda ajuda={AJUDA_CX.contactRate}>Contact rate</ThAjuda>
                 </tr>
               </thead>
@@ -205,17 +206,58 @@ function Atendimento({ v }: { v: VisaoAtendimentoCx }) {
                     <td className={TD}>{l.naoLidas}</td>
                     <td className={TD}><ComMeta c={l.respondido} /></td>
                     <td className={TD}><ComMeta c={l.nota} /></td>
-                    <td className={`${TD} text-ink-faint`}>—</td>
+                    <td className={`${TD} ${l.tempoResposta === "—" ? "text-ink-faint" : ""}`} title={l.tempoDetalhe ?? undefined}>
+                      {l.tempoResposta}
+                    </td>
                     <td className={TD}>{l.contactRate}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+          {v.fila.length > 0 && <FilaChat linhas={v.fila} />}
           <Notas notas={v.notas} />
         </div>
       )}
     </Panel>
+  );
+}
+
+function FilaChat({ linhas }: { linhas: LinhaFilaCx[] }) {
+  return (
+    <section aria-labelledby="cx-fila-titulo" className="flex flex-col gap-2" data-testid="cx-fila">
+      <h3 id="cx-fila-titulo" className="flex items-center gap-1 text-sm font-semibold text-ink">
+        Fila do chat: há quanto tempo o comprador espera
+        <InfoDica texto={AJUDA_CX.fila} titulo="Fila do chat" />
+      </h3>
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse text-sm">
+          <caption className="sr-only">Conversas aguardando resposta por tempo de espera</caption>
+          <thead>
+            <tr className="border-b border-line text-left text-xs font-semibold uppercase tracking-wide text-ink-faint">
+              <th scope="col" className="py-2 pr-3">Marca</th>
+              <th scope="col" className={TH}>Até 1 h</th>
+              <th scope="col" className={TH}>1 a 4 h</th>
+              <th scope="col" className={TH}>4 a 24 h</th>
+              <th scope="col" className={TH}>Mais de 24 h</th>
+              <th scope="col" className={TH}>Mais antiga</th>
+            </tr>
+          </thead>
+          <tbody>
+            {linhas.map((l) => (
+              <tr key={l.chave} className="border-b border-line last:border-b-0">
+                <th scope="row" className="py-2 pr-3 text-left font-semibold text-ink">{l.marca}</th>
+                <td className={TD}>{l.ate1h}</td>
+                <td className={TD}>{l.de1a4h}</td>
+                <td className={TD}>{l.de4a24h}</td>
+                <td className={`${TD} ${l.atrasada ? "font-semibold text-crit-ink" : ""}`}>{l.mais24h}</td>
+                <td className={TD}>{l.maisAntiga}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
