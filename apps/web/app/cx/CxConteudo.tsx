@@ -16,7 +16,7 @@
  *      cancelamos.
  * O que falta vira uma nota curta no rodape do bloco (ausencia nunca e' zero).
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import Chip from "@/components/ui/Chip";
 import InfoDica from "@/components/ui/InfoDica";
@@ -25,6 +25,13 @@ import StateBlock from "@/components/ui/StateBlock";
 import {
   AJUDA_CX,
   carregarCxShopee,
+  carregarPedidosMotivo,
+  csvPedidosMotivo,
+  montarPedidosMotivo,
+  nomeDoCsvPedidos,
+  tipoDoItem,
+  type ItemPareto,
+  type ResultadoPedidos,
   montarAtendimentoCx,
   montarPareto,
   montarStatusMarcas,
@@ -87,7 +94,7 @@ export default function CxConteudo({ filtros }: { filtros: FiltrosCx }) {
       <p className="text-xs text-ink-muted" data-testid="cx-escopo">{escopo}</p>
       {!marca && <StatusMarcas itens={montarStatusMarcas(dados, brandLabel)} />}
       <Atendimento v={montarAtendimentoCx(dados, brandLabel)} />
-      <Pareto v={montarPareto(dados, brandLabel)} />
+      <Pareto v={montarPareto(dados, brandLabel)} filtros={filtros} />
     </>
   );
 }
@@ -221,7 +228,12 @@ const COR_TIPO: Record<string, string> = {
   Cancelamento: "bg-accent",
 };
 
-function Pareto({ v }: { v: VisaoPareto }) {
+function Pareto({ v, filtros }: { v: VisaoPareto; filtros: FiltrosCx }) {
+  const [aberto, setAberto] = useState<ItemPareto | null>(null);
+  // trocar de filtro fecha a lista (ela seria de outro recorte)
+  useEffect(() => {
+    setAberto(null);
+  }, [filtros.marca, filtros.dias]);
   return (
     <Panel titulo="Pareto dos problemas" descricao="Devoluções e cancelamentos por motivo" aria-label="Pareto dos problemas">
       <div className="flex flex-col gap-4" data-testid="cx-pareto">
@@ -243,8 +255,18 @@ function Pareto({ v }: { v: VisaoPareto }) {
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-5">
             <ol className="flex min-w-0 flex-col gap-2.5 xl:col-span-3" aria-label="Motivos, do maior para o menor">
               {v.itens.map((i) => (
-                <li key={i.chave} className="flex flex-col gap-1">
-                  <div className="flex items-baseline justify-between gap-3 text-sm">
+                <li key={i.chave}>
+                  <button
+                    type="button"
+                    onClick={() => setAberto(aberto?.chave === i.chave ? null : i)}
+                    aria-expanded={aberto?.chave === i.chave}
+                    aria-controls="cx-pedidos-motivo"
+                    title="Ver os pedidos deste motivo"
+                    className={`flex w-full flex-col gap-1 rounded-md px-1.5 py-1 text-left hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                      aberto?.chave === i.chave ? "bg-raised ring-1 ring-line-strong" : ""
+                    }`}
+                  >
+                  <div className="flex w-full items-baseline justify-between gap-3 text-sm">
                     <span className="min-w-0 break-words text-ink">
                       {i.rotulo}
                       {!i.mapeado && <span className="ml-1.5 text-xs text-warn-ink">(sem tradução)</span>}
@@ -254,9 +276,10 @@ function Pareto({ v }: { v: VisaoPareto }) {
                       {i.quantidade} <span className="text-xs">· {i.pct} · acum. {i.acumulado}</span>
                     </span>
                   </div>
-                  <div className="h-2 overflow-hidden rounded-full bg-raised" aria-hidden="true">
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-raised" aria-hidden="true">
                     <div className={`h-full rounded-full ${COR_TIPO[i.tipo] ?? "bg-accent"}`} style={{ width: `${i.largura}%` }} />
                   </div>
+                  </button>
                 </li>
               ))}
               {v.resto && <li className="text-xs text-ink-faint">{v.resto}</li>}
@@ -288,9 +311,114 @@ function Pareto({ v }: { v: VisaoPareto }) {
             </div>
           </div>
         )}
+        {aberto && <PedidosDoMotivo item={aberto} filtros={filtros} fechar={() => setAberto(null)} />}
         <Notas notas={v.notas} />
       </div>
     </Panel>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Pedidos de um motivo (clique no Pareto)
+// ---------------------------------------------------------------------------
+function baixarCsv(conteudo: string, nome: string): void {
+  let url: string | null = null;
+  try {
+    url = URL.createObjectURL(new Blob([conteudo], { type: "text/csv;charset=utf-8;" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = nome;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  } finally {
+    if (url) URL.revokeObjectURL(url);
+  }
+}
+
+function PedidosDoMotivo({ item, filtros, fechar }: { item: ItemPareto; filtros: FiltrosCx; fechar: () => void }) {
+  const tipo = tipoDoItem(item);
+  const [r, setR] = useState<ResultadoPedidos | null>(null);
+  const caixa = useRef<HTMLElement>(null);
+  // a lista abre abaixo da tabela por marca: leva o olho ate' ela
+  useEffect(() => {
+    // chaves: o Chrome novo devolve uma Promise de scrollIntoView, e o React
+    // trataria o retorno como funcao de limpeza
+    caixa.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [item.chave]);
+  useEffect(() => {
+    let vivo = true;
+    setR(null);
+    carregarPedidosMotivo(filtros, tipo, item.codigo, torreFetch as typeof fetch).then((x) => {
+      if (vivo) setR(x);
+    });
+    return () => {
+      vivo = false;
+    };
+  }, [filtros, tipo, item.codigo]);
+
+  const v = r?.ok && r.dados.estado !== "erro" ? montarPedidosMotivo(r.dados, brandLabel) : null;
+  return (
+    <section ref={caixa} id="cx-pedidos-motivo" aria-label={`Pedidos: ${item.rotulo}`} className="rounded-lg border border-line bg-surface p-3" data-testid="cx-pedidos-motivo">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-ink">
+          {item.tipo} · {item.rotulo}
+          {v && <span className="ml-2 text-xs font-normal text-ink-muted">{v.resumo}</span>}
+        </h3>
+        <div className="flex items-center gap-2">
+          {v && v.linhas.length > 0 && r?.ok && (
+            <button
+              type="button"
+              onClick={() => baixarCsv(csvPedidosMotivo(r.dados, item.rotulo), nomeDoCsvPedidos(tipo, item.codigo, filtros, new Date()))}
+              className="min-h-11 rounded-md border border-line-strong px-3 text-xs font-semibold text-ink hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              Baixar CSV
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={fechar}
+            className="min-h-11 rounded-md px-3 text-xs font-semibold text-ink-muted hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            Fechar
+          </button>
+        </div>
+      </div>
+      {!r ? (
+        <StateBlock tipo="carregando" compacto titulo="Carregando os pedidos" />
+      ) : !r.ok || !v ? (
+        <StateBlock tipo="erro" compacto titulo="Não foi possível carregar os pedidos" descricao={r.ok ? r.dados.motivo_indisponivel ?? undefined : r.motivo} />
+      ) : !v.linhas.length ? (
+        <StateBlock tipo="vazio" compacto titulo={r.dados.motivo_indisponivel ?? "Nenhum pedido com este motivo no período."} />
+      ) : (
+        <div className="mt-2 max-h-96 overflow-auto">
+          <table className="w-full border-collapse text-sm">
+            <caption className="sr-only">Pedidos com o motivo {item.rotulo}</caption>
+            <thead className="sticky top-0 bg-surface">
+              <tr className="border-b border-line text-left text-xs font-semibold text-ink-faint">
+                <th scope="col" className="py-2 pr-3">Pedido</th>
+                <th scope="col" className="px-2 py-2">Marca</th>
+                <th scope="col" className="px-2 py-2">Dia</th>
+                <th scope="col" className="px-2 py-2">Situação</th>
+                {v.comValor && <th scope="col" className={TH}>Reembolsado</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {v.linhas.map((l) => (
+                <tr key={l.chave} className="border-b border-line last:border-b-0">
+                  <td className="whitespace-nowrap py-1.5 pr-3 font-mono text-xs text-ink">{l.pedido}</td>
+                  <td className="whitespace-nowrap px-2 py-1.5 text-ink-muted">{l.marca}</td>
+                  <td className="whitespace-nowrap px-2 py-1.5 tabular-nums text-ink-muted">{l.dia}</td>
+                  <td className="whitespace-nowrap px-2 py-1.5 text-ink-muted">{l.situacao}</td>
+                  {v.comValor && <td className={TD}>{l.valor}</td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {v && <Notas notas={v.avisos} />}
+    </section>
   );
 }
 

@@ -1,7 +1,8 @@
 """Aba CX (menu principal) — rotas read-only `/api/v1/cx/*`.
 
   * `/shopee`      chat (Saude da Conta) + cancelamentos e devolucoes da Shopee;
-  * `/atendimento` cancelamentos e devolucoes dos tres canais (base do CX-MKT-1).
+  * `/atendimento` cancelamentos e devolucoes dos tres canais (base do CX-MKT-1);
+  * `/shopee/pedidos` os pedidos de um motivo do Pareto (CX-PEDIDOS-MOTIVO).
 
 Flag `settings.cx_api_enabled` (ligada por padrao): desligada, toda requisicao
 responde 404 antes de qualquer consulta.
@@ -9,13 +10,20 @@ responde 404 antes de qualquer consulta.
 Le o Data Mart direto (ver `cx_atendimento_service`). SOMENTE GET. Entrada fora
 da allowlist vira 422 com mensagem FIXA, sem ecoar o que veio.
 """
-from typing import Optional
+import re
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.config import settings
-from app.schemas.cx_atendimento import JANELAS_DIAS, AtendimentoResponse, CxShopeeResponse
+from app.schemas.cx_atendimento import (
+    JANELAS_DIAS,
+    AtendimentoResponse,
+    CxShopeeResponse,
+    PedidosMotivoResponse,
+)
 from app.services import cx_atendimento_service as svc
+from app.services import cx_pedidos_service
 
 
 def exigir_flag() -> None:
@@ -75,3 +83,20 @@ def atendimento(
 ):
     """Cancelamentos, reclamacoes e devolucoes por canal, cada bloco com estado explicito."""
     return svc.montar_atendimento(brands=brands, dias=dias)
+
+
+_RE_CODIGO = re.compile(r"^[a-z0-9_]{1,80}$")
+_MSG_MOTIVO = "Motivo invalido."
+
+
+@router.get("/shopee/pedidos", response_model=PedidosMotivoResponse)
+def cx_shopee_pedidos(
+    tipo: Literal["cancelamento", "devolucao"] = Query(..., description="cancelamento ou devolucao"),
+    motivo: str = Query(..., description="Codigo do motivo, como vem no Pareto (`codigo`)."),
+    brands: Optional[list[str]] = Depends(brands_query),
+    dias: int = Depends(dias_query),
+):
+    """Pedidos de um motivo do Pareto: numero, marca, dia, situacao e valor (ate' 500)."""
+    if not _RE_CODIGO.match(motivo):
+        raise HTTPException(422, _MSG_MOTIVO)
+    return cx_pedidos_service.montar_pedidos_motivo(tipo=tipo, codigo=motivo, brands=brands, dias=dias)

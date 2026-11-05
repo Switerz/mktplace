@@ -379,6 +379,8 @@ export const MAX_ITENS_PARETO = 10;
 
 export interface ItemPareto {
   chave: string;
+  /** Codigo do motivo na API (abre a lista de pedidos dele). */
+  codigo: string;
   rotulo: string;
   tipo: "Devolução" | "Cancelamento";
   natureza: string;
@@ -430,6 +432,7 @@ export function montarPareto(
     acum += m.quantidade;
     return {
       chave: `${m.tipo}:${m.codigo}`,
+      codigo: m.codigo,
       rotulo: m.rotulo,
       tipo: m.tipo,
       natureza: ROTULO_NATUREZA[m.natureza] ?? m.natureza,
@@ -487,4 +490,133 @@ export function montarPareto(
     })),
     notas,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Pedidos de um motivo do Pareto (CX-PEDIDOS-MOTIVO, 05/11/2026)
+// `GET /api/v1/cx/shopee/pedidos?tipo=&motivo=&brands=&dias=` (ate' 500).
+// ---------------------------------------------------------------------------
+export type TipoPedidos = "cancelamento" | "devolucao";
+
+export interface PedidoMotivo {
+  marca: string;
+  pedido: string | null;
+  devolucao: string | null;
+  dia: string | null;
+  situacao: string | null;
+  valor: number | null;
+}
+
+export interface PedidosMotivoResponse {
+  gerado_em: string;
+  tipo: TipoPedidos;
+  codigo: string;
+  rotulo: string | null;
+  estado: "dado" | "vazio_legitimo" | "erro";
+  motivo_indisponivel: string | null;
+  total: number | null;
+  truncado: boolean;
+  parcial: boolean;
+  numero_publico: boolean;
+  pedidos: PedidoMotivo[];
+}
+
+export const ROTA_API_CX_PEDIDOS = "/api/v1/cx/shopee/pedidos";
+
+export function tipoDoItem(i: Pick<ItemPareto, "tipo">): TipoPedidos {
+  return i.tipo === "Devolução" ? "devolucao" : "cancelamento";
+}
+
+export function urlPedidosMotivo(base: string, f: FiltrosCx, tipo: TipoPedidos, codigo: string): string {
+  const qs = new URLSearchParams({ tipo, motivo: codigo, dias: String(f.dias) });
+  if (f.marca) qs.set("brands", f.marca);
+  return `${base}${ROTA_API_CX_PEDIDOS}?${qs.toString()}`;
+}
+
+export type ResultadoPedidos = { ok: true; dados: PedidosMotivoResponse } | { ok: false; motivo: string };
+
+/** Nunca lanca: falha volta como `{ ok: false }`. */
+export async function carregarPedidosMotivo(
+  f: FiltrosCx,
+  tipo: TipoPedidos,
+  codigo: string,
+  fetchImpl: typeof fetch = fetch,
+  base: string = API_URL,
+  timeoutMs: number = TIMEOUT_API_MS,
+): Promise<ResultadoPedidos> {
+  const controle = new AbortController();
+  const timer = setTimeout(() => controle.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(urlPedidosMotivo(base, f, tipo, codigo), { cache: "no-store", signal: controle.signal });
+    if (!res.ok) return { ok: false, motivo: `A API respondeu ${res.status}.` };
+    const json = (await res.json()) as PedidosMotivoResponse;
+    if (!json || !Array.isArray(json.pedidos)) return { ok: false, motivo: "Resposta inválida da API." };
+    return { ok: true, dados: json };
+  } catch {
+    return { ok: false, motivo: controle.signal.aborted ? MOTIVO_TIMEOUT : "Não foi possível contatar a API." };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export interface LinhaPedidoCx {
+  chave: string;
+  pedido: string;
+  marca: string;
+  dia: string;
+  situacao: string;
+  valor: string;
+}
+
+function diaBr(iso: string | null): string {
+  if (!iso) return "—";
+  const [a, m, d] = iso.slice(0, 10).split("-");
+  return d && m && a ? `${d}/${m}/${a}` : "—";
+}
+
+export function montarPedidosMotivo(dados: PedidosMotivoResponse, rotuloMarca: (m: string) => string) {
+  const linhas: LinhaPedidoCx[] = dados.pedidos.map((p, i) => ({
+    chave: `${p.marca}:${p.devolucao ?? p.pedido ?? i}`,
+    pedido: p.pedido ?? "—",
+    marca: rotuloMarca(p.marca),
+    dia: diaBr(p.dia),
+    situacao: p.situacao ?? "—",
+    valor: p.valor == null ? "—" : reais(p.valor),
+  }));
+  const qtd = inteiro(dados.total);
+  const resumo = dados.truncado
+    ? `${qtd} pedidos · mostrando os ${inteiro(linhas.length)} mais recentes`
+    : `${qtd} pedido(s)`;
+  const avisos: string[] = [];
+  if (dados.parcial) avisos.push("Uma das fontes não respondeu: a lista pode estar incompleta.");
+  if (!dados.numero_publico) avisos.push("O número do pedido está retido nesta configuração da Torre.");
+  return { linhas, resumo, avisos, comValor: dados.tipo === "devolucao" };
+}
+
+function celulaCsv(v: string): string {
+  const seguro = /^[=+\-@]/.test(v) ? `'${v}` : v; // nunca vira formula no Excel
+  return /[";\n]/.test(seguro) ? `"${seguro.replace(/"/g, '""')}"` : seguro;
+}
+
+/** CSV com `;` (Excel pt-BR). Valor com virgula decimal. */
+export function csvPedidosMotivo(dados: PedidosMotivoResponse, rotulo: string): string {
+  const cab = ["pedido", "devolucao", "marca", "dia", "situacao", "valor_reembolsado", "motivo"];
+  const linhas = dados.pedidos.map((p) =>
+    [
+      p.pedido ?? "",
+      p.devolucao ?? "",
+      p.marca,
+      p.dia ?? "",
+      p.situacao ?? "",
+      p.valor == null ? "" : String(p.valor).replace(".", ","),
+      rotulo,
+    ]
+      .map(celulaCsv)
+      .join(";"),
+  );
+  return "﻿" + [cab.join(";"), ...linhas].join("\n");
+}
+
+export function nomeDoCsvPedidos(tipo: TipoPedidos, codigo: string, f: FiltrosCx, agora: Date): string {
+  return `cx-${tipo}-${codigo}${f.marca ? `-${f.marca}` : ""}-${f.dias}d-${agora.toISOString().slice(0, 10)}.csv`;
 }

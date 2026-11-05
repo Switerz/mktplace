@@ -179,3 +179,37 @@ class CxShopeeResponse(BaseModel):
     chat: ChatShopee
     atendimento: CanalAtendimento
     devolucoes: DevolucoesShopee
+
+
+# ---------------------------------------------------------------------------
+# CX-PEDIDOS-MOTIVO (05/11/2026): os pedidos de um motivo do Pareto
+# ---------------------------------------------------------------------------
+class PedidoMotivo(BaseModel):
+    marca: str
+    #: Numero do pedido na Shopee. None quando a Torre retem o numero
+    #: (`expedicao_numero_pedido_publico` desligada).
+    pedido: Optional[str] = None
+    #: Numero da solicitacao de devolucao (so' devolucao).
+    devolucao: Optional[str] = None
+    dia: Optional[date] = None
+    situacao: Optional[str] = None
+    #: Valor reembolsado (so' devolucao reembolsada).
+    valor: Optional[float] = None
+
+
+class PedidosMotivoResponse(BaseModel):
+    gerado_em: datetime
+    janela: Janela
+    tipo: Literal["cancelamento", "devolucao"]
+    codigo: str
+    rotulo: Optional[str] = None
+    estado: Literal["dado", "vazio_legitimo", "erro"]
+    motivo_indisponivel: Optional[str] = None
+    #: Total exato do motivo (o numero da barra do Pareto).
+    total: Optional[int] = None
+    #: True = a lista mostra so' os mais recentes (teto de 500).
+    truncado: bool = False
+    #: True = uma das fontes (Data Mart ou Neon) falhou; a lista esta' incompleta.
+    parcial: bool = False
+    numero_publico: bool = True
+    pedidos: list[PedidoMotivo] = []

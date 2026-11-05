@@ -8,14 +8,21 @@ import test from "node:test";
 import {
   AJUDA_CX,
   carregarCxShopee,
+  carregarPedidosMotivo,
+  csvPedidosMotivo,
   hrefCx,
   lerFiltrosCx,
   montarAtendimentoCx,
   montarPareto,
+  montarPedidosMotivo,
   montarStatusMarcas,
+  reais,
   problemaNoPayloadCx,
+  tipoDoItem,
   urlCxShopee,
+  urlPedidosMotivo,
   type ChatShopee,
+  type PedidosMotivoResponse,
 } from "../src/lib/cx.ts";
 import { CX_NAV, getRouteTitle, navSections } from "../src/components/shell/nav-config.ts";
 
@@ -266,4 +273,63 @@ test("filtro aplica sozinho: sem botao Aplicar (so' no noscript) e navega por hr
   assert.match(f, /<noscript>[\s\S]*Aplicar[\s\S]*<\/noscript>/);
   const pagina = readFileSync(new URL("../app/cx/page.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(pagina, /Aplicar/);
+});
+
+// ---------------------------------------------------------------------------
+// 05/11/2026: pedidos de um motivo do Pareto
+// ---------------------------------------------------------------------------
+function pedidosResp(extra: Partial<PedidosMotivoResponse> = {}): PedidosMotivoResponse {
+  return {
+    gerado_em: "2026-11-05T15:00:00Z", tipo: "devolucao", codigo: "spilled_contents", rotulo: "Produto vazou",
+    estado: "dado", motivo_indisponivel: null, total: 2, truncado: false, parcial: false, numero_publico: true,
+    pedidos: [
+      { marca: "lescent", pedido: "251102ABC", devolucao: "R9", dia: "2026-11-02", situacao: "Reembolsada", valor: 59.9 },
+      { marca: "lescent", pedido: "=CMD()", devolucao: null, dia: null, situacao: "Solicitada", valor: null },
+    ],
+    ...extra,
+  };
+}
+
+test("pedidos do motivo: url com tipo, motivo, periodo e marca", () => {
+  const f = { marca: "apice", dias: 7 as const };
+  assert.equal(urlPedidosMotivo("/torre-api", f, "cancelamento", "out_of_stock"),
+    "/torre-api/api/v1/cx/shopee/pedidos?tipo=cancelamento&motivo=out_of_stock&dias=7&brands=apice");
+  assert.equal(tipoDoItem({ tipo: "Devolução" }), "devolucao");
+  assert.equal(tipoDoItem({ tipo: "Cancelamento" }), "cancelamento");
+});
+
+test("pedidos do motivo: linhas, resumo com teto e avisos", () => {
+  const v = montarPedidosMotivo(pedidosResp(), rotulo);
+  assert.deepEqual(v.linhas[0], { chave: "lescent:R9", pedido: "251102ABC", marca: "LESCENT", dia: "02/11/2026", situacao: "Reembolsada", valor: reais(59.9) });
+  assert.equal(v.linhas[1].valor, "—", "sem reembolso = ausente, nunca R$ 0");
+  assert.equal(v.resumo, "2 pedido(s)");
+  assert.ok(v.comValor);
+  const t = montarPedidosMotivo(pedidosResp({ total: 900, truncado: true, parcial: true, numero_publico: false }), rotulo);
+  assert.equal(t.resumo, "900 pedidos · mostrando os 2 mais recentes");
+  assert.equal(t.avisos.length, 2);
+});
+
+test("pedidos do motivo: CSV com ; , valor com virgula e sem formula", () => {
+  const csv = csvPedidosMotivo(pedidosResp(), "Produto vazou");
+  const [cab, l1, l2] = csv.replace("﻿", "").split("\n");
+  assert.equal(cab, "pedido;devolucao;marca;dia;situacao;valor_reembolsado;motivo");
+  assert.equal(l1, "251102ABC;R9;lescent;2026-11-02;Reembolsada;59,9;Produto vazou");
+  assert.ok(l2.startsWith("'=CMD()"), "celula que comeca com = nao vira formula");
+  assert.ok(csv.startsWith("﻿"));
+});
+
+test("pedidos do motivo: carregar nunca lanca", async () => {
+  const f = { marca: null, dias: 30 as const };
+  const erro = await carregarPedidosMotivo(f, "devolucao", "x", (async () => new Response("", { status: 500 })) as typeof fetch, "");
+  assert.deepEqual(erro, { ok: false, motivo: "A API respondeu 500." });
+  const ok = await carregarPedidosMotivo(f, "devolucao", "x", (async () => Response.json(pedidosResp())) as typeof fetch, "");
+  assert.ok(ok.ok);
+});
+
+test("pareto: cada motivo abre a lista de pedidos (botao com aria-expanded)", () => {
+  const tela = readFileSync(new URL("../app/cx/CxConteudo.tsx", import.meta.url), "utf8");
+  assert.match(tela, /aria-expanded=\{aberto\?\.chave === i\.chave\}/);
+  assert.match(tela, /carregarPedidosMotivo\(filtros, tipo, item\.codigo, torreFetch as typeof fetch\)/);
+  const v = montarPareto(comConversas(30), rotulo);
+  assert.ok(v.itens.every((i) => i.codigo && i.chave.endsWith(i.codigo)));
 });
