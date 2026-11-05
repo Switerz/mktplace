@@ -52,11 +52,16 @@ DDL_ALVO = [
 
 DDL_FONTE = [
     "CREATE SCHEMA gold", "CREATE SCHEMA silver",
+    # T-0055: a fonte do CMV e' o grao de ITEM (so' as colunas que o publisher le).
+    # `data_emissao` TIMESTAMP de proposito: o `::date` da consulta tem de valer
+    # tanto para data quanto para instante.
+    """CREATE TABLE gold.nf_vendas_unificada_v2 (
+        data_mes DATE, data_emissao TIMESTAMP, marca TEXT, canal TEXT, plataforma TEXT, intercompany BOOLEAN,
+        codigo_produto TEXT, receita_produto NUMERIC, custo NUMERIC, custo_provisorio BOOLEAN)""",
+    # a contraprova: o agregado que anda atras da base de item
     """CREATE TABLE gold.nf_vendas_plataforma_sku_mensal (
         data_mes DATE, marca TEXT, canal TEXT, plataforma TEXT, codigo_sku TEXT, receita_produto NUMERIC,
         custo NUMERIC, custo_provisorio NUMERIC, receita_com_custo NUMERIC, ultima_emissao DATE)""",
-    """CREATE TABLE gold.nf_vendas_plataforma_mensal (
-        data_mes DATE, marca TEXT, canal TEXT, plataforma TEXT, receita_produto NUMERIC, custo NUMERIC)""",
     """CREATE TABLE silver.stg_tiktok_payments_by_order (
         brand VARCHAR, transaction_type VARCHAR, order_create_time TIMESTAMP, revenue_amount NUMERIC,
         fee_and_tax_amount NUMERIC, shipping_cost_amount NUMERIC, settlement_amount NUMERIC,
@@ -98,6 +103,18 @@ def bancos():
         fonte.dispose()
 
 
+RUIDO_ITEM = [
+    ("2026-07-01", "2026-07-31 12:00", "kokeshi", "marketplace", "amazon", False),
+    ("2026-07-01", "2026-07-31 12:00", "kokeshi", "marketplace", "outro_marketplace", None),
+    ("2026-07-01", "2026-07-31 12:00", "kokeshi", "marketplace", "mercadolivre", True),   # intercompany
+    ("2026-07-01", "2026-07-31 12:00", "kokeshi", "ecommerce", "mercadolivre", False),    # canal
+    ("2026-07-01", "2026-07-31 12:00", "kokeshi", "ecommerce", None, False),
+    ("2026-07-01", "2026-07-31 12:00", "denavita", "marketplace", "mercadolivre", False),  # marca fora da Torre
+    ("2026-06-01", "2026-06-30 12:00", "kokeshi", "marketplace", "mercadolivre", False),   # outro mes
+    ("2026-08-01", "2026-08-01 12:00", "kokeshi", "marketplace", "tiktokshop", False),     # mes seguinte
+]
+
+
 def semear(alvo, fonte, *, cmv_ml=Decimal(300000), repasse_barbours=True):
     """Julho/2026: kokeshi em ML, TikTok e Shopee; barbours no TikTok. GMV diario constante."""
     with alvo.begin() as c:
@@ -109,18 +126,30 @@ def semear(alvo, fonte, *, cmv_ml=Decimal(300000), repasse_barbours=True):
                 c.execute(text("INSERT INTO marts.fact_marketplace_daily_performance VALUES (:d, :l, :m, :g)"),
                           {"d": d, "l": loja, "m": mkt, "g": round(gmv, 2)})
     with fonte.begin() as c:
-        for t in ("gold.nf_vendas_plataforma_sku_mensal", "gold.nf_vendas_plataforma_mensal",
+        for t in ("gold.nf_vendas_unificada_v2", "gold.nf_vendas_plataforma_sku_mensal",
                   "silver.stg_tiktok_payments_by_order"):
             c.execute(text(f"DELETE FROM {t}"))
         notas = [("kokeshi", "mercadolivre", 1_000_000, cmv_ml), ("kokeshi", "tiktokshop", 990_000, 280_000),
                  ("barbours", "tiktokshop", 500_000, 150_000), ("kokeshi", "shopee", 400_000, 100_000)]
         for marca, plat, rec, custo in notas:
             for sku, frac in (("A", Decimal("0.6")), ("B", Decimal("0.4"))):
+                # Cada SKU em DOIS itens: um `intercompany = false` e um NULL (que a
+                # query do FP&A conta como 'normal'). A soma por celula tem de dar
+                # o mesmo total do agregado -- nem a metade, nem o dobro.
+                for emissao, ic in (("2026-07-15 10:00", False), ("2026-07-31 18:00", None)):
+                    c.execute(text("""INSERT INTO gold.nf_vendas_unificada_v2 VALUES
+                        ('2026-07-01', :e, :m, 'marketplace', :p, :ic, :s, :r, :c, false)"""),
+                              {"e": emissao, "m": marca, "p": plat, "ic": ic, "s": sku,
+                               "r": Decimal(rec) * frac / 2, "c": Decimal(custo) * frac / 2})
                 c.execute(text("""INSERT INTO gold.nf_vendas_plataforma_sku_mensal VALUES
                     ('2026-07-01', :m, 'marketplace', :p, :s, :r, :c, 0, :r, '2026-07-31')"""),
                           {"m": marca, "p": plat, "s": sku, "r": Decimal(rec) * frac, "c": Decimal(custo) * frac})
-            c.execute(text("INSERT INTO gold.nf_vendas_plataforma_mensal VALUES ('2026-07-01', :m, 'marketplace', :p, :r, :c)"),
-                      {"m": marca, "p": plat, "r": rec, "c": custo})
+        # Ruido que a consulta NUNCA pode somar: plataforma fora da Torre,
+        # intercompany, outro canal, marca fora da Torre, outro mes.
+        for mes_, emissao, marca, canal, plat, ic in RUIDO_ITEM:
+            c.execute(text("""INSERT INTO gold.nf_vendas_unificada_v2 VALUES
+                (:d, :e, :m, :canal, :p, :ic, 'Z', 7777777, 1111111, false)"""),
+                      {"d": mes_, "e": emissao, "m": marca, "canal": canal, "p": plat, "ic": ic})
         marcas = ["kokeshi"] + (["barbours"] if repasse_barbours else [])
         for marca in marcas:
             for i in range(10):
@@ -254,7 +283,7 @@ def test_origem_e_lida_em_transacao_somente_leitura(bancos):
     with fonte.connect() as conn:
         conn.execute(text("SET TRANSACTION READ ONLY"))
         with pytest.raises(Exception) as exc:
-            conn.execute(text("DELETE FROM gold.nf_vendas_plataforma_mensal"))
+            conn.execute(text("DELETE FROM gold.nf_vendas_unificada_v2"))
         assert "read-only" in str(exc.value)
         conn.rollback()
     # e o publisher usa exatamente esse preambulo
@@ -328,7 +357,7 @@ def test_cli_dry_run_sai_zero_e_nao_escreve(bancos, capsys):
 def test_cli_codigos_de_saida(bancos):
     alvo, fonte, *_ = bancos
     with fonte.begin() as c:
-        c.execute(text("UPDATE gold.nf_vendas_plataforma_mensal SET custo = custo + 10"))
+        c.execute(text("UPDATE gold.nf_vendas_plataforma_sku_mensal SET custo = custo + 10"))  # completo e divergente
     rc = P.main(["--de", "2026-07", "--ate", "2026-07", "--apply"], engines=lambda: (alvo, fonte),
                 hoje=date(2026, 10, 13))
     assert rc == P.EXIT_RECONCILIACAO
@@ -495,3 +524,139 @@ def test_canal_vazio_segue_protegido_pela_guarda_de_escopo_sozinha(bancos, monke
     assert any("2026-07 ml" in m for m in exc.value.motivos)
     assert fotografia(alvo) == antes
     assert auditoria(alvo)[-1]["status"] == "failed"
+
+
+# ---------------------------------------------------------------------------
+# T-0055 C1 — a fonte do CMV e' o grao de item
+# ---------------------------------------------------------------------------
+
+def _ler_cmv(fonte, marcas=("kokeshi", "barbours")) -> list[dict]:
+    with fonte.connect() as conn:
+        rows = [dict(r) for r in conn.execute(P.SQL_CMV, {
+            "competencias": [JUL], "plataformas": list(P.PLATAFORMA_FISCAL.values()),
+            "marcas": list(marcas)}).mappings()]
+        conn.rollback()
+    return rows
+
+
+def _coluna(alvo, canal, marca, componente, coluna):
+    with alvo.connect() as c:
+        return c.execute(text(f"SELECT {coluna} FROM marts.fact_dre_insumo_mensal "
+                              "WHERE canal = :c AND marca = :m AND componente = :k"),
+                         {"c": canal, "m": marca, "k": componente}).scalar_one()
+
+
+def fotografia_sem_lote(alvo) -> dict:
+    with alvo.connect() as c:
+        rows = c.execute(text("SELECT competencia, canal, marca, componente, valor, cobertura, provisorio_share, "
+                              "status_reconciliacao, motivo, data_max_origem, procedencia "
+                              "FROM marts.fact_dre_insumo_mensal")).mappings().all()
+    return {(r["canal"], r["marca"], r["componente"]): dict(r) for r in rows}
+
+
+def test_fonte_de_item_soma_no_grao_da_celula_sem_multiplicar(bancos):
+    _, fonte, *_ = bancos
+    rows = _ler_cmv(fonte)
+    chaves = [(r["competencia"], r["marca"], r["plataforma"]) for r in rows]
+    assert len(chaves) == len(set(chaves)) == 4  # uma linha por celula
+    assert all(r["linhas"] == 4 for r in rows)    # 2 SKUs x 2 itens; nenhum ruido entrou
+    por = {(r["marca"], r["plataforma"]): r for r in rows}
+    assert set(por) == {("kokeshi", "mercadolivre"), ("kokeshi", "tiktokshop"), ("barbours", "tiktokshop"),
+                        ("kokeshi", "shopee")}  # sem amazon, outro_marketplace, denavita
+    ml = por[("kokeshi", "mercadolivre")]
+    assert (ml["receita_fiscal"], ml["custo"], ml["receita_com_custo"]) == (1_000_000, 300_000, 1_000_000)
+    assert ml["ultima_emissao"] == date(2026, 7, 31) and ml["custo_provisorio"] is None
+    assert sum(r["receita_fiscal"] for r in rows) == 2_890_000  # intercompany NULL conta, TRUE nao
+
+
+def test_fonte_de_item_igual_ao_agregado_publica_os_mesmos_valores(bancos):
+    alvo, fonte, *_ = bancos
+    res = publicar(alvo, fonte)
+    assert res["observacoes"] == []
+    ln = linhas(alvo)
+    assert ln[("ml", "kokeshi", "cmv")]["valor"] == Decimal("300000.00")
+    assert ln[("ml", "kokeshi", "cmv_receita_fiscal")]["valor"] == Decimal("1000000.00")
+    assert ln[("tiktok", "barbours", "cmv")]["valor"] == Decimal("150000.00")
+    assert _coluna(alvo, "ml", "kokeshi", "cmv", "procedencia") == P.PROC_CMV
+
+
+def test_custo_nulo_fica_fora_do_cmv_e_da_cobertura(bancos):
+    alvo, fonte, *_ = bancos
+    with fonte.begin() as c:
+        # TikTok kokeshi: um item de R$ 10 mil SEM custo, nas duas tabelas
+        c.execute(text("""INSERT INTO gold.nf_vendas_unificada_v2 VALUES
+            ('2026-07-01', '2026-07-20 10:00', 'kokeshi', 'marketplace', 'tiktokshop', false, 'C', 10000, NULL, NULL)"""))
+        c.execute(text("""INSERT INTO gold.nf_vendas_plataforma_sku_mensal VALUES
+            ('2026-07-01', 'kokeshi', 'marketplace', 'tiktokshop', 'C', 10000, NULL, NULL, NULL, '2026-07-20')"""))
+        # Shopee kokeshi: nenhum item com custo
+        c.execute(text("UPDATE gold.nf_vendas_unificada_v2 SET custo = NULL WHERE plataforma = 'shopee'"))
+        c.execute(text("UPDATE gold.nf_vendas_plataforma_sku_mensal SET custo = NULL, receita_com_custo = NULL "
+                       "WHERE plataforma = 'shopee'"))
+    publicar(alvo, fonte)
+    ln = linhas(alvo)
+    assert ln[("tiktok", "kokeshi", "cmv")]["valor"] == Decimal("280000.00")  # custo medido, sem extrapolar
+    assert ln[("tiktok", "kokeshi", "cmv_receita_fiscal")]["valor"] == Decimal("1000000.00")
+    assert _coluna(alvo, "tiktok", "kokeshi", "cmv", "cobertura") == Decimal("0.990000")
+    sh = ln[("shopee", "kokeshi", "cmv")]
+    assert sh["valor"] is None and sh["status_reconciliacao"] == "ausente_na_origem"  # nunca zero
+    assert ln[("shopee", "kokeshi", "cmv_receita_fiscal")]["valor"] == Decimal("400000.00")
+
+
+def test_provisorio_soma_so_o_custo_marcado(bancos):
+    alvo, fonte, *_ = bancos
+    with fonte.begin() as c:
+        c.execute(text("UPDATE gold.nf_vendas_unificada_v2 SET custo_provisorio = true "
+                       "WHERE plataforma = 'mercadolivre' AND marca = 'kokeshi' AND codigo_produto = 'A'"))
+    publicar(alvo, fonte)
+    assert _coluna(alvo, "ml", "kokeshi", "cmv", "provisorio_share") == Decimal("0.600000")
+
+
+# ---------------------------------------------------------------------------
+# T-0055 C2 — contraprova so' bloqueia com o agregado completo
+# ---------------------------------------------------------------------------
+
+def _defasar_agregado(fonte):
+    """O agregado parou em 27/07 com 85% da receita e outra regua de custo."""
+    with fonte.begin() as c:
+        c.execute(text("UPDATE gold.nf_vendas_plataforma_sku_mensal SET ultima_emissao = '2026-07-27', "
+                       "receita_produto = receita_produto * 0.85, receita_com_custo = receita_com_custo * 0.85, "
+                       "custo = custo * 0.8"))
+
+
+def test_agregado_defasado_publica_da_base_de_item_com_motivo_e_e_idempotente(bancos):
+    alvo, fonte, *_ = bancos
+    _defasar_agregado(fonte)
+    res = publicar(alvo, fonte)
+    assert res["recusas"] == []
+    assert res["observacoes"] == ["2026-07: contraprova nao bloqueante: agregado gold ate 27/07, base de item ate 31/07"]
+    assert linhas(alvo)[("ml", "kokeshi", "cmv")]["valor"] == Decimal("300000.00")
+    assert "agregado gold ate 27/07, base de item ate 31/07" in _coluna(alvo, "ml", "kokeshi", "cmv", "motivo")
+    primeira = fotografia_sem_lote(alvo)
+    publicar(alvo, fonte)
+    assert fotografia_sem_lote(alvo) == primeira
+    assert [a["status"] for a in auditoria(alvo)] == ["success", "success"]
+
+
+def test_agregado_completo_e_divergente_recusa_e_preserva_a_fotografia(bancos):
+    alvo, fonte, *_ = bancos
+    publicar(alvo, fonte)
+    antes = fotografia(alvo)
+    with fonte.begin() as c:
+        c.execute(text("UPDATE gold.nf_vendas_plataforma_sku_mensal SET receita_produto = receita_produto + 5 "
+                       "WHERE plataforma = 'mercadolivre'"))
+    with pytest.raises(P.PublicacaoRecusada) as exc:
+        publicar(alvo, fonte)
+    assert any("diverge do agregado mensal" in m for m in exc.value.motivos)
+    assert fotografia(alvo) == antes
+
+
+def test_agregado_defasado_com_mais_receita_que_a_base_de_item_recusa(bancos):
+    alvo, fonte, *_ = bancos
+    with fonte.begin() as c:
+        c.execute(text("UPDATE gold.nf_vendas_plataforma_sku_mensal SET ultima_emissao = '2026-07-27'"))
+        c.execute(text("UPDATE gold.nf_vendas_plataforma_sku_mensal SET receita_produto = receita_produto + 100 "
+                       "WHERE plataforma = 'shopee'"))
+    with pytest.raises(P.PublicacaoRecusada) as exc:
+        publicar(alvo, fonte)
+    assert any("abaixo do agregado gold defasado" in m for m in exc.value.motivos)
+    assert linhas(alvo) == {}

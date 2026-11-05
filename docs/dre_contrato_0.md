@@ -210,6 +210,7 @@ L12 (=) Margem após impostos                   [só existe com L11 disponível]
 |---|---|
 | Definição | Custo da mercadoria vendida das NFs de venda do marketplace |
 | Fonte | `gold.nf_vendas_plataforma_sku_mensal.custo` (Data Mart), `canal='marketplace'` |
+| Fonte (desde T-0055, 04/11/2026) | **`gold.nf_vendas_unificada_v2`** (grão de item, a base da query de custos do FP&A), somada no publisher para mês × marca × plataforma; `canal='marketplace'`, `intercompany IS NOT TRUE` (NULL = normal, como o default da query), só `tiktokshop`/`mercadolivre`/`shopee`. Plataformas sem canal na Torre (`amazon`, `outro_marketplace`, `nao_mapeada`, `sem_loja`…) e marcas fora da Torre (Denavita) ficam **fora**, sem redistribuição. Motivo: o agregado SKU fica dias atrás (out/26 parou em 27/10). Fórmulas: CMV = `SUM(custo)` (nulo ignorado, nunca zero); cobertura = `SUM(receita) FILTER (custo IS NOT NULL) / SUM(receita)`; CMV % sobre receita coberta = CMV ÷ (cobertura × receita fiscal). Contraprova: o agregado SKU, bloqueante só quando já alcançou a última emissão da base de item no mês (ver `docs/dre_data_bridge_1.md` §3) |
 | Grão | mês de emissão × marca × canal × plataforma × SKU |
 | Chaves | `data_mes`, `marca`, `plataforma` ∈ {`mercadolivre`, `shopee`, `tiktokshop`} |
 | Filtros | 5 marcas; `tipo_operacao='normal'` (único valor em 2026) |

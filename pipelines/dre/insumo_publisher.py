@@ -5,8 +5,9 @@ O QUE ELE FAZ
 Le, no Data Mart e em transacao READ ONLY, somente AGREGADOS MENSAIS por
 `competencia x canal x marca`:
 
-  * CMV fiscal e a receita fiscal que o acompanha
-    (`gold.nf_vendas_plataforma_sku_mensal`);
+  * CMV fiscal e a receita fiscal que o acompanha, somados do grao de ITEM
+    (`gold.nf_vendas_unificada_v2`, a base da query de custos do FP&A), com
+    contraprova contra o agregado `gold.nf_vendas_plataforma_sku_mensal`;
   * taxa, frete, afiliado, receita e residuo da identidade do repasse TikTok
     por coorte de pedido (`silver.stg_tiktok_payments_by_order`).
 
@@ -98,7 +99,11 @@ RESIDUO_MAX = Decimal("1.00")
 #: Divergencia tolerada entre o CMV por SKU e o agregado mensal independente.
 CONTRAPROVA_MAX = Decimal("1.00")
 
-PROC_CMV = "gold.nf_vendas_plataforma_sku_mensal (canal=marketplace) @dre-bridge-1"
+#: T-0055 (C1): a fonte do CMV passou do agregado `nf_vendas_plataforma_sku_mensal`,
+#: que fica dias atras da base de item (out/26 parou em 27/10 com a regua "_vivo"),
+#: para a propria base de item. Em mes estavel as duas sao identicas (set/26 medido
+#: ao real); a troca so' muda o mes que o agregado ainda nao alcancou.
+PROC_CMV = "gold.nf_vendas_unificada_v2 (canal=marketplace, sem intercompany) @dre-custos-vivos-1"
 PROC_REPASSE = "silver.stg_tiktok_payments_by_order (transaction_type=ORDER, coorte) @dre-bridge-1"
 
 EXIT_OK = 0
@@ -203,35 +208,51 @@ SQL_ESPERADO = text("""
     GROUP BY 1, 2, 3
 """)
 
+#: CMV do grao de ITEM, somado direto para `competencia x marca x plataforma`.
+#: Mesmas colunas de saida da leitura antiga (o agregado SKU), entao
+#: `montar_lote` nao muda de forma. Regras, todas da query de custos do FP&A:
+#:   * `canal = 'marketplace'` no canal ORIGINAL do item: o TikTok e' o item
+#:     de `plataforma = 'tiktokshop'` dentro dele (paridade medida em set/26);
+#:   * plataforma vem do item; so' as tres da Torre. amazon, outro_marketplace,
+#:     nao_mapeada, sem_loja etc. ficam FORA -- nunca redistribuidas;
+#:   * `intercompany IS NOT TRUE` = o default `tipo_operacao = 'normal'` da
+#:     query (NULL conta como normal); `NOT intercompany` descartaria o NULL;
+#:   * `SUM(custo)` ignora o nulo: custo ausente nao vira zero, e a receita que
+#:     ele deixa descoberta sai de `receita_com_custo` (a cobertura);
+#:   * `custo_provisorio` e' booleano no item: a soma filtrada reproduz o valor
+#:     do agregado (provado em set/26).
+#: Sem JOIN: uma tabela, GROUP BY na chave inteira da saida. Nada multiplica.
 SQL_CMV = text("""
     SELECT data_mes AS competencia, marca, plataforma,
-           SUM(receita_produto)    AS receita_fiscal,
-           SUM(custo)              AS custo,
-           SUM(custo_provisorio)   AS custo_provisorio,
-           SUM(receita_com_custo)  AS receita_com_custo,
-           MAX(ultima_emissao)     AS ultima_emissao,
-           COUNT(*)                AS linhas
+           SUM(receita_produto)                                  AS receita_fiscal,
+           SUM(custo)                                            AS custo,
+           SUM(custo) FILTER (WHERE custo_provisorio)            AS custo_provisorio,
+           SUM(receita_produto) FILTER (WHERE custo IS NOT NULL) AS receita_com_custo,
+           MAX(data_emissao)::date                               AS ultima_emissao,
+           COUNT(*)                                              AS linhas
+    FROM gold.nf_vendas_unificada_v2
+    WHERE data_mes = ANY(:competencias)
+      AND canal = 'marketplace'
+      AND plataforma = ANY(:plataformas)
+      AND marca = ANY(:marcas)
+      AND intercompany IS NOT TRUE
+    GROUP BY data_mes, marca, plataforma
+""")
+
+#: Contraprova: o agregado que o Data Mart materializa a partir da base de
+#: item (era a fonte antiga). Ele anda ATRAS da base de item, entao so'
+#: bloqueia a publicacao quando ja alcancou o mes -- ver `contraprova_cmv`.
+SQL_CMV_CONTRAPROVA = text("""
+    SELECT data_mes AS competencia, marca, plataforma,
+           SUM(receita_produto)      AS receita_fiscal,
+           SUM(custo)                AS custo,
+           MAX(ultima_emissao)::date AS ultima_emissao
     FROM gold.nf_vendas_plataforma_sku_mensal
     WHERE data_mes = ANY(:competencias)
       AND canal = 'marketplace'
       AND plataforma = ANY(:plataformas)
       AND marca = ANY(:marcas)
-    GROUP BY 1, 2, 3
-""")
-
-#: Contraprova: o agregado mensal que o proprio Data Mart materializa SEM SKU.
-#: Se a soma por SKU nao bater com ele, uma das duas tabelas esta no meio de
-#: uma carga — e publicar seria fotografar o meio da carga.
-SQL_CMV_CONTRAPROVA = text("""
-    SELECT data_mes AS competencia, marca, plataforma,
-           SUM(receita_produto) AS receita_fiscal,
-           SUM(custo)           AS custo
-    FROM gold.nf_vendas_plataforma_mensal
-    WHERE data_mes = ANY(:competencias)
-      AND canal = 'marketplace'
-      AND plataforma = ANY(:plataformas)
-      AND marca = ANY(:marcas)
-    GROUP BY 1, 2, 3
+    GROUP BY data_mes, marca, plataforma
 """)
 
 SQL_REPASSE = text("""
@@ -319,6 +340,12 @@ def _mes_de(v) -> date:
     return date(v.year, v.month, 1)
 
 
+def _data(v) -> Optional[date]:
+    if v is None:
+        return None
+    return v.date() if isinstance(v, datetime) else v
+
+
 def _ts(v) -> Optional[datetime]:
     """Data maxima da origem como instante.
 
@@ -338,6 +365,8 @@ class Lote:
     linhas: list[dict] = field(default_factory=list)
     recusas: list[str] = field(default_factory=list)
     fora_do_escopo: list[tuple] = field(default_factory=list)
+    #: Observacoes que NAO recusam (contraprova contra agregado defasado).
+    observacoes: list[str] = field(default_factory=list)
     extraidas: int = 0
 
 
@@ -421,6 +450,65 @@ def recusas_de_marca(chaves_esperadas: set, publicadas: set, sem_vendas: frozens
     return recusas
 
 
+def _fmt_dia(d: Optional[date]) -> str:
+    return "-" if d is None else d.strftime("%d/%m")
+
+
+def contraprova_cmv(cmv_idx: dict, cp_idx: dict) -> tuple[list[str], dict]:
+    """Confere o CMV da base de item contra o agregado gold, mes a mes.
+
+    O agregado e' derivado da base de item e anda dias atras dela. Por
+    competencia, ele esta COMPLETO quando sua ultima emissao alcancou a da base
+    de item (`agregado >= item`; mes sem nota na base de item conta como
+    alcancado). Entao:
+
+      * completo: mesma chave e mesmo total (receita e custo, tolerancia de
+        `CONTRAPROVA_MAX`) nos dois sentidos; divergiu, recusa -- uma das duas
+        tabelas esta no meio de uma carga;
+      * defasado: a defasagem explica o agregado ter MENOS (chave a menos,
+        receita a menos, custo de outra regua), nunca MAIS. Recusa so' chave
+        presente apenas no agregado ou receita da base de item abaixo da dele;
+        o resto vira observacao, gravada no `motivo` do CMV daquele mes.
+
+    Devolve `(recusas, {competencia: observacao})`.
+    """
+    recusas: list[str] = []
+    item_max: dict[date, Optional[date]] = {}
+    agg_max: dict[date, Optional[date]] = {}
+    for idx, alvo in ((cmv_idx, item_max), (cp_idx, agg_max)):
+        for k, r in idx.items():
+            d, atual = _data(r["ultima_emissao"]), alvo.get(k[0])
+            alvo[k[0]] = d if atual is None or (d is not None and d > atual) else atual
+
+    completo: dict[date, bool] = {}
+    obs: dict[date, str] = {}
+    for m in set(item_max) | set(agg_max):
+        i, a = item_max.get(m), agg_max.get(m)
+        completo[m] = i is None or (a is not None and a >= i)
+        if not completo[m]:
+            obs[m] = ("contraprova nao bloqueante: agregado gold sem a competencia" if a is None else
+                      f"contraprova nao bloqueante: agregado gold ate {_fmt_dia(a)}, base de item ate {_fmt_dia(i)}")
+
+    for k in set(cmv_idx) | set(cp_idx):
+        a, b = cmv_idx.get(k), cp_idx.get(k)
+        if completo[k[0]]:
+            if a is None or b is None:
+                recusas.append(f"cmv: chave {k} presente so' em uma das duas tabelas fiscais")
+                continue
+            for col in ("receita_fiscal", "custo"):
+                da, db_ = _dec(a[col]) or Decimal(0), _dec(b[col]) or Decimal(0)
+                if abs(da - db_) > CONTRAPROVA_MAX:
+                    recusas.append(f"cmv: {col} {k} diverge do agregado mensal em {da - db_}")
+        elif a is None:
+            recusas.append(f"cmv: chave {k} so' no agregado gold defasado; a base de item perdeu a chave")
+        elif b is not None:
+            da, db_ = _dec(a["receita_fiscal"]) or Decimal(0), _dec(b["receita_fiscal"]) or Decimal(0)
+            if da < db_ - CONTRAPROVA_MAX:
+                recusas.append(f"cmv: receita_fiscal {k} da base de item abaixo do agregado gold defasado "
+                               f"em {db_ - da}")
+    return recusas, obs
+
+
 def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict],
                 repasse: list[dict], canais: list[str], comps: list[date],
                 sem_vendas: frozenset = frozenset(), publicadas: frozenset = frozenset(),
@@ -429,7 +517,9 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
 
     Recusa (a publicacao inteira aborta) quando:
       * a fonte tem chave repetida;
-      * CMV por SKU diverge do agregado mensal independente;
+      * o CMV da base de item diverge do agregado gold num mes que o agregado
+        ja alcancou; com o agregado defasado, so' se a base de item tiver
+        MENOS que ele (`contraprova_cmv`);
       * CMV negativo, cobertura ou provisorio fora de [0, 1];
       * a identidade do repasse TikTok nao fecha numa celula;
       * alguma transacao tem afiliado maior que a propria taxa.
@@ -465,16 +555,9 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
     lote.recusas.extend(recusas_de_escopo(set(esp), comps, canais, sem_vendas))
     lote.recusas.extend(recusas_de_marca(set(esp), set(publicadas), sem_vendas, remover))
 
-    # Contraprova do CMV — mesma chave, mesmo total, nos dois sentidos.
-    for k in set(cmv_idx) | set(cp_idx):
-        a, b = cmv_idx.get(k), cp_idx.get(k)
-        if a is None or b is None:
-            lote.recusas.append(f"cmv: chave {k} presente so' em uma das duas tabelas fiscais")
-            continue
-        for col in ("receita_fiscal", "custo"):
-            da, db_ = _dec(a[col]) or Decimal(0), _dec(b[col]) or Decimal(0)
-            if abs(da - db_) > CONTRAPROVA_MAX:
-                lote.recusas.append(f"cmv: {col} {k} diverge do agregado mensal em {da - db_}")
+    recusas_cp, obs_por_mes = contraprova_cmv(cmv_idx, cp_idx)
+    lote.recusas.extend(recusas_cp)
+    lote.observacoes.extend(f"{m.isoformat()[:7]}: {o}" for m, o in sorted(obs_por_mes.items()))
 
     for k in set(cmv_idx) - set(esp):
         lote.fora_do_escopo.append(("cmv",) + k)
@@ -505,6 +588,8 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
                 status = "nao_reconciliado"
                 motivo = ("sem GMV para comparar" if razao is None
                           else f"receita fiscal / GMV = {razao:.4f}; aceito entre {CMV_RAZAO_MIN} e {CMV_RAZAO_MAX}")
+            if m in obs_por_mes:
+                motivo = f"{motivo}; {obs_por_mes[m]}"
             data_max = _ts(c["ultima_emissao"])
             lote.linhas.append(_linha(m, canal, marca, "cmv", custo, status=status, procedencia=PROC_CMV, sinal=1,
                                       cobertura=cobertura, provisorio=share, motivo=motivo, data_max=data_max))
@@ -608,6 +693,7 @@ def _resumo(lote: Lote, comps: list[date], canais: list[str], **extra) -> dict:
         "competencias": [c.isoformat()[:7] for c in comps], "canais": canais,
         "linhas": len(lote.linhas), "extraidas": lote.extraidas,
         "recusas": lote.recusas, "fora_do_escopo": len(lote.fora_do_escopo),
+        "observacoes": lote.observacoes,
         "por_componente": {k: {**v, "soma": str(v["soma"])} for k, v in sorted(por_comp.items())},
         **extra,
     }

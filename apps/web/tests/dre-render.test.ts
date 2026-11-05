@@ -263,3 +263,55 @@ test("seletor de competencia exibe MM/AAAA, inclusive a madura padrao", () => {
   assert.match(texto(html), /07\/2026 \(madura\)/);
   assert.doesNotMatch(html, /\b(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\/\d{4}/);
 });
+
+// ===========================================================================
+// T-0055 C3 — cobertura do CMV na tela
+// ===========================================================================
+{
+  const { default: CmvCobertura } = await import("../app/dre/CmvCobertura.tsx");
+  const comCmv = (cmv: Parameters<typeof fx.comp>[2] & { status?: "disponivel" | "parcial" }) =>
+    fx.celula({
+      classificacao: cmv.status === "parcial" ? "NAO_CALCULAVEL" : "PARCIAL",
+      comps: {
+        receita: fx.comp(100_000, "disponivel", { somavel: false }),
+        taxas: fx.comp(15_000, "disponivel"),
+        ads: fx.comp(4_000, "disponivel"),
+        frete: fx.comp(10_000, "disponivel"),
+        cmv: fx.comp(30_000, cmv.status ?? "disponivel", cmv),
+      },
+      margem: cmv.status === "parcial" ? null : 41_000,
+      usados: cmv.status === "parcial" ? [] : ["taxas", "ads", "frete", "cmv"],
+      faltam: ["devolucoes", "impostos"],
+    });
+
+  test("C3: tela mostra CMV % s/ receita com custo, cobertura e a formula", () => {
+    const html = render(h(CmvCobertura, { celula: comCmv({ cobertura: 0.9988, cmv_pct_receita_coberta: 24.02 }), rotulo: "Total da seleção" }));
+    const t = texto(html);
+    assert.match(t, /CMV 24,0% s\/ receita com custo · cobertura 99,88%/);
+    assert.doesNotMatch(t, /CMV parcial/);
+    // Formula e fonte acessiveis (title do chip e dica).
+    assert.match(html, /CMV ÷ receita com custo/);
+    assert.match(html, /NF fiscal, base de item; cobertura = receita com custo \/ receita fiscal/);
+  });
+
+  test("C3: CMV parcial por cobertura fica visivel e diz que ausencia nao e' zero", () => {
+    const t = texto(render(h(CmvCobertura, {
+      celula: comCmv({ status: "parcial", cobertura: 0.9467, cmv_pct_receita_coberta: 25.06 }),
+      rotulo: "Canal: Shopee",
+    })));
+    assert.match(t, /cobertura 94,67%/);
+    assert.match(t, /CMV parcial: cobertura abaixo do mínimo, fora da margem; custo ausente não é zero/);
+  });
+
+  test("C3: DRE vertical mostra o chip Parcial e o motivo no CMV parcial", () => {
+    const c = comCmv({ status: "parcial", cobertura: 0.9467, cmv_pct_receita_coberta: 25.06,
+      motivo: "CMV cobre 94.67% da receita fiscal (minimo 98%); custo ausente nao e' zero nem e' extrapolado" });
+    const t = texto(render(h(DreVertical, { opcoes: [{ valor: "total", rotulo: "Total", celula: c }], selecionado: "total", aoEscolher: () => {} })));
+    assert.match(t, /CMV Parcial/);
+    assert.match(t, /CMV cobre 94\.67% da receita fiscal/);
+  });
+
+  test("C3: API sem os campos novos nao renderiza nada", () => {
+    assert.equal(render(h(CmvCobertura, { celula: comCmv({}), rotulo: "Total" })), "");
+  });
+}

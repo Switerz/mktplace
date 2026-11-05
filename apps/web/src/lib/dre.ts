@@ -76,6 +76,13 @@ export interface Componente {
   partes?: Record<string, number | null> | null;
   data_as_of?: string | null;
   publicado_em?: string | null;
+  /**
+   * T-0055 C3 — so' CMV, opcionais (`undefined` = API anterior). `cobertura`
+   * 0..1 = receita com custo / receita fiscal; `cmv_pct_receita_coberta` =
+   * CMV / receita com custo, em %. Denominador DIFERENTE de `pct_receita`.
+   */
+  cobertura?: number | null;
+  cmv_pct_receita_coberta?: number | null;
 }
 
 export interface Margem {
@@ -666,6 +673,43 @@ export function somaDeControle(c: CelulaDRE): number | null {
   const receita = c.componentes.receita.valor;
   if (receita === null) return null;
   return linhas.filter((l) => l.naMargem).reduce((acc, l) => acc - (l.componente.valor ?? 0), receita);
+}
+
+// ---------------------------------------------------------------------------
+// Cobertura do CMV (T-0055 C3)
+// ---------------------------------------------------------------------------
+
+/** Formula e fonte do CMV % sobre a receita com custo (texto de ajuda). */
+export const FORMULA_CMV_COBERTO =
+  "CMV % s/ receita com custo = CMV ÷ receita com custo. Fonte: NF fiscal, base de item; " +
+  "cobertura = receita com custo / receita fiscal. O “% rec.” da DRE usa outro denominador (CMV ÷ receita da DRE).";
+
+export interface ResumoCoberturaCmv {
+  /** "99,88%" — `null` quando a API nao publicou a cobertura. */
+  cobertura: string | null;
+  /** "24,0%" — CMV / receita com custo. `null` sem denominador. */
+  pctCoberto: string | null;
+  /** CMV `parcial`: cobertura abaixo do minimo, fora da margem. */
+  parcial: boolean;
+  /** Frase curta para o chip. */
+  texto: string;
+}
+
+/**
+ * Resumo da cobertura do CMV de um recorte. `null` quando a API nao traz os
+ * campos (contrato antigo) ou o CMV nao tem valor — nada e' inventado.
+ */
+export function resumoCoberturaCmv(c: CelulaDRE): ResumoCoberturaCmv | null {
+  const cmv = c.componentes.cmv;
+  if (cmv.valor === null) return null;
+  if (cmv.cobertura === undefined && cmv.cmv_pct_receita_coberta === undefined) return null;
+  const cobertura = cmv.cobertura == null ? null : fmtPctDre(cmv.cobertura * 100, 2);
+  const pctCoberto = fmtPctDre(cmv.cmv_pct_receita_coberta ?? null);
+  const partes = [
+    pctCoberto ? `CMV ${pctCoberto} s/ receita com custo` : "CMV % s/ receita com custo indisponível",
+    cobertura ? `cobertura ${cobertura}` : "cobertura não publicada",
+  ];
+  return { cobertura, pctCoberto, parcial: cmv.status === "parcial", texto: partes.join(" · ") };
 }
 
 /** Custos ausentes, por nome curto, em ordem do contrato. Afiliado nao e' custo. */
