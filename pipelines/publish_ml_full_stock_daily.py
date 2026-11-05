@@ -695,11 +695,14 @@ def tabelas_destino_existem() -> bool:
 def publish_run_id_em_uso(publish_run_id: str) -> bool:
     """Pre-checagem so' leitura (a decisiva e' a rechecagem dentro do lock)."""
     with local_engine().connect() as conn:
+        # BEGIN explicito, antes de qualquer execute: a Connection legada do
+        # SQLAlchemy 1.4 (imagem do Airflow) nao tem `conn.rollback()`.
+        tx = conn.begin()
         try:
             conn.execute(text("SET TRANSACTION READ ONLY"))
             return bool(conn.execute(SQL_PUBLISH_RUN_ID_EM_USO, {"publish_run_id": publish_run_id}).scalar())
         finally:
-            conn.rollback()
+            tx.rollback()
 
 
 def _audit_conn():
@@ -859,6 +862,7 @@ def diagnosticar(ref_date: date, publish_run_id: str) -> dict:
     """Linhas com o `source_run_id` e o vigente por marca. Read-only, sem lock, sem escrita."""
     base = {"modo": "diagnostico", "grava": False, "ref_date": str(ref_date), "publish_run_id": publish_run_id}
     with local_engine().connect() as conn:
+        tx = conn.begin()     # explicito: SQLAlchemy 1.4 legado nao tem `conn.rollback()`
         try:
             conn.execute(text("SET TRANSACTION READ ONLY"))
             linha = conn.execute(text("SELECT " + ", ".join(
@@ -878,7 +882,7 @@ def diagnosticar(ref_date: date, publish_run_id: str) -> dict:
                         f"SELECT DISTINCT brand, source_run_id FROM {t} WHERE ref_date = :ref_date"), p).fetchall():
                     vigentes.setdefault(marca, set()).add(sid)
         finally:
-            conn.rollback()
+            tx.rollback()
     total = sum(sum(v.values()) for v in do_run.values())
     vigente = {m: (sorted(v)[0] if len(v) == 1 else sorted(v)) for m, v in sorted(vigentes.items())}
     marcas_do_run = sorted({m for v in do_run.values() for m in v})
