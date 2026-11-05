@@ -57,6 +57,12 @@ traducao, mantida a mao e aprovada linha a linha. Ela so' cobre o que o
 (d) a linha so' vale para kit da MESMA marca (a chave e' `(marca, codigo)`);
 (e) `ativo=false` e' ignorada.
 
+LINHA NEGATIVA (`bloquear=true`, `sku_destino` vazio): a traducao daquele
+`(marca, codigo)` esta' provada errada. Ela vale MESMO quando o `map` traduz
+(e' a excecao a' trava (a)): o componente fica ambiguo com motivo
+`de_para_bloqueio`, nunca traduzido. Positiva e negativa ativas na mesma chave
+sao conflito e o carregamento levanta.
+
 TRAVA DE VOLUME
 ---------------
 Vale para TODA traducao (map ou de-para). Se o nome do componente na Avoe e o
@@ -168,7 +174,7 @@ _SKU_VALIDO = re.compile(r"^[A-Z0-9][A-Z0-9._-]*$")
 #: silencioso.
 DE_PARA_CSV = Path(__file__).with_name("avoe_de_para_componentes.csv")
 DE_PARA_COLUNAS = ("marca", "codigo_avoe", "sku_destino", "classe",
-                   "evidencia", "aprovado_por", "ativo")
+                   "evidencia", "aprovado_por", "ativo", "bloquear")
 
 #: Origem de uma traducao aceita.
 ORIGEM_MAP = "map_produto"
@@ -178,6 +184,7 @@ ORIGEM_DE_PARA = "de_para"
 AMBIGUO_MAP_MULTIPLO = "map_multiplo"
 AMBIGUO_MAP_DIVERGE_DE_PARA = "map_diverge_de_para"
 AMBIGUO_DE_PARA_MULTIPLO = "de_para_multiplo"
+AMBIGUO_DE_PARA_BLOQUEIO = "de_para_bloqueio"
 AMBIGUO_VOLUME_DIVERGE = "volume_diverge"
 AMBIGUO_VOLUME_UNIDADE = "volume_unidade_incompativel"
 
@@ -270,7 +277,7 @@ def _indice_de_para(de_para_rows: Iterable[Mapping]) -> dict:
     """
     indice: dict[tuple[str, str], set[str]] = {}
     for row in de_para_rows:
-        if not _ativo(row.get("ativo")):
+        if not _ativo(row.get("ativo")) or _ativo(row.get("bloquear")):
             continue
         marca = row.get("marca")
         marca = str(marca).strip().lower() if marca is not None else None
@@ -279,6 +286,24 @@ def _indice_de_para(de_para_rows: Iterable[Mapping]) -> dict:
         if marca and codigo and alvo:
             indice.setdefault((marca, codigo), set()).add(alvo)
     return indice
+
+
+def _bloqueios_de_para(de_para_rows: Iterable[Mapping]) -> set:
+    """`(marca, codigo)` das linhas NEGATIVAS ativas (`bloquear=true`).
+
+    `bloquear` usa a mesma leitura de `ativo`: so' `true` liga. Linha sem a
+    coluna (chamador antigo) e' positiva.
+    """
+    chaves: set[tuple[str, str]] = set()
+    for row in de_para_rows:
+        if not (_ativo(row.get("ativo")) and _ativo(row.get("bloquear"))):
+            continue
+        marca = row.get("marca")
+        marca = str(marca).strip().lower() if marca is not None else None
+        codigo = _sku(row.get("codigo_avoe"))
+        if marca and codigo:
+            chaves.add((marca, codigo))
+    return chaves
 
 
 def _indice_do_catalogo(catalog_rows: Iterable[Mapping] | None) -> dict | None:
@@ -335,7 +360,8 @@ def comparar_volume(nomes_avoe: Iterable[object],
 
 
 def _traduzir(marca: str, codigo: str, nomes_avoe: list, *, indice: dict,
-              de_para: dict, catalogo: dict | None) -> dict:
+              de_para: dict, catalogo: dict | None,
+              bloqueados: set = frozenset()) -> dict:
     """Decide UM componente. Devolve `alvo` (ou None), `estado` e `motivo`.
 
     `estado`: `traduzido` | `ambiguo` | `sem_ponte`. Nada aqui desempata.
@@ -345,6 +371,10 @@ def _traduzir(marca: str, codigo: str, nomes_avoe: list, *, indice: dict,
     res = {"alvo": None, "origem": None, "estado": None, "motivo": None,
            "volume": None, "map": sorted(alvos_map), "de_para": sorted(alvos_dp)}
 
+    if (marca, codigo) in bloqueados:
+        # Linha negativa: a traducao esta' provada errada. Vale mesmo com o
+        # `map` traduzindo (excecao a' trava (a)) e vence qualquer positiva.
+        return dict(res, estado="ambiguo", motivo=AMBIGUO_DE_PARA_BLOQUEIO)
     if len(alvos_map) > 1:
         return dict(res, estado="ambiguo", motivo=AMBIGUO_MAP_MULTIPLO)
     if len(alvos_map) == 1:
@@ -397,7 +427,9 @@ def build_avoe_bom(kits: Iterable[Mapping], *,
     padrao) = comportamento anterior ao de-para.
     """
     indice = _indice_de_codigos(brand_code_rows)
+    de_para_rows = list(de_para_rows)
     de_para = _indice_de_para(de_para_rows)
+    bloqueados = _bloqueios_de_para(de_para_rows)
     catalogo = _indice_do_catalogo(catalog_rows)
     recusados: Counter = Counter()
     aceitos: dict[tuple[str, str], Counter] = {}
@@ -461,7 +493,8 @@ def build_avoe_bom(kits: Iterable[Mapping], *,
         for codigo, qtd in sorted(composicao.items()):
             nomes = nomes_por_codigo.get((marca, codigo), [])
             r = _traduzir(marca, codigo, nomes, indice=indice,
-                          de_para=de_para, catalogo=catalogo)
+                          de_para=de_para, catalogo=catalogo,
+                          bloqueados=bloqueados)
             if r["volume"] is not None:
                 volume[r["volume"]] += 1
             if r["estado"] == "traduzido":
@@ -505,6 +538,7 @@ def build_avoe_bom(kits: Iterable[Mapping], *,
         "sem_ponte_por_motivo": dict(sorted(sem_ponte_motivo.items())),
         "volume": dict(sorted(volume.items())),
         "de_para_linhas_ativas": sum(len(v) for v in de_para.values()),
+        "de_para_bloqueios_ativos": len(bloqueados),
         "bloqueios": bloqueios,
     }
     return out
@@ -515,6 +549,9 @@ def carregar_de_para(path: str | os.PathLike = DE_PARA_CSV) -> list[dict]:
 
     Malformado -> `AvoeSourceError`: uma linha com marca digitada errada ou
     `ativo` fora de `true|false` nao pode virar "sem de-para" em silencio.
+    Linha negativa = `sku_destino` vazio E `bloquear=true`; qualquer outra
+    combinacao de destino vazio/`bloquear` levanta, e uma positiva e uma
+    negativa ATIVAS na mesma `(marca, codigo)` tambem (conflito, nao desempate).
     """
     caminho = Path(path)
     try:
@@ -527,16 +564,39 @@ def carregar_de_para(path: str | os.PathLike = DE_PARA_CSV) -> list[dict]:
             f"de-para da Avoe com colunas inesperadas: {leitor.fieldnames}")
     marcas_validas = set(MARCAS.values())
     linhas = []
+    # (marca, codigo) -> {"positiva": n, "negativa": n} das linhas ATIVAS.
+    ativas: dict[tuple[str, str], dict[str, int]] = {}
     for n, row in enumerate(leitor, start=2):
         marca = (row.get("marca") or "").strip().lower()
         ativo = (row.get("ativo") or "").strip().lower()
+        bloquear = (row.get("bloquear") or "").strip().lower()
         if marca not in marcas_validas:
             raise AvoeSourceError(f"de-para linha {n}: marca desconhecida {marca!r}")
         if ativo not in ("true", "false"):
             raise AvoeSourceError(f"de-para linha {n}: ativo deve ser true|false")
-        if not _sku(row.get("codigo_avoe")) or not _sku(row.get("sku_destino")):
-            raise AvoeSourceError(f"de-para linha {n}: codigo ou destino vazio")
-        linhas.append(dict(row, marca=marca, ativo=(ativo == "true")))
+        if bloquear not in ("true", "false"):
+            raise AvoeSourceError(f"de-para linha {n}: bloquear deve ser true|false")
+        codigo = _sku(row.get("codigo_avoe"))
+        destino = _sku(row.get("sku_destino"))
+        if not codigo:
+            raise AvoeSourceError(f"de-para linha {n}: codigo vazio")
+        if bloquear == "true" and destino:
+            raise AvoeSourceError(
+                f"de-para linha {n}: linha negativa (bloquear=true) com destino")
+        if bloquear == "false" and not destino:
+            raise AvoeSourceError(
+                f"de-para linha {n}: destino vazio sem bloquear=true")
+        if ativo == "true":
+            tipo = "negativa" if bloquear == "true" else "positiva"
+            par = ativas.setdefault((marca, codigo), {})
+            outro = "positiva" if tipo == "negativa" else "negativa"
+            if outro in par:
+                raise AvoeSourceError(
+                    f"de-para linha {n}: linha {tipo} ativa conflita com a "
+                    f"linha {outro} ativa {par[outro]} na mesma (marca, codigo)")
+            par.setdefault(tipo, n)
+        linhas.append(dict(row, marca=marca, ativo=(ativo == "true"),
+                           bloquear=(bloquear == "true")))
     return linhas
 
 

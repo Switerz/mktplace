@@ -354,10 +354,11 @@ aprovado linha a linha:
 | `marca` | marca da Torre (`apice`, `barbours`, `lescent`, `denavita`). Fora da allowlist: o arquivo é recusado |
 | `codigo_avoe` | código do componente como a Avoe devolve |
 | `sku_destino` | SKU Protheus |
-| `classe` | `A` = automático com prova (chave do cadastro exata, EAN igual nos três lados, volume igual, destino no catálogo). Só a classe A entrou |
+| `classe` | `A` = automático com prova (chave do cadastro exata, EAN igual nos três lados, volume igual, destino no catálogo). Das positivas, só a classe A entrou; `NEG` = linha negativa |
 | `evidencia` | texto curto, **sem número de negócio** (o repo é público) |
 | `aprovado_por` | quem aprovou a linha |
 | `ativo` | `true` \| `false`. Qualquer outro valor: o arquivo é recusado |
+| `bloquear` | `true` \| `false`. `true` = linha **negativa** (ver abaixo), com `sku_destino` vazio e classe `NEG` |
 
 Travas, todas fail-closed:
 
@@ -369,6 +370,15 @@ Travas, todas fail-closed:
 | (d) | a chave é `(marca, código)`: a linha só alcança kit da mesma marca | sem efeito em outra marca |
 | (e) | `ativo=false` | linha ignorada |
 | — | duas linhas ativas para a mesma `(marca, código)` com destinos diferentes | **ambíguo** (`de_para_multiplo`) |
+
+**Linha negativa** (`bloquear=true`, `sku_destino` vazio): diz que a tradução de
+`(marca, código)` está **errada**. Vale **mesmo quando o `map` traduz** (exceção à
+trava (a)): o componente fica **ambíguo** com `de_para_bloqueio`, nunca traduzido, e
+o kit sai `blocked`. Fecha o erro que a trava de volume deixa passar (`sem_prova`).
+O carregamento recusa destino vazio sem `bloquear=true`, `bloquear=true` com destino
+e positiva + negativa **ativas** na mesma chave (conflito, não desempate);
+`ativo=false` desliga também a negativa. Contagem em
+`avoe_summary.de_para_bloqueios_ativos`; `de_para_linhas_ativas` conta só positivas.
 
 Arquivo ausente ou malformado levanta `AvoeSourceError`: nunca vira "sem
 de-para" em silêncio. O CSV é o **único** arquivo não-`.py` da wheel
@@ -410,9 +420,9 @@ Avoe).
 
 **O que a trava não pega.** Produto de **tipo** diferente com volume ausente
 de um dos lados (por exemplo, uma "Máscara" sem volume na Avoe traduzida para
-um "Condicionador 1L") passa como `sem_prova`. Fechar esse caso exige outra
-prova — regra de tipo de produto ou linha negativa no de-para — e está em
-aberto, sem regra implementada.
+um "Condicionador 1L") passa como `sem_prova`. Os casos já provados estão
+fechados por **linha negativa** no de-para (ver acima); uma regra geral de tipo
+de produto continua em aberto.
 
 ### O que a Avoe **não** substitui
 

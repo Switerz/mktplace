@@ -642,6 +642,75 @@ def test_trava_e_ativo_textual_so_liga_com_true():
     assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT030"] == {"AVOE:LESCENT:950": 1}
 
 
+# --------------------------------------------------------------- linha negativa
+
+def _neg(marca, codigo, ativo=True):
+    return dict(_dp(marca, codigo, "", ativo=ativo), classe="NEG", bloquear=True)
+
+
+def test_negativa_bloqueia_traducao_do_map():
+    # Equivalente sintetico de "Mascara" que o map traduz para um
+    # Condicionador: a trava de volume nao pega (sem_prova), a negativa pega.
+    bom = _bom([_kit("Lescent", "KIT040", "900", "901")],
+               de_para=[_neg("lescent", "900")])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT040"] == {
+        "AVOE:LESCENT:900": 1, "PL0002": 1}
+    assert bom.summary["componentes_ambiguos"] == 1
+    assert bom.summary["ambiguos_por_motivo"] == {A.AMBIGUO_DE_PARA_BLOQUEIO: 1}
+    assert bom.summary["de_para_bloqueios_ativos"] == 1
+    assert bom.summary["de_para_linhas_ativas"] == 0
+    [b] = bom.summary["bloqueios"]
+    assert (b["kit"], b["codigo"], b["motivo"], b["map"]) == (
+        "AVOE:LESCENT:KIT040", "900", A.AMBIGUO_DE_PARA_BLOQUEIO, ["PL0001"])
+
+
+def test_negativa_faz_o_kit_nao_resolver_no_contrato():
+    sem = _por_oferta(_plano(P.montar_fontes(
+        _dados_protheus(), source="avoe", avoe_kits=AVOE, de_para_rows=[])))
+    assert sem["O1"]["status"] == "resolved"
+    com = _por_oferta(_plano(P.montar_fontes(
+        _dados_protheus(), source="avoe", avoe_kits=AVOE,
+        de_para_rows=[_neg("lescent", "900")])))
+    assert com["O1"]["status"] == "blocked"
+    assert com["O1"]["reason"] == kb.REASON_COMPONENT_NOT_IN_CATALOG
+    assert {c["component_sku"] for c in json.loads(com["O1"]["components"])} == {
+        "AVOE:LESCENT:900", "PL0002"}
+
+
+def test_negativa_inativa_e_ignorada_e_o_map_volta_a_valer():
+    bom = _bom([_kit("Lescent", "KIT041", "900")],
+               de_para=[_neg("lescent", "900", ativo=False)])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT041"] == {"PL0001": 1}
+    assert bom.summary["traduzidos_por_origem"] == {A.ORIGEM_MAP: 1}
+    assert bom.summary["de_para_bloqueios_ativos"] == 0
+
+
+def test_negativa_de_uma_marca_nao_afeta_positiva_de_outra():
+    # Caso real: o codigo 10009 e' negativo em barbours e positivo em lescent.
+    ponte = [{"brand": "barbours", "code": "10009", "protheus_sku": "PB0001"}]
+    catalogo = CATALOGO + [{"component_sku": "LC01003", "brand": "lescent",
+                            "ean": None, "name": "Deo Sintetico"}]
+    bom = _bom([_kit("Barbours", "KIT042", "10009"),
+                _kit("Lescent", "KIT042", "10009")],
+               ponte=ponte, catalogo=catalogo,
+               de_para=[_neg("barbours", "10009"),
+                        _dp("lescent", "10009", "LC01003")])
+    kits = _linhas_por_kit(bom)
+    assert kits["AVOE:BARBOURS:KIT042"] == {"AVOE:BARBOURS:10009": 1}
+    assert kits["AVOE:LESCENT:KIT042"] == {"LC01003": 1}
+    assert bom.summary["ambiguos_por_motivo"] == {A.AMBIGUO_DE_PARA_BLOQUEIO: 1}
+    assert bom.summary["traduzidos_por_origem"] == {A.ORIGEM_DE_PARA: 1}
+
+
+def test_negativa_vence_positiva_quando_chega_sem_passar_pelo_carregador():
+    # O carregador recusa o par; quem chama `build_avoe_bom` direto com as
+    # duas linhas recebe bloqueio (fail-closed), nunca a traducao.
+    bom = _bom([_kit("Lescent", "KIT043", "950")],
+               de_para=[_dp("lescent", "950", "PL0007"), _neg("lescent", "950")])
+    assert _linhas_por_kit(bom)["AVOE:LESCENT:KIT043"] == {"AVOE:LESCENT:950": 1}
+    assert bom.summary["ambiguos_por_motivo"] == {A.AMBIGUO_DE_PARA_BLOQUEIO: 1}
+
+
 # --------------------------------------------------------------- volume
 
 @pytest.mark.parametrize("nome, esperado", [
@@ -744,17 +813,31 @@ def test_volume_julga_a_traducao_com_os_nomes_de_todos_os_kits():
 
 # --------------------------------------------------------------- CSV versionado
 
-def test_de_para_versionado_tem_so_as_linhas_classe_a_aprovadas():
+def test_de_para_versionado_tem_as_positivas_classe_a_e_as_negativas():
     linhas = A.carregar_de_para()
-    assert all(r["classe"] == "A" and r["ativo"] is True for r in linhas)
-    assert {(r["marca"], r["codigo_avoe"], r["sku_destino"]) for r in linhas} == {
+    assert all(r["ativo"] is True for r in linhas)
+    positivas = [r for r in linhas if not r["bloquear"]]
+    negativas = [r for r in linhas if r["bloquear"]]
+    assert all(r["classe"] == "A" for r in positivas)
+    assert {(r["marca"], r["codigo_avoe"], r["sku_destino"])
+            for r in positivas} == {
         ("barbours", "10041", "BB02027"), ("barbours", "10042", "BB02019"),
         ("lescent", "10009", "LC01003"), ("lescent", "10015", "LC01009"),
         ("lescent", "10016", "LC01010"), ("lescent", "10017", "LC01011"),
         ("lescent", "10018", "LC03012"), ("lescent", "10026", "LC03020"),
         ("lescent", "10027", "LC03021"),
     }
+    assert all(r["classe"] == "NEG" and r["sku_destino"] == ""
+               for r in negativas)
+    assert {(r["marca"], r["codigo_avoe"]) for r in negativas} == {
+        ("apice", "20674"), ("apice", "20675"), ("apice", "20016"),
+        ("barbours", "10009"), ("barbours", "10134"),
+    }
+    assert len(positivas) == 9 and len(negativas) == 5
     assert all(r["aprovado_por"] and r["evidencia"] for r in linhas)
+    # Cada linha leu exatamente as colunas do cabecalho: nenhuma virgula solta
+    # fora das aspas deslocou a evidencia.
+    assert all(None not in r for r in linhas)
 
 
 _CABECALHO = ",".join(A.DE_PARA_COLUNAS)
@@ -762,15 +845,73 @@ _CABECALHO = ",".join(A.DE_PARA_COLUNAS)
 
 @pytest.mark.parametrize("conteudo", [
     "marca,codigo,sku\nlescent,1,X\n",                # colunas erradas
-    f"{_CABECALHO}\nlescnt,1,X,A,e,p,true\n",         # marca digitada errada
-    f"{_CABECALHO}\nlescent,1,X,A,e,p,sim\n",         # ativo fora de true|false
-    f"{_CABECALHO}\nlescent,,X,A,e,p,true\n",         # codigo vazio
+    ("marca,codigo_avoe,sku_destino,classe,evidencia,aprovado_por,ativo\n"
+     "lescent,1,X,A,e,p,true\n"),                     # sem a coluna bloquear
+    f"{_CABECALHO}\nlescnt,1,X,A,e,p,true,false\n",   # marca digitada errada
+    f"{_CABECALHO}\nlescent,1,X,A,e,p,sim,false\n",   # ativo fora de true|false
+    f"{_CABECALHO}\nlescent,,X,A,e,p,true,false\n",   # codigo vazio
+    f"{_CABECALHO}\nlescent,1,X,A,e,p,true,sim\n",    # bloquear fora de true|false
+    f"{_CABECALHO}\nlescent,1,X,A,e,p,true,\n",       # bloquear vazio
+    f"{_CABECALHO}\nlescent,1,,A,e,p,true,false\n",   # destino vazio sem bloquear
+    f"{_CABECALHO}\nlescent,1,,A,e,p,false,false\n",  # idem, mesmo inativa
+    f"{_CABECALHO}\nlescent,1,X,NEG,e,p,true,true\n", # bloquear com destino
 ])
 def test_de_para_malformado_e_recusado(tmp_path, conteudo):
     arq = tmp_path / "dp.csv"
     arq.write_text(conteudo, encoding="utf-8")
-    with pytest.raises(A.AvoeSourceError):
+    with pytest.raises(A.AvoeSourceError, match="de-para"):
         A.carregar_de_para(arq)
+
+
+def _csv(tmp_path, *linhas):
+    arq = tmp_path / "dp.csv"
+    arq.write_text("\n".join((_CABECALHO,) + linhas) + "\n", encoding="utf-8")
+    return arq
+
+
+def test_de_para_positiva_e_negativa_ativas_na_mesma_chave_sao_conflito(tmp_path):
+    arq = _csv(tmp_path, "lescent,1,X,A,e,p,true,false",
+               "lescent,1,,NEG,e,p,true,true")
+    with pytest.raises(A.AvoeSourceError, match="linha 3"):
+        A.carregar_de_para(arq)
+
+
+def test_de_para_negativa_antes_da_positiva_tambem_e_conflito(tmp_path):
+    arq = _csv(tmp_path, "lescent,1,,NEG,e,p,true,true",
+               "lescent,1,X,A,e,p,true,false")
+    with pytest.raises(A.AvoeSourceError, match="linha 3"):
+        A.carregar_de_para(arq)
+
+
+def test_de_para_conflito_so_conta_linhas_ativas_e_mesma_chave(tmp_path):
+    # Negativa inativa + positiva ativa; e negativa de outra marca no mesmo
+    # codigo: nenhum dos dois e' conflito.
+    linhas = A.carregar_de_para(_csv(
+        tmp_path, "lescent,1,X,A,e,p,true,false",
+        "lescent,1,,NEG,e,p,false,true",
+        "barbours,1,,NEG,e,p,true,true"))
+    assert [(r["marca"], r["ativo"], r["bloquear"]) for r in linhas] == [
+        ("lescent", True, False), ("lescent", False, True),
+        ("barbours", True, True)]
+
+
+def test_de_para_versionado_bloqueia_barbours_10009_e_traduz_lescent_10009():
+    # O mesmo codigo 10009: o map de barbours traduz (errado) e a negativa
+    # bloqueia; em lescent a positiva do CSV traduz.
+    ponte = [{"brand": "barbours", "code": "10009", "protheus_sku": "BB02025"}]
+    catalogo = [{"component_sku": "BB02025", "brand": "barbours", "ean": None,
+                 "name": "Kit de cabelo sintetico"},
+                {"component_sku": "LC01003", "brand": "lescent", "ean": None,
+                 "name": "Body Splash Sintetico"}]
+    bom = A.build_avoe_bom([_kit("Barbours", "KIT044", "10009"),
+                            _kit("Lescent", "KIT044", "10009")],
+                           brand_code_rows=ponte, catalog_rows=catalogo,
+                           de_para_rows=A.carregar_de_para())
+    kits = _linhas_por_kit(bom)
+    assert kits["AVOE:BARBOURS:KIT044"] == {"AVOE:BARBOURS:10009": 1}
+    assert kits["AVOE:LESCENT:KIT044"] == {"LC01003": 1}
+    assert bom.summary["de_para_bloqueios_ativos"] == 5
+    assert bom.summary["de_para_linhas_ativas"] == 9
 
 
 def test_de_para_ausente_e_recusado(tmp_path):
