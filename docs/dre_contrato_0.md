@@ -275,6 +275,29 @@ com API (apice, barbours, lescent, rituaria) numa janela de 60 dias — a API de
 (somados, < 3% da receita fiscal de marketplace em cada mês). **[INFERÊNCIA]** Está emitida em outro `canal` (o canal `ecommerce` concentra
 ~51% da receita fiscal da Kokeshi em jul) ou em outro emissor. Pergunta F1.
 
+**Completude pela numeração de NF (T-0064).** A faixa receita fiscal ÷ GMV não pega um dia faltante: em out/26 a
+Barbours passou em 0,981 sem 04/10. Por isso o publisher de insumos aplica um gate de numeração:
+
+- **Fonte:** `gold.nf_vendas_unificada_v2.chave_nfe`. Da chave saem o emissor (CNPJ, posições 7–20), o modelo (21–22), a
+  série (23–25) e o número (26–34). Entram todas as notas dos emissores das marcas da Torre, de qualquer canal ou
+  plataforma e com ou sem intercompany, porque a numeração é do emissor. Também entra o mês anterior à janela. A
+  marca de cada emissor vem da própria gold (CNPJ da chave × `marca`).
+- **Buraco:** dentro de emissor × modelo × série, são os números que faltam entre duas notas vizinhas. Ele é atribuído ao
+  dia da nota seguinte. Conta quando um buraco contíguo tem **≥ 50 números** (`BURACO_NF_MINIMO`). Buracos menores
+  ficam só no resumo `numeracao_nf.abaixo_do_limiar`. O limiar é **provisório**: a única medição até agora (Apice, série
+  55, raw, de 01/09 a 04/11) achou no máximo 31 números fora dos incidentes, que tiveram de 808 a 1.914.
+- **Efeito:** em todos os canais da marca no mês, o `motivo` do `cmv` e do `cmv_receita_fiscal` ganha o trecho
+  `buraco de numeracao de NF em 03/10 (1.914 numeros), 04/10 (...)`, com os dias em ordem, as séries somadas por dia e
+  no máximo 10 dias nomeados. **Valor, status e cobertura não mudam, e o gate nunca recusa a publicação.** Se a leitura
+  falhar, o lote sai como antes e o resumo mostra `numeracao_nf.estado = "indisponivel: ..."`.
+- **Serving:** `status_reconciliacao` é uma lista fechada no CHECK da 025 e não tem `parcial`. Por isso o estado viaja no
+  texto: quando o motivo tem um trecho que começa com `BURACO_NF_MARCA`, o `dre_service` devolve o CMV como `parcial`
+  (fora da margem conhecida), com o mesmo valor publicado. Essa regra vem antes da razão com o GMV, porque o buraco é a
+  causa conhecida da razão baixa, e o status publicado vai no motivo. Sem migration.
+- **Limitação:** a gold exclui NF rejeitada ou denegada pela SEFAZ. Assim, o buraco junta "não ingerida" e "rejeitada", e
+  o motivo diz isso. Distinguir os dois casos exige ler `raw.bling_nfe_*` (todas as situações), o que fica para depois.
+  Um buraco no fim do mês é atribuído ao dia 1 do mês seguinte, ou não aparece se esse mês está fora da janela.
+
 ### 4.10 L11 — Impostos sobre venda
 
 | Campo | Contrato |

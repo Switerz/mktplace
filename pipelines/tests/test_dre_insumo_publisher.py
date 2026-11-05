@@ -615,3 +615,172 @@ def test_excecoes_autorizadas_sao_texto_auditavel():
     assert P.excecoes_autorizadas(frozenset(), frozenset()) is None
     txt = P.excecoes_autorizadas(frozenset({(JUL, "shopee")}), frozenset({BAR}))
     assert txt == "excecoes autorizadas: sem_vendas=2026-07:shopee; remover_marca=2026-07:ml:barbours"
+
+
+# ---------------------------------------------------------------------------
+# T-0064 — completude pela numeracao de NF (buraco por emissor x serie x dia)
+# ---------------------------------------------------------------------------
+
+OUT = date(2026, 10, 1)
+
+
+def nf(marca="apice", dia=date(2026, 10, 3), faltam=1914, buracos=1, relevantes=None, maior=None, serie="055"):
+    """Linha de `SQL_NUMERACAO_NF` (marca x modelo x serie x dia)."""
+    if relevantes is None:
+        relevantes = buracos if faltam >= P.BURACO_NF_MINIMO else 0
+    rel_faltam = faltam if relevantes else 0
+    return {"competencia": date(dia.year, dia.month, 1), "marca": marca, "modelo": "55", "serie": serie,
+            "dia": dia, "buracos": buracos, "faltam": faltam, "maior_buraco": maior or faltam,
+            "buracos_relevantes": relevantes, "faltam_relevantes": rel_faltam}
+
+
+def lote_nf(numeracao, marcas=("apice", "barbours"), canais=("tiktok", "shopee")):
+    esp = [esperado(c, m, mes=OUT) for m in marcas for c in canais]
+    cmvs = [cmv(c, m, mes=OUT, emissao=date(2026, 10, 31)) for m in marcas for c in canais]
+    return P.montar_lote(esperado=esp, cmv=cmvs, contraprova=[cp(c) for c in cmvs], repasse=[],
+                         canais=list(canais), comps=[OUT], numeracao_nf=numeracao)
+
+
+def test_buraco_de_numeracao_poe_motivo_no_cmv_e_na_receita_fiscal_de_todos_os_canais_da_marca():
+    lt = lote_nf([nf("apice", date(2026, 10, 3), 1914)])
+    assert lt.recusas == []
+    for canal in ("tiktok", "shopee"):
+        c = linha(lt, canal, "apice", "cmv")
+        rf = linha(lt, canal, "apice", "cmv_receita_fiscal")
+        assert c["motivo"].endswith("; buraco de numeracao de NF em 03/10 (1.914 numeros)")
+        assert rf["motivo"] == "base da razao com o GMV; buraco de numeracao de NF em 03/10 (1.914 numeros)"
+        # nada e' extrapolado: valor, status e cobertura identicos ao lote sem o gate
+        assert c["valor"] == Decimal(300_000) and c["status_reconciliacao"] == "reconciliado"
+        assert c["cobertura"] == Decimal(1) and rf["valor"] == Decimal(1_000_000)
+    assert lt.numeracao_nf["parciais"] == [{"competencia": "2026-10", "marca": "apice", "numeros": 1914,
+                                            "motivo": "buraco de numeracao de NF em 03/10 (1.914 numeros)"}]
+
+
+def test_sem_buraco_o_lote_e_identico_ao_de_antes():
+    antes = lote_nf(None)
+    for numeracao in ([], [nf("apice", faltam=3, buracos=2)]):  # nada / so' abaixo do limiar
+        depois = lote_nf(numeracao)
+        assert depois.linhas == antes.linhas and depois.recusas == antes.recusas == []
+        assert depois.observacoes == antes.observacoes
+
+
+def test_buraco_de_outra_marca_nao_afeta_esta():
+    lt = lote_nf([nf("barbours", date(2026, 10, 4), 914, serie="003")])
+    assert "buraco" not in linha(lt, "tiktok", "apice", "cmv")["motivo"]
+    assert linha(lt, "tiktok", "apice", "cmv_receita_fiscal")["motivo"] == "base da razao com o GMV"
+    assert "04/10 (914 numeros)" in linha(lt, "tiktok", "barbours", "cmv")["motivo"]
+
+
+def test_buraco_de_outro_mes_nao_afeta_este():
+    lt = lote_nf([nf("apice", date(2026, 9, 30), 500)])
+    assert "buraco" not in linha(lt, "tiktok", "apice", "cmv")["motivo"]
+
+
+def test_series_somam_no_dia_e_dias_sao_listados_em_ordem():
+    """Barbours out/26: series 3 e 4 sem 04/10 (914 + 808)."""
+    lt = lote_nf([nf("barbours", date(2026, 10, 11), 60, serie="003"),
+                  nf("barbours", date(2026, 10, 4), 914, serie="003"),
+                  nf("barbours", date(2026, 10, 4), 808, serie="004")])
+    assert linha(lt, "shopee", "barbours", "cmv")["motivo"].endswith(
+        "; buraco de numeracao de NF em 04/10 (1.722 numeros), 11/10 (60 numeros)")
+    assert lt.numeracao_nf["parciais"][0]["numeros"] == 1782
+
+
+def test_motivo_limita_os_dias_nomeados():
+    dias = [nf("apice", date(2026, 10, d), 100) for d in range(1, 14)]
+    m = linha(lote_nf(dias), "tiktok", "apice", "cmv")["motivo"]
+    assert "10/10 (100 numeros), e mais 3 dia(s) (300 numeros)" in m and "11/10" not in m
+
+
+def test_trecho_do_motivo_nao_tem_separador_interno():
+    """O serving separa o motivo por '; ' e procura o trecho pelo rotulo."""
+    _, resumo = P.buracos_numeracao_nf([nf("apice", date(2026, 10, d), 100) for d in range(1, 14)])
+    assert "; " not in resumo["parciais"][0]["motivo"]
+    assert resumo["parciais"][0]["motivo"].startswith(P.BURACO_NF_MARCA)
+
+
+def test_buraco_abaixo_do_limiar_so_vai_para_o_resumo():
+    lt = lote_nf([nf("kokeshi", date(2026, 10, 2), 31, buracos=4)], marcas=("apice",))
+    assert all("buraco" not in (r["motivo"] or "") for r in lt.linhas)
+    assert lt.numeracao_nf["abaixo_do_limiar"] == [
+        {"competencia": "2026-10", "marca": "kokeshi", "buracos": 4, "numeros": 31, "maior": 31}]
+    assert lt.numeracao_nf["limiar_buraco"] == P.BURACO_NF_MINIMO
+
+
+def test_gate_nunca_recusa_nem_com_buraco_em_toda_celula():
+    lt = lote_nf([nf("apice"), nf("barbours", date(2026, 10, 4), 914)])
+    assert lt.recusas == []
+    assert len(lt.linhas) == len(lote_nf(None).linhas)
+
+
+def test_gate_e_idempotente():
+    entrada = [nf("barbours", date(2026, 10, 4), 808, serie="004"), nf("barbours", date(2026, 10, 4), 914)]
+    assert lote_nf(entrada).linhas == lote_nf(list(reversed(entrada))).linhas
+
+
+def test_gate_soma_ao_motivo_da_contraprova_e_da_razao():
+    c = cmv("tiktok", "apice", mes=OUT, receita=911_000, emissao=date(2026, 10, 31))
+    lt = P.montar_lote(esperado=[esperado("tiktok", "apice", mes=OUT)], cmv=[c],
+                       contraprova=[cp(c, ultima_emissao=date(2026, 10, 27))], repasse=[], canais=["tiktok"],
+                       comps=[OUT], numeracao_nf=[nf("apice")])
+    m = linha(lt, "tiktok", "apice", "cmv")
+    assert m["status_reconciliacao"] == "nao_reconciliado"
+    partes = m["motivo"].split("; ")
+    assert partes[0].startswith("receita fiscal / GMV = 0.9110")
+    assert partes[-2].startswith("contraprova nao bloqueante")
+    assert partes[-1] == "buraco de numeracao de NF em 03/10 (1.914 numeros)"
+
+
+class _ConnQuebra:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def execute(self, sql, params=None):
+        from sqlalchemy.exc import ProgrammingError
+        raise ProgrammingError("SELECT", {}, Exception("column chave_nfe does not exist host=10.0.0.1"))
+
+
+class _EngQuebra:
+    def connect(self):
+        return _ConnQuebra()
+
+
+def test_leitura_do_gate_que_falha_nao_bloqueia_e_diz_por_que():
+    linhas, estado = P.ler_numeracao_nf(_EngQuebra(), [OUT], ["apice"])
+    assert linhas is None and estado.startswith("indisponivel: ProgrammingError")
+    assert "10.0.0.1" not in estado  # sanitizado
+    assert lote_nf(linhas).linhas == lote_nf(None).linhas
+
+
+def test_leitura_do_gate_sem_fonte_ou_marca_nao_roda():
+    assert P.ler_numeracao_nf(None, [OUT], ["apice"])[0] is None
+    assert P.ler_numeracao_nf(_EngQuebra(), [OUT], [])[0] is None
+
+
+def test_sql_da_numeracao_le_a_chave_do_emissor_e_o_mes_anterior():
+    sql = _sql(P.SQL_NUMERACAO_NF)
+    assert "FROM gold.nf_vendas_unificada_v2" in sql and "chave_nfe ~ '^[0-9]{44}$'" in sql
+    assert "substr(chave_nfe, 7, 14)" in sql and "substr(chave_nfe, 23, 3)" in sql
+    assert "substr(chave_nfe, 26, 9)::bigint" in sql
+    assert "PARTITION BY emissor, modelo, serie ORDER BY numero" in sql
+    # numeracao e' do emissor: sem filtro de canal/plataforma/intercompany nas notas
+    notas = sql[sql.index("notas AS"):sql.index("buracos AS")]
+    assert "canal" not in notas and "plataforma" not in notas and "intercompany" not in notas
+    assert "data_mes = ANY(:meses_numeracao)" in sql and "faltam >= :minimo" in sql
+    assert "{{" not in sql and "[[" not in sql
+
+
+def test_leitura_do_gate_e_read_only_com_timeout():
+    fonte = (REPO / "pipelines" / "dre" / "insumo_publisher.py").read_text(encoding="utf-8")
+    trecho = fonte[fonte.index("def ler_numeracao_nf"):fonte.index("def _resumo_numeracao")]
+    assert trecho.index("SET TRANSACTION READ ONLY") < trecho.index("statement_timeout = '600s'") \
+        < trecho.index("SQL_NUMERACAO_NF")
+    assert "except SQLAlchemyError" in trecho and "except Exception" not in trecho
+
+
+def test_rotulo_do_buraco_e_o_mesmo_do_serving():
+    fonte = (REPO / "apps" / "api" / "app" / "services" / "dre_service.py").read_text(encoding="utf-8")
+    assert f'BURACO_NF_MARCA = "{P.BURACO_NF_MARCA}"' in fonte

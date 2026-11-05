@@ -101,6 +101,11 @@ CMV_PROVISORIO_INTEGRAL = 0.995
 #: (fora da margem conhecida); o custo da parte descoberta NUNCA e' extrapolado.
 #: 0,98 e' RECOMENDACAO PENDENTE DE DECISAO DO MARIO (FASE1, decisao E1).
 COBERTURA_CMV_MINIMA = 0.98
+#: T-0064: rotulo do trecho do `motivo` que o publisher de insumos grava no
+#: CMV quando a numeracao de NF da marca tem buraco no mes. O CHECK de status
+#: da 025 nao tem `parcial`, entao o estado viaja no texto. Mesma constante de
+#: `pipelines.dre.insumo_publisher.BURACO_NF_MARCA` (um teste compara).
+BURACO_NF_MARCA = "buraco de numeracao de NF em "
 #: Residuo tolerado na identidade settlement = revenue + fee_and_tax + shipping.
 #: Medido: 0,00 em 758.324 transacoes (contrato §6.1, P1).
 RESIDUO_REPASSE_MAX = 1.0
@@ -589,6 +594,14 @@ def _cmv(ins: InsumosCelula, receita: float | None, avisos: list[str]) -> dict:
         return _com_cobertura(_comp(valor=custo, status=status, motivo=motivo, **meta),
                               custo, receita_fiscal, cobertura)
 
+    # T-0064: buraco de numeracao de NF no mes = base fiscal incompleta (notas
+    # nao ingeridas ou rejeitadas). Vem ANTES da razao com o GMV: o buraco e' a
+    # causa conhecida de uma razao baixa, e o motivo carrega a razao publicada.
+    buraco = next((p for p in (c.get("motivo") or "").split("; ") if p.startswith(BURACO_NF_MARCA)), None)
+    if buraco:
+        return comp(COBERTURA_PARCIAL,
+                    f"{buraco}: notas ausentes da base fiscal (nao ingeridas ou rejeitadas); CMV e receita fiscal "
+                    f"do mes incompletos, nada e' extrapolado (publicacao: {c['status']})")
     if c["status"] != "reconciliado":
         return comp(NAO_RECONCILIADO, f"publicacao: {c['motivo']} (pergunta F1/F7)")
     # A publicacao reconciliou contra o GMV DAQUELE instante. O GMV pode ter
