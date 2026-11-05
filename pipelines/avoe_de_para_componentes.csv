@@ -1,0 +1,10 @@
+marca,codigo_avoe,sku_destino,classe,evidencia,aprovado_por,ativo
+barbours,10041,BB02027,A,"cadastro (marca, sku_antigo) exato e unico; EAN Avoe = gtin do cadastro = ean do dim; volume igual nos dois nomes; destino no catalogo",supervisor T-0063 (classe A da T-0061),true
+barbours,10042,BB02019,A,"cadastro (marca, sku_antigo) exato e unico; EAN Avoe = gtin do cadastro = ean do dim; volume igual nos dois nomes; destino no catalogo",supervisor T-0063 (classe A da T-0061),true
+lescent,10009,LC01003,A,"cadastro (marca, sku_antigo) exato e unico; EAN Avoe = gtin do cadastro = ean do dim; volume igual nos dois nomes; destino no catalogo",supervisor T-0063 (classe A da T-0061),true
+lescent,10015,LC01009,A,"cadastro (marca, sku_antigo) exato e unico; EAN Avoe = gtin do cadastro = ean do dim; volume igual nos dois nomes; destino no catalogo",supervisor T-0063 (classe A da T-0061),true
+lescent,10016,LC01010,A,"cadastro (marca, sku_antigo) exato e unico; EAN Avoe = gtin do cadastro = ean do dim; volume igual nos dois nomes; destino no catalogo",supervisor T-0063 (classe A da T-0061),true
+lescent,10017,LC01011,A,"cadastro (marca, sku_antigo) exato e unico; EAN Avoe = gtin do cadastro = ean do dim; volume igual nos dois nomes; destino no catalogo",supervisor T-0063 (classe A da T-0061),true
+lescent,10018,LC03012,A,"cadastro (marca, sku_antigo) exato e unico; EAN Avoe = gtin do cadastro = ean do dim; volume igual nos dois nomes; destino no catalogo",supervisor T-0063 (classe A da T-0061),true
+lescent,10026,LC03020,A,"cadastro (marca, sku_antigo) exato e unico; EAN Avoe = gtin do cadastro = ean do dim; volume igual nos dois nomes; destino no catalogo",supervisor T-0063 (classe A da T-0061),true
+lescent,10027,LC03021,A,"cadastro (marca, sku_antigo) exato e unico; EAN Avoe = gtin do cadastro = ean do dim; volume igual nos dois nomes; destino no catalogo",supervisor T-0063 (classe A da T-0061),true

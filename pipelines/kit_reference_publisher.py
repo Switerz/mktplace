@@ -158,7 +158,8 @@ SELECT kit_sku, component_sku, qty_per_kit, valid_from, valid_to, active
 
 SQL_CATALOG = """
 SELECT upper(trim(coalesce(nullif(codigo_protheus, ''), sku))) AS component_sku,
-       marca AS brand, ean, marca_conflitante
+       marca AS brand, ean, marca_conflitante,
+       nome AS name  -- so' para a trava de volume da Avoe; o contrato ignora
   FROM gold.dim_produto_gobeauty
  WHERE coalesce(nullif(codigo_protheus, ''), '') <> ''
     OR fonte_do_sku = 'protheus'
@@ -345,7 +346,7 @@ def _composicao(bom, kit_sku) -> tuple:
 
 
 def montar_fontes(dados: dict, *, source: str, avoe_kits=None,
-                  today: date | None = None) -> dict:
+                  today: date | None = None, de_para_rows=None) -> dict:
     """Escolhe a origem da composicao. Puro, sem banco.
 
     Nao decide nada sobre kit: so' entrega ao contrato linhas de outra origem,
@@ -364,19 +365,26 @@ def montar_fontes(dados: dict, *, source: str, avoe_kits=None,
     do contrato. Quando a oferta tambem resolveria no Protheus, a sobreposicao
     e' contada, e as composicoes divergentes sao LISTADAS em
     `avoe_summary["precedencia"]` — a Avoe vence, mas a divergencia fica visivel.
+
+    `de_para_rows=None` le' o de-para versionado (`avoe_de_para_componentes.csv`);
+    o catalogo vai junto para as travas do de-para e de volume (T-0063).
     """
     if source not in SOURCES:
         raise KitPublisherError(f"fonte desconhecida: {source!r}")
     if source == SOURCE_PROTHEUS:
         return dados
 
-    from pipelines.avoe_kits_source import build_avoe_bom
+    from pipelines.avoe_kits_source import build_avoe_bom, carregar_de_para
 
     if not avoe_kits:
         raise KitPublisherError(
             f"--source {source} sem kits da Avoe: snapshot ausente ou vazio")
+    if de_para_rows is None:
+        de_para_rows = carregar_de_para()
     avoe = build_avoe_bom(avoe_kits,
-                          brand_code_rows=dados["bridge_brand_code"])
+                          brand_code_rows=dados["bridge_brand_code"],
+                          catalog_rows=dados["catalog_rows"],
+                          de_para_rows=de_para_rows)
     if not avoe.bom_rows:
         raise KitPublisherError(
             "nenhum kit da Avoe passou na validacao de entrada")

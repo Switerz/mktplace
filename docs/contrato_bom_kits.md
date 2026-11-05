@@ -336,7 +336,83 @@ caminho é passado por `--secret-file` ou `AVOE_API_SECRET_FILE`; o valor nunca
 | vigência | sem datas na fonte: bordas abertas, `active = true` |
 | `sku_kit` inválido (vazio, espaço, apóstrofo) | kit recusado — medido: há kit cujo `sku_kit` é o nome |
 | mesma `(marca, sku_kit)` com composições diferentes | as duas recusadas |
+| de-para versionado (T-0063) | 2ª fonte de tradução do componente: [`pipelines/avoe_de_para_componentes.csv`](../pipelines/avoe_de_para_componentes.csv). Ver "De-para versionado" abaixo |
+| trava de volume (T-0063) | vale para **toda** tradução (map ou de-para). Ver "Trava de volume" abaixo |
 | oferta que alcança kit nas duas fontes | **Avoe vence** (decisão do Mário). A escolha da fonte é feita por oferta em `montar_fontes`, **antes** do contrato, que então vê só uma BOM — nunca `AMBIGUOUS` entre fontes. Sobreposições contadas em `avoe_summary.precedencia` (`sobrepostas`, `identicas`, `divergentes`), com a lista das divergentes. A fonte de cada linha é o prefixo `AVOE:` de `kit_protheus_sku` (sem coluna nova, sem migration) |
+
+### De-para versionado (T-0063)
+
+Há componentes cujo código da Avoe existe no cadastro da marca certa
+(`silver.gobeaute_produto_cadastro.sku_antigo`), mas não em
+`gold.map_produto_codigo_gobeauty` sob essa marca. A ponte por `sku_antigo` do
+publisher é **sem marca** e os códigos colidem entre marcas, então ela não
+serve aqui. Para esses casos existe um de-para mantido à mão, versionado e
+aprovado linha a linha:
+
+| coluna | conteúdo |
+|---|---|
+| `marca` | marca da Torre (`apice`, `barbours`, `lescent`, `denavita`). Fora da allowlist: o arquivo é recusado |
+| `codigo_avoe` | código do componente como a Avoe devolve |
+| `sku_destino` | SKU Protheus |
+| `classe` | `A` = automático com prova (chave do cadastro exata, EAN igual nos três lados, volume igual, destino no catálogo). Só a classe A entrou |
+| `evidencia` | texto curto, **sem número de negócio** (o repo é público) |
+| `aprovado_por` | quem aprovou a linha |
+| `ativo` | `true` \| `false`. Qualquer outro valor: o arquivo é recusado |
+
+Travas, todas fail-closed:
+
+| trava | regra | efeito quando falha |
+|---|---|---|
+| (a) | o de-para só é consultado quando o `map` **não** traduz `(marca, código)`. Com o `map` ambíguo (2+ destinos), o de-para não desempata | segue a decisão do `map` |
+| (b) | `map` traduz para SKU **diferente** do de-para | componente **ambíguo** (`map_diverge_de_para`): nenhum dos dois é escolhido |
+| (c) | `sku_destino` tem de estar no catálogo do contrato (`SQL_CATALOG`) **com a mesma marca** | componente **sem ponte** (`de_para_destino_fora_do_catalogo` / `de_para_destino_de_outra_marca`) |
+| (d) | a chave é `(marca, código)`: a linha só alcança kit da mesma marca | sem efeito em outra marca |
+| (e) | `ativo=false` | linha ignorada |
+| — | duas linhas ativas para a mesma `(marca, código)` com destinos diferentes | **ambíguo** (`de_para_multiplo`) |
+
+Arquivo ausente ou malformado levanta `AvoeSourceError`: nunca vira "sem
+de-para" em silêncio. O CSV é o **único** arquivo não-`.py` da wheel
+`mktplace-pipelines` (`[tool.setuptools.package-data]`, lista nominal), porque a
+DAG da Torre roda o publisher a partir da wheel instalada.
+
+Para tirar uma linha do ar: `ativo=false` (ou apagar a linha) e novo deploy.
+Linha de classe B (prova incompleta) só entra com o OK de quem conhece o
+cadastro, registrado em `aprovado_por`.
+
+### Trava de volume (T-0063)
+
+Uma tradução que casa a chave não prova que é o mesmo produto: o cadastro tem
+códigos apontando para produtos de outro tipo e de outro tamanho. Por isso,
+toda tradução aceita (pelo `map` ou pelo de-para) passa por uma comparação de
+volume/peso entre o nome do componente na Avoe e o nome do SKU destino no
+catálogo (`gold.dim_produto_gobeauty.nome`, que entra em `SQL_CATALOG` como
+`name` e que o contrato ignora).
+
+| regra | detalhe |
+|---|---|
+| extração | número + `ml`, `l`/`lt`/`litro`, `g`/`gr`/`grama`, `kg`. O número não pode vir colado a letra ou dígito (`AP3000`, `Q10`, `N20` não são volume) e a unidade não pode continuar em letra (`3 Lescent` não é 3 litros). Acentos e caixa são ignorados |
+| normalização | `1 l = 1000 ml`, `1 kg = 1000 g`; vírgula decimal aceita |
+| nomes da Avoe | os de **todos** os kits em que o código aparece. A tradução `(marca, código) → SKU` é uma só, então um nome que a contradiz bloqueia o código em todos os kits — inclusive naqueles em que a Avoe mandou o componente sem nome |
+| conjuntos iguais | `concorda`: traduz |
+| conjuntos diferentes, mesma dimensão | **ambíguo** (`volume_diverge`) |
+| dimensões diferentes (g × ml) | **ambíguo** (`volume_unidade_incompativel`). Regra conservadora: sem densidade não há conversão, e "500 g" contra "1000 ml" é exatamente o caso que a trava existe para pegar. Custo conhecido: o mesmo produto escrito com unidade trocada também é bloqueado |
+| um dos lados sem volume | **não** bloqueia. O par é contado como `sem_prova` |
+
+"Ambíguo" aqui tem o efeito de sempre: o componente fica como
+`AVOE:<MARCA>:<código>`, o catálogo não o conhece e o contrato bloqueia o kit
+com `kit_component_not_in_catalog`. O vocabulário de motivos do contrato não
+muda (sem migration). O motivo fino de cada componente vai no
+`avoe_summary` que o publisher devolve: `ambiguos_por_motivo`,
+`sem_ponte_por_motivo`, `traduzidos_por_origem`, `volume`
+(`concorda`/`sem_prova`/`diverge`/`unidade_incompativel`) e a lista
+`bloqueios` (kit, código, motivo, destinos do `map` e do de-para, nomes da
+Avoe).
+
+**O que a trava não pega.** Produto de **tipo** diferente com volume ausente
+de um dos lados (por exemplo, uma "Máscara" sem volume na Avoe traduzida para
+um "Condicionador 1L") passa como `sem_prova`. Fechar esse caso exige outra
+prova — regra de tipo de produto ou linha negativa no de-para — e está em
+aberto, sem regra implementada.
 
 ### O que a Avoe **não** substitui
 
