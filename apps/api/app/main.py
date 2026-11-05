@@ -16,6 +16,7 @@ from app.routers import (
     performance,
     performance_oficial,
     regioes,
+    tiktok_abertos,
 )
 
 app = FastAPI(
@@ -40,6 +41,7 @@ app.add_middleware(
 app.include_router(performance.router)
 app.include_router(regioes.router)
 app.include_router(expedicao.router)
+app.include_router(tiktok_abertos.router)
 # CX-MKT-2: secao Performance da Expedicao, inerte ate' `expedicao_performance_api_enabled`.
 app.include_router(performance_oficial.router)
 # CX-MKT-3: LDR do ML para a faixa do topo (mesma flag da Performance).

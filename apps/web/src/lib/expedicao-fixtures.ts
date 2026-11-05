@@ -576,6 +576,59 @@ export function respostaFicticia(url: string, cenarioPedido: CenarioDemo): { sta
   if (caminho === "/api/v1/expedicao") return { status: 200, corpo: fila(filaCanal, cenario) };
   if (caminho === "/api/v1/expedicao/trend") return { status: 200, corpo: tendencia(filaCanal, cenario) };
   if (caminho === "/api/v1/expedicao/tiktok") return { status: 200, corpo: tiktok(cenario) };
+  if (caminho === "/api/v1/expedicao/tiktok/abertos")
+    return {
+      status: 200,
+      corpo: tiktokAbertos(u.searchParams.get("brands"), u.searchParams.get("lista"), Number(u.searchParams.get("page") ?? "1")),
+    };
   if (caminho === "/api/v1/expedicao/shopee/ldr") return { status: 200, corpo: ldrShopee(cenario) };
   return null;
+}
+
+// EXPEDICAO-TIKTOK-ABERTOS — pedidos em aberto (formato real, numeros ficticios).
+function tiktokAbertos(marca: string | null, lista: string | null, pagina: number): unknown {
+  const base = [
+    ["kokeshi", 9087, 216, 8871, 19, 1732, 8, 1724, 2950, 3614, 2334],
+    ["apice", 3421, 64, 3357, 8, 1294, 0, 1294, 739, 1188, 1430],
+    ["lescent", 3070, 77, 2993, 5, 541, 8, 533, 1076, 1207, 698],
+    ["barbours", 3488, 156, 3332, 5, 207, 9, 198, 1305, 1680, 381],
+    ["rituaria", 444, 0, 444, 3, 2, 0, 2, 0, 358, 2],
+  ] as const;
+  const marcas = base
+    .filter((b) => !marca || b[0] === marca)
+    .map((b) => ({
+      brand: b[0], open: b[1], awaiting_shipment: b[2], awaiting_collection: b[3], on_hold: b[4],
+      overdue: b[5], overdue_shipment: b[6], overdue_collection: b[7], due_today: b[8],
+      due_next_day: b[9], on_time: b[1] - b[5] - b[8] - b[9], over_48h: b[10], oldest_paid_at: "2026-10-30T00:43:11",
+    }));
+  const chaves = ["open", "awaiting_shipment", "awaiting_collection", "on_hold", "overdue", "overdue_shipment",
+    "overdue_collection", "due_today", "due_next_day", "on_time", "over_48h"] as const;
+  const totals = Object.fromEntries(chaves.map((k) => [k, marcas.reduce((s, m) => s + m[k], 0)]));
+  // 450 pedidos ficticios por lista: 3 paginas de 200 para testar a paginacao.
+  const todos = lista
+    ? Array.from({ length: 450 }, (_, k) => {
+        const m = marcas[k % Math.max(marcas.length, 1)];
+        return {
+          brand: m?.brand ?? "kokeshi", order_id: `58${String(k).padStart(4, "0")}0412345678`, shop_name: m?.brand ?? "kokeshi",
+          stage: k % 5 === 0 ? "despacho" : "coleta", paid_at: `2026-11-0${2 + (k % 2)}T1${k % 10}:2${k % 6}:00`,
+          deadline: lista === "due_today" ? "2026-11-05" : lista === "due_next_day" ? "2026-11-06" : "2026-11-04",
+          situation: lista === "due_today" || lista === "due_next_day" ? lista : "overdue",
+          over_48h: true, hours_open: 72 - (k % 40),
+        };
+      })
+    : [];
+  const campo: Record<string, (typeof chaves)[number]> = {
+    overdue: "overdue", due_today: "due_today", due_next_day: "due_next_day", over_48h: "over_48h",
+    awaiting_shipment: "awaiting_shipment", awaiting_collection: "awaiting_collection", all: "open",
+  };
+  const tamanho = 200;
+  const ini = (Math.max(1, pagina) - 1) * tamanho;
+  const orders = todos.slice(ini, ini + tamanho);
+  return {
+    channel: "tiktokshop", availability: "available", effective_at: "2026-11-05T13:00:00+00:00",
+    today: "2026-11-05", next_business_day: "2026-11-06", cohort_days: 30, excluded_brands: ["gocase"],
+    deadline_reconstructed: true, totals, brands: marcas, list: lista, orders,
+    page: Math.max(1, pagina), page_size: tamanho, has_more: ini + tamanho < todos.length,
+    list_total: lista ? Math.min(totals[campo[lista]] ?? 0, todos.length) : 0,
+  };
 }

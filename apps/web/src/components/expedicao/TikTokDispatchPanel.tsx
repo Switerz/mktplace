@@ -60,6 +60,7 @@ import BarraDeQualidade from "@/components/expedicao/BarraDeQualidade";
 import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/CabecalhoExpedicao";
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
 import JornadaPedidos, { useJornada } from "@/components/expedicao/JornadaPedidos";
+import TikTokPedidosAbertos from "@/components/expedicao/TikTokPedidosAbertos";
 import LayoutExpedicao, {
   CLASSE_CABECALHO,
   CLASSE_RAIZ_EXPEDICAO,
@@ -853,7 +854,13 @@ export default function TikTokDispatchPanel({
           // RISCO ATUAL -> PRAZO (LDR) -> JORNADA -> EVOLUCAO -> CONCENTRACAO:
           // a ordem e' do esqueleto, a mesma dos tres canais.
           <CorpoGestor
-            risco={secaoRisco}
+            risco={
+              <>
+                {/* EXPEDICAO-TIKTOK-ABERTOS: os pedidos em aberto agora, no modelo da Shopee/ML. */}
+                <TikTokPedidosAbertos api={BASE} marca={marca} />
+                {secaoRisco}
+              </>
+            }
             ldr={faixaTopo}
             prazo={secaoLdr}
             jornada={<JornadaPedidos carga={jornada.carga} aoTentarDeNovo={jornada.tentarDeNovo} marca={marca} />}
@@ -870,6 +877,7 @@ export default function TikTokDispatchPanel({
           />
         ) : (
           <>
+            <TikTokPedidosAbertos api={BASE} marca={marca} />
             {secaoLdr}
             {/* DETALHE: coorte, loja e fluxo */}
             {painelCoortes}
