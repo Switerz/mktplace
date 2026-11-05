@@ -16,6 +16,7 @@ e o envio pula quem já recebeu aquela chave (ver `app/services/slack_dm.py`).
 | A1 | Vencidos da Shopee acima de 3% da fila | na hora; lembra às 9h, 13h e 17h; avisa quando volta | `POST /api/v1/alertas/expedicao-vencidos` | `*/15 * * * *` |
 | A2 | LDR acima do teto (qualquer marca × canal) | na hora, no máximo 1 vez por dia por conta | `POST /api/v1/alertas/criticos` | `*/15 * * * *` |
 | A3 | Kokeshi: reputação oficial do Mercado Livre crítica | na hora, 1 vez por fotografia diária | `POST /api/v1/alertas/criticos` | `*/15 * * * *` |
+| A4 | TikTok: pedidos vencidos parados acima de 3% dos pendentes | na hora; de novo às 9h, 13h e 17h enquanto continuar acima | `POST /api/v1/alertas/criticos` | `*/15 * * * *` |
 | R1 | Report diário: GMV de ontem, avanços e problemas | todo dia às 8h (Brasília) | `POST /api/v1/alertas/report-diario` | `0 11 * * *` |
 
 Horário de Brasília = UTC−3 (sem horário de verão).
@@ -61,6 +62,29 @@ Fonte: a fotografia diária da reputação do Mercado Livre
 
 A LDR da Kokeshi (ML e TikTok) já entra pela A2. A queda de GMV da Kokeshi
 entra no report (R1), porque o dia de ontem só fecha de manhã.
+
+## A4 — Vencidos parados no TikTok
+
+O mesmo raciocínio do A1, para o TikTok Shop. Que parte do que está parado já
+passou do prazo de coleta? O TikTok não tem fila fotografada como a Shopee, então
+a conta sai da série diária (`marts.expedicao_tiktok_dispatch_daily`), com os
+mesmos recortes da tela `/expedicao/tiktok`:
+
+* **vencidos:** pendentes de coleta vencidos dos vencimentos maduros dos últimos
+  7 dias. É o mesmo número de "N pedido(s) passaram do prazo e ainda não foram
+  registrados";
+* **parados:** os vencidos mais os pendentes ainda no prazo.
+
+* **Crítico (DM):** vencidos acima de **3%** dos parados (o mesmo limite do A1),
+  com base de pelo menos 30 pedidos. A DM lista as marcas acima do limite.
+* Publicação velha (a mesma regra `fotografia_velha` da tela) não avisa.
+* Chave: `vencidos:tiktokshop:<dia>:<turno>`, com turno `00`, `09`, `13` ou `17`
+  (Brasília). Enquanto continuar acima, avisa no máximo 4 vezes por dia.
+* O prazo é **reconstruído** pela regra de 2 dias úteis, não é o SLA oficial do
+  TikTok. A DM diz isso.
+* **Mercado Livre fica de fora** enquanto a trava `expedicao_ml_prazo_enabled`
+  estiver desligada. Hoje a fotografia do ML marca como vencido o envio que já
+  foi coletado, e o alerta sairia falso.
 
 ## R1 — Report diário das 8h
 

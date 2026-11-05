@@ -1,6 +1,7 @@
-"""Alertas criticos do bot "Torre": LDR acima do teto e performance da Kokeshi.
+"""Alertas criticos do bot "Torre": LDR acima do teto, performance da Kokeshi
+e vencidos parados no TikTok.
 
-Mapa completo em `docs/torre_bot_alertas.md` (A2 e A3). Chamado pela rota
+Mapa completo em `docs/torre_bot_alertas.md` (A2, A3 e A4). Chamado pela rota
 `POST /api/v1/alertas/criticos` (cron de 15 min) e reaproveitado pelo report
 diario (`torre_report.py`), que tambem mostra os itens de "atencao".
 
@@ -12,6 +13,8 @@ Cada numero vem do mesmo servico que a tela usa:
   LDR ML       ml_ldr_service.obter_ldr_ml
   LDR TikTok   expedicao_tiktok_service.obter_serie (coleta)
   Kokeshi      performance_oficial_service.montar_performance_oficial (ML)
+  Vencidos TT  marts.expedicao_tiktok_dispatch_daily, com a MESMA consulta e as
+               MESMAS colunas da /expedicao/tiktok (A4, ver `ler_vencidos_tiktok`)
 
 Meta e teto sao os da faixa "LDR · ultimos 7 dias"
 (`apps/web/src/lib/expedicao-ldr-topo.ts`, confirmados em 04/11/2026). Uma
@@ -21,14 +24,18 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Callable, Optional
 
+from sqlalchemy import text
+
+from app.services import expedicao_service
 from app.services import expedicao_shopee_ldr_service as shopee_ldr
 from app.services import expedicao_tiktok_service as tiktok
 from app.services import ml_ldr_service as ml_ldr
 from app.services import performance_oficial_service as perf_oficial
 from app.services import shopee_ldr_dm_service as shopee_dm
+from app.services.alerta_vencidos import HORAS_LEMBRETE, LIMIAR_VENCIDOS
 from app.services.gold_service import BRAND_LABELS, TZ_OPERACIONAL
 from app.services.slack_dm import Item
 
@@ -185,7 +192,7 @@ def texto_celula(c: CelulaLdr) -> str:
     meta, teto = META_TETO[c.canal]
     extra = f"; {c.parcial}" if c.parcial else ""
     return (f"{rotulo_marca(c.marca)} no {ROTULO_CANAL[c.canal]}: LDR {pct(c.taxa)} "
-            f"({c.atrasados} de {inteiro(c.base)} pedidos; meta {pct(meta)}, teto {pct(teto)}{extra})")
+            f"({inteiro(c.atrasados)} de {inteiro(c.base)} pedidos; meta {pct(meta)}, teto {pct(teto)}{extra})")
 
 
 def itens_ldr_criticos(leitura: LeituraLdr, dia: date) -> list[Item]:
@@ -282,6 +289,117 @@ def itens_saude_criticos(leitura: LeituraSaude) -> list[Item]:
 
 
 # ---------------------------------------------------------------------------
+# A4 - vencidos parados no TikTok (coleta)
+# ---------------------------------------------------------------------------
+# O A1 cobre a fila da Shopee. O TikTok nao tem fila fotografada: a mesma
+# pergunta ("quanto do que esta' parado ja' passou do prazo?") sai da serie
+# diaria, somando os pendentes de coleta de todas as datas de pagamento que a
+# /expedicao/tiktok le. O Mercado Livre fica de fora enquanto a TRAVA de
+# `expedicao_service.prazo_publicado` estiver ligada: hoje ele marcaria como
+# vencido o envio ja' coletado.
+#
+# Limite: o MESMO 3% do A1. Repeticao: uma vez por turno de Brasilia (antes das
+# 9h, 9h, 13h, 17h), como os lembretes do A1, enquanto continuar acima.
+
+@dataclass(frozen=True)
+class VencidosMarca:
+    marca: str
+    vencidos: int
+    fila: int
+
+    @property
+    def fracao(self) -> Optional[float]:
+        return self.vencidos / self.fila if self.fila > 0 else None
+
+
+@dataclass(frozen=True)
+class LeituraVencidos:
+    canal: str
+    effective_at: datetime
+    marcas: list[VencidosMarca]
+    velha: bool = False
+
+    @property
+    def vencidos(self) -> int:
+        return sum(m.vencidos for m in self.marcas)
+
+    @property
+    def fila(self) -> int:
+        return sum(m.fila for m in self.marcas)
+
+    @property
+    def fracao(self) -> Optional[float]:
+        return self.vencidos / self.fila if self.fila > 0 else None
+
+
+def ler_vencidos_tiktok(db, agora: datetime) -> Optional[LeituraVencidos]:
+    """Pendentes de coleta por marca. `None` sem tabela ou sem linhas."""
+    if not tiktok._tabela_existe(db):
+        return None
+    hoje = tiktok._hoje_brt(agora)
+    desde = hoje - timedelta(days=DIAS_LDR + tiktok.FOLGA_PAGAMENTO_DIAS)
+    linhas = db.execute(text(tiktok.SERIE_SQL),
+                        {"canal": tiktok.CANAL, "desde": desde, "ate": hoje}).mappings().all()
+    if not linhas:
+        return None
+    # Mesmos recortes da tela: vencidos = pendentes vencidos dos vencimentos
+    # MADUROS da janela ("N pedidos passaram do prazo e ainda nao foram
+    # registrados"); no prazo = pendentes das coortes ainda abertas.
+    desde_venc = hoje - timedelta(days=DIAS_LDR)
+    soma: dict[str, list[int]] = {}
+    for x in linhas:
+        a = soma.setdefault(str(x["brand"]).lower(), [0, 0])
+        if not tiktok._madura(x, "coleta"):
+            a[1] += tiktok._pend_no_prazo(x, "coleta")
+        elif desde_venc <= tiktok._deadline(x, "coleta") <= hoje:
+            venc = tiktok._pend_vencidos(x, "coleta")
+            a[0] += venc
+            a[1] += venc
+    publicado = max(x["effective_at"] for x in linhas)
+    marcas = [VencidosMarca(m, v, f) for m, (v, f) in sorted(soma.items())
+              if m in CONTAS_POR_CANAL["tiktokshop"]]
+    return LeituraVencidos("tiktokshop", publicado, marcas,
+                           expedicao_service._tiktok_fotografia_velha(publicado, agora))
+
+
+def turno(agora: datetime) -> str:
+    """Hora de Brasilia -> turno do lembrete ("00", "09", "13" ou "17")."""
+    h = agora.astimezone(TZ_OPERACIONAL).hour
+    return f"{max([0] + [x for x in HORAS_LEMBRETE if h >= x]):02d}"
+
+
+def itens_vencidos(leitura: Optional[LeituraVencidos], agora: datetime) -> list[Item]:
+    """Um item por turno enquanto os vencidos parados passam do limite do A1."""
+    if leitura is None or leitura.velha or leitura.fila < BASE_MINIMA:
+        return []
+    f = leitura.fracao
+    if f is None or f <= LIMIAR_VENCIDOS:
+        return []
+    canal = ROTULO_CANAL[leitura.canal]
+    texto = (f"{canal}: {inteiro(leitura.vencidos)} de {inteiro(leitura.fila)} pedidos parados "
+             f"passaram do prazo de coleta ({pct(f)}; limite {LIMIAR_VENCIDOS:.0%})")
+    acima = sorted((m for m in leitura.marcas
+                    if m.fila >= BASE_MINIMA and (m.fracao or 0) > LIMIAR_VENCIDOS),
+                   key=lambda m: m.vencidos, reverse=True)
+    if acima:
+        texto += ". " + " · ".join(
+            f"{rotulo_marca(m.marca)} {inteiro(m.vencidos)} ({pct(m.fracao or 0)})" for m in acima)
+    texto += ". _Prazo reconstruído pela regra de 2 dias úteis._"
+    dia = agora.astimezone(TZ_OPERACIONAL).date().isoformat()
+    return [Item(f"vencidos:{leitura.canal}:{dia}:{turno(agora)}", texto)]
+
+
+def _ler_vencidos(db, agora: datetime) -> tuple[Optional[LeituraVencidos], bool]:
+    """(leitura, indisponivel). Falha isolada, como o LDR."""
+    try:
+        return ler_vencidos_tiktok(db, agora), False
+    except Exception as exc:  # noqa: BLE001 — motivo fixo; o texto nunca sai
+        logger.warning("torre_alertas: vencidos tiktok falhou (%s)", type(exc).__name__)
+        _desfazer(db)
+        return None, True
+
+
+# ---------------------------------------------------------------------------
 # Avaliacao e mensagem (o que a rota chama)
 # ---------------------------------------------------------------------------
 @dataclass
@@ -296,17 +414,24 @@ def avaliar_criticos(db, agora: datetime) -> AvaliacaoCriticos:
     hoje = agora.astimezone(TZ_OPERACIONAL).date()
     ldr = ler_ldr(db, agora)
     saude = ler_saude(agora)
-    itens = itens_ldr_criticos(ldr, hoje) + itens_saude_criticos(saude)
-    return AvaliacaoCriticos(itens, ldr.indisponiveis, saude.indisponivel)
+    vencidos, sem_vencidos = _ler_vencidos(db, agora)
+    itens = (itens_ldr_criticos(ldr, hoje) + itens_vencidos(vencidos, agora)
+             + itens_saude_criticos(saude))
+    indisponiveis = ldr.indisponiveis + (["Vencidos TikTok Shop"] if sem_vencidos else [])
+    return AvaliacaoCriticos(itens, indisponiveis, saude.indisponivel)
 
 
 def montar_mensagem_criticos(itens: list[Item]) -> str:
     ldr = [i for i in itens if i.chave.startswith("ldr:")]
-    saude = [i for i in itens if not i.chave.startswith("ldr:")]
+    vencidos = [i for i in itens if i.chave.startswith("vencidos:")]
+    saude = [i for i in itens if not i.chave.startswith(("ldr:", "vencidos:"))]
     linhas = [":rotating_light: *Torre: alerta crítico*"]
     if ldr:
         linhas.append("*LDR acima do teto* (últimos 7 dias):")
         linhas += [f"• {i.texto}" for i in ldr]
+    if vencidos:
+        linhas.append("*Pedidos vencidos parados*:")
+        linhas += [f"• {i.texto}" for i in vencidos]
     if saude:
         linhas.append("*Performance oficial*:")
         linhas += [f"• {i.texto}" for i in saude]
