@@ -29,7 +29,7 @@ from app.services import slack_blocks as sb
 from app.services import torre_alertas as ta
 from app.services.gold_service import TZ_OPERACIONAL
 
-URL_DA_TORRE = "https://mktplace-gobeaute.vercel.app"
+URL_DA_TORRE = "https://mktplace-ten.vercel.app"
 
 MARCAS: tuple[str, ...] = metas_service.MARCAS
 #: marketplace_id da fact -> canal das metas.
@@ -236,11 +236,16 @@ def compor_report(d: Dados) -> Report:
     # --- Kokeshi (performance oficial)
     for s in d.saude.sinais:
         rep.problemas.append(f"{CRIT if s.nivel == ta.CRITICO else ATEN} {s.texto}")
-    for marca in d.saude.em_ordem:
-        rep.avancos.append(f"{nome(marca)} no Mercado Livre: reputação no verde, todas as métricas "
-                           "dentro do limite MercadoLíder.")
-    if d.saude.indisponivel:
-        rep.notas.append("Reputação oficial do Mercado Livre indisponível agora.")
+    for canal in ta.CANAIS_SAUDE:
+        ok = [m for m, c in d.saude.em_ordem if c == canal]
+        if ok:
+            rep.avancos.append(f"Performance oficial em ordem {ta.NO_CANAL[canal]}: "
+                               + ", ".join(nome(m) for m in ok) + ".")
+    if d.saude.indisponiveis:
+        rep.notas.append("Performance oficial indisponível agora: "
+                         + ", ".join(d.saude.indisponiveis) + ".")
+    if d.saude.sem_fonte:
+        rep.notas.append("Ainda sem nota oficial: " + ", ".join(d.saude.sem_fonte) + ".")
     return rep
 
 

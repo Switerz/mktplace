@@ -78,8 +78,15 @@ def test_ldr_e_kokeshi_entram_em_problemas_e_avancos():
 
 
 def test_kokeshi_em_ordem_e_avanco():
-    rep = tr.compor_report(_dados(saude=ta.LeituraSaude(em_ordem=["kokeshi"])))
-    assert any(a.startswith("KOKESHI no Mercado Livre: reputação no verde") for a in rep.avancos)
+    rep = tr.compor_report(_dados(saude=ta.LeituraSaude(em_ordem=[("kokeshi", "mercadolivre")])))
+    assert "Performance oficial em ordem no Mercado Livre: KOKESHI." in rep.avancos
+
+
+def test_performance_sem_fonte_e_indisponivel_viram_notas():
+    saude = ta.LeituraSaude(indisponiveis=["Shopee"], sem_fonte=["TikTok Shop"])
+    rep = tr.compor_report(_dados(saude=saude))
+    assert "Performance oficial indisponível agora: Shopee." in rep.notas
+    assert "Ainda sem nota oficial: TikTok Shop." in rep.notas
 
 
 def test_mensagem_abre_com_o_resumo_e_tem_chave_do_dia():

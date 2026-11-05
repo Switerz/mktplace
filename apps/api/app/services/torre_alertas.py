@@ -12,7 +12,7 @@ Cada numero vem do mesmo servico que a tela usa:
   LDR Shopee   expedicao_shopee_ldr_service.obter_ldr (reserva: shopee_ldr_dm_service)
   LDR ML       ml_ldr_service.obter_ldr_ml
   LDR TikTok   expedicao_tiktok_service.obter_serie (coleta)
-  Kokeshi      performance_oficial_service.montar_performance_oficial (ML)
+  Performance  performance_oficial_service.montar_performance_oficial (ML, Shopee; TikTok sem fonte)
   Vencidos TT  marts.expedicao_tiktok_dispatch_daily, com a MESMA consulta e as
                MESMAS colunas da /expedicao/tiktok (A4, ver `ler_vencidos_tiktok`)
 
@@ -42,7 +42,7 @@ from app.services.slack_dm import Item
 
 logger = logging.getLogger(__name__)
 
-URL_DA_EXPEDICAO = "https://mktplace-gobeaute.vercel.app/expedicao"
+URL_DA_EXPEDICAO = "https://mktplace-ten.vercel.app/expedicao"
 
 DIAS_LDR = 7
 
@@ -54,6 +54,8 @@ META_TETO: dict[str, tuple[float, float]] = {
 }
 
 ROTULO_CANAL = {"shopee": "Shopee", "mercadolivre": "Mercado Livre", "tiktokshop": "TikTok Shop"}
+#: "na Shopee", "no Mercado Livre", "no TikTok Shop".
+NO_CANAL = {"shopee": "na Shopee", "mercadolivre": "no Mercado Livre", "tiktokshop": "no TikTok Shop"}
 
 #: Contas por canal (mesma cobertura da faixa). Fora daqui nao e' avaliado.
 CONTAS_POR_CANAL: dict[str, tuple[str, ...]] = {
@@ -65,8 +67,12 @@ CONTAS_POR_CANAL: dict[str, tuple[str, ...]] = {
 #: Abaixo disto a taxa nao vira alerta: 1 atraso em 10 pedidos e' 10% e nao diz nada.
 BASE_MINIMA = 30
 
-#: Marcas com a performance oficial observada (A3). Para incluir outra, acrescente aqui.
-MARCAS_SAUDE: tuple[str, ...] = ("kokeshi",)
+#: Canais da performance oficial observados (A3), todas as marcas de cada um.
+#: O TikTok entra para a mensagem dizer que ainda nao ha' nota oficial dele.
+CANAIS_SAUDE: tuple[str, ...] = ("mercadolivre", "shopee", "tiktokshop")
+
+#: Unidade da metrica oficial -> sufixo no texto.
+SUFIXO_UNIDADE = {"pct": "%", "segundos": " s", "horas": " h", "dias": " dias", "contagem": ""}
 
 #: Metrica oficial a partir desta fracao do limite vira "atencao".
 LIMIAR_PERTO = 0.8
@@ -192,7 +198,7 @@ def ler_ldr(db, agora: datetime) -> LeituraLdr:
 def texto_celula(c: CelulaLdr) -> str:
     meta, teto = META_TETO[c.canal]
     extra = f"; {c.parcial}" if c.parcial else ""
-    return (f"{rotulo_marca(c.marca)} no {ROTULO_CANAL[c.canal]}: LDR {pct(c.taxa)} "
+    return (f"{rotulo_marca(c.marca)} {NO_CANAL[c.canal]}: LDR {pct(c.taxa)} "
             f"({inteiro(c.atrasados)} de {inteiro(c.base)} pedidos; meta {pct(meta)}, teto {pct(teto)}{extra})")
 
 
@@ -225,63 +231,105 @@ class SinalSaude:
 @dataclass
 class LeituraSaude:
     sinais: list[SinalSaude] = field(default_factory=list)
-    #: Marcas lidas com tudo em ordem (para "avancos" no report).
-    em_ordem: list[str] = field(default_factory=list)
-    indisponivel: bool = False
+    #: (marca, canal) lidas com tudo em ordem (para "avancos" no report).
+    em_ordem: list[tuple[str, str]] = field(default_factory=list)
+    #: Canais cuja fonte caiu agora (rotulo legivel).
+    indisponiveis: list[str] = field(default_factory=list)
+    #: Canais que ainda nao tem nota oficial (ex.: TikTok Shop).
+    sem_fonte: list[str] = field(default_factory=list)
+
+    @property
+    def indisponivel(self) -> bool:
+        return bool(self.indisponiveis)
 
 
 def _num_br(v: float) -> str:
     return f"{v:.2f}".rstrip("0").rstrip(",.").replace(".", ",")
 
 
+def _valor(v: float, unidade: str) -> str:
+    return f"{_num_br(v)}{SUFIXO_UNIDADE.get(unidade, '')}"
+
+
+def _destaque(conta, prefixo: str) -> Optional[str]:
+    return next((d.valor for d in conta.destaques if d.rotulo.startswith(prefixo)), None)
+
+
 def sinais_da_conta(conta, canal: str = "mercadolivre") -> list[SinalSaude]:
-    """Regras da A3 sobre uma `ContaOficial` (schema da secao Performance)."""
-    marca, dia, nome = conta.marca, conta.dia, rotulo_marca(conta.marca)
+    """Regras da A3 sobre uma `ContaOficial` (schema da secao Performance).
+
+    Mercado Livre: termometro fora do verde e perda do MercadoLider sao criticos.
+    Shopee: nota da loja "Ruim" ou punicao em andamento sao criticas; nota
+    "Precisa melhorar" ou pontos de penalidade sao atencao.
+    Os dois: metrica oficial fora da meta e' critica; metrica com limite
+    maximo em 80% dele ou mais e' atencao.
+    """
+    marca, dia = conta.marca, conta.dia
+    onde = f"{rotulo_marca(marca)} {NO_CANAL[canal]}"
     sinais: list[SinalSaude] = []
-    if conta.tom == "critico" or conta.tom == "atencao":
-        termometro = next((d.valor for d in conta.destaques if d.rotulo == "Termômetro"), None)
-        sinais.append(SinalSaude(
-            marca, canal, CRITICO, "termometro",
-            f"{nome} no {ROTULO_CANAL[canal]}: termômetro da reputação em {termometro or conta.nivel} "
-            f"(fora do verde).", dia))
-    if canal == "mercadolivre" and conta.nivel and not conta.nivel.startswith("MercadoLíder"):
-        sinais.append(SinalSaude(
-            marca, canal, CRITICO, "lider",
-            f"{nome} no {ROTULO_CANAL[canal]}: sem MercadoLíder (nível atual: {conta.nivel}).", dia))
+
+    def sinal(nivel: str, codigo: str, texto: str) -> None:
+        sinais.append(SinalSaude(marca, canal, nivel, codigo, f"{onde}: {texto}", dia))
+
+    if canal == "mercadolivre":
+        if conta.tom in ("critico", "atencao"):
+            termometro = _destaque(conta, "Termômetro")
+            sinal(CRITICO, "termometro",
+                  f"termômetro da reputação em {termometro or conta.nivel} (fora do verde).")
+        if conta.nivel and not conta.nivel.startswith("MercadoLíder"):
+            sinal(CRITICO, "lider", f"sem MercadoLíder (nível atual: {conta.nivel}).")
+    elif canal == "shopee":
+        if conta.tom == "critico":
+            sinal(CRITICO, "nota", f"nota da loja em {conta.nivel} (Saúde da Conta).")
+        elif conta.tom == "atencao":
+            sinal(ATENCAO, "nota", f"nota da loja em {conta.nivel} (Saúde da Conta).")
+        punicoes = _destaque(conta, "Punições")
+        if punicoes not in (None, "0"):
+            sinal(CRITICO, "punicoes", f"{punicoes} punição(ões) em andamento.")
+        pontos = _destaque(conta, "Pontos de penalidade")
+        if pontos not in (None, "0"):
+            sinal(ATENCAO, "pontos", f"{pontos} ponto(s) de penalidade no trimestre.")
+
     for m in conta.metricas:
-        if m.valor is None or m.meta is None or m.unidade != "pct" or m.comparador not in ("<=", "<"):
+        if m.valor is None or m.meta is None or m.comparador is None:
             continue
-        valor, limite = _num_br(m.valor), _num_br(m.meta)
+        if canal == "mercadolivre" and m.unidade != "pct":
+            continue
+        valor, limite = _valor(m.valor, m.unidade), _valor(m.meta, m.unidade)
         if m.situacao == "fora":
-            sinais.append(SinalSaude(
-                marca, canal, CRITICO, m.codigo,
-                f"{nome} no {ROTULO_CANAL[canal]}: {m.rotulo} em {valor}%, acima do limite "
-                f"de {limite}% para MercadoLíder.", dia))
-        elif m.meta > 0 and m.valor >= LIMIAR_PERTO * m.meta:
-            sinais.append(SinalSaude(
-                marca, canal, ATENCAO, m.codigo,
-                f"{nome} no {ROTULO_CANAL[canal]}: {m.rotulo} em {valor}%, perto do limite de "
-                f"{limite}%.", dia))
+            alvo = "para MercadoLíder" if canal == "mercadolivre" else "da Shopee"
+            sinal(CRITICO, m.codigo,
+                  f"{m.rotulo} em {valor}, fora da meta ({m.comparador} {limite} {alvo}).")
+        elif (m.comparador in ("<=", "<") and m.meta > 0
+              and m.valor >= LIMIAR_PERTO * m.meta):
+            sinal(ATENCAO, m.codigo, f"{m.rotulo} em {valor}, perto do limite de {limite}.")
     return sinais
 
 
 def ler_saude(agora: datetime,
               montar: Callable[..., object] = perf_oficial.montar_performance_oficial) -> LeituraSaude:
+    """Os tres canais da Performance oficial, cada um isolado."""
     leitura = LeituraSaude()
-    try:
-        resp = montar(canal="mercadolivre", brands=list(MARCAS_SAUDE), agora=agora)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("torre_alertas: performance oficial falhou (%s)", type(exc).__name__)
-        leitura.indisponivel = True
-        return leitura
-    if resp.estado != "dado":
-        leitura.indisponivel = True
-        return leitura
-    for conta in resp.contas:
-        sinais = sinais_da_conta(conta)
-        leitura.sinais.extend(sinais)
-        if not sinais:
-            leitura.em_ordem.append(conta.marca)
+    for canal in CANAIS_SAUDE:
+        rotulo = ROTULO_CANAL[canal]
+        try:
+            resp = montar(canal=canal, brands=None, agora=agora)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("torre_alertas: performance oficial %s falhou (%s)", canal,
+                           type(exc).__name__)
+            leitura.indisponiveis.append(rotulo)
+            continue
+        if resp.estado == "sem_fonte":
+            leitura.sem_fonte.append(rotulo)
+            continue
+        if resp.estado != "dado":
+            leitura.indisponiveis.append(rotulo)
+            continue
+        for conta in resp.contas:
+            sinais = sinais_da_conta(conta, canal)
+            leitura.sinais.extend(sinais)
+            if not sinais:
+                leitura.em_ordem.append((conta.marca, canal))
     return leitura
 
 
@@ -458,8 +506,8 @@ def _bloco_vencidos(v: "LeituraVencidos") -> list[dict]:
 
 
 def _bloco_saude(marca: str, canal: str, sinais: list[str]) -> dict:
-    linhas = [f"{sb.EMOJI_CANAL[canal]} *Performance oficial · {rotulo_marca(marca)} no "
-              f"{ROTULO_CANAL[canal]}*"]
+    linhas = [f"{sb.EMOJI_CANAL[canal]} *Performance oficial · {rotulo_marca(marca)} "
+              f"{NO_CANAL[canal]}*"]
     linhas += [f":red_circle: {t}" for t in sinais]
     return sb.secao("\n".join(linhas), sb.botao("Ver performance", sb.url_performance(canal, marca)))
 
@@ -469,7 +517,7 @@ def _resumo_criticos(ldr: list[CelulaLdr], vencidos: list["LeituraVencidos"], sa
     if ldr:
         partes.append(f"LDR acima do teto em {len(ldr)} conta{'s' if len(ldr) != 1 else ''}")
     for v in vencidos:
-        partes.append(f"{pct(v.fracao or 0)} dos pedidos parados vencidos no {ROTULO_CANAL[v.canal]}")
+        partes.append(f"{pct(v.fracao or 0)} dos pedidos parados vencidos {NO_CANAL[v.canal]}")
     if saude:
         partes.append(f"{saude} sinal{'is' if saude != 1 else ''} na performance oficial")
     return " · ".join(partes) or "alerta crítico"
