@@ -1,4 +1,5 @@
 """EXPEDICAO-TIKTOK-ABERTOS — pedidos do TikTok em aberto (consulta injetada)."""
+import json
 from datetime import date, datetime, timezone
 
 from fastapi.testclient import TestClient
@@ -127,24 +128,64 @@ def test_pagamentos_do_prazo_de_coleta():
     assert svc.dias_de_prazo(date(2026, 11, 5), 3) == ["2026-11-05", "2026-11-04", "2026-11-03"]
 
 
-def test_coleta_perdida_lista_e_resumo():
+def test_coleta_perdida_uma_consulta_filtra_e_pagina_em_memoria():
     chamadas = []
+    pedidos = [
+        {"brand": "apice", "order_id": "1", "shop_name": "Apice", "order_status": "IN_TRANSIT",
+         "paid_at": "2026-10-31T09:00:00", "pronto_em": "2026-11-03T15:00:00",
+         "coletado_em": "2026-11-05T08:00:00"},
+        {"brand": "kokeshi", "order_id": "2", "shop_name": "Kokeshi", "order_status": "AWAITING_COLLECTION",
+         "paid_at": "2026-11-01T09:00:00", "pronto_em": "2026-11-03T10:00:00", "coletado_em": None},
+        {"brand": "kokeshi", "order_id": "3", "shop_name": "Kokeshi", "order_status": "AWAITING_COLLECTION",
+         "paid_at": "2026-11-02T09:00:00", "pronto_em": "2026-11-04T10:00:00", "coletado_em": None},
+    ]
 
     def consultar(sql, params):
         chamadas.append((sql, params))
-        if "LIMIT" in sql:
-            return [{"brand": "apice", "order_id": "1", "shop_name": "Apice", "order_status": "IN_TRANSIT",
-                     "paid_at": datetime(2026, 10, 31, 9, 0), "pronto_em": datetime(2026, 11, 3, 15, 0),
-                     "coletado_em": datetime(2026, 11, 5, 8, 0)}]
-        return [{"brand": "apice", "n": 10, "sem_coleta": 4}, {"brand": "kokeshi", "n": 20, "sem_coleta": 15}]
+        return [{"pedidos": json.dumps(pedidos)}]  # a reserva pelo Metabase devolve texto
 
     r = svc.obter_coleta_perdida(vencimento=date(2026, 11, 4), consultar=consultar, agora=AGORA)
     assert r["availability"] == "available"
-    assert r["list_total"] == 30 and r["still_waiting"] == 19
+    assert r["list_total"] == 3 and r["still_waiting"] == 2
     assert [b["brand"] for b in r["brands"]] == ["kokeshi", "apice"]
+    assert r["all_brands"] == ["apice", "kokeshi"]
+    assert r["status_counts"] == {"IN_TRANSIT": 1, "AWAITING_COLLECTION": 2}
     assert r["orders"][0]["collected_at"] == "2026-11-05T08:00:00"
     assert r["orders"][0]["hours_late"] == 8.0
     sql, params = chamadas[0]
     assert params["limite"] == "2026-11-05 00:00:00"
     assert params["pago_ini"] == date(2026, 10, 30) and params["pago_fim"] == date(2026, 11, 2)
-    assert "raw.tiktok_shop_line_items" in sql and "%" not in sql
+    assert "raw.tiktok_shop_line_items" in sql and "json_agg" in sql and "%" not in sql
+
+    # Marca recorta tudo; status recorta a lista e mantem as contagens.
+    r = svc.obter_coleta_perdida(vencimento=date(2026, 11, 4), brands=["kokeshi"],
+                                 status=["AWAITING_COLLECTION"], consultar=consultar, agora=AGORA)
+    assert [p["order_id"] for p in r["orders"]] == ["2", "3"]
+    assert r["status_counts"] == {"AWAITING_COLLECTION": 2}
+    assert r["all_brands"] == ["apice", "kokeshi"]
+    # A SQL e os parametros nao mudam com filtro nem pagina: o cache serve tudo.
+    assert len({c[0] for c in chamadas}) == 1
+    assert all(c[1] == chamadas[0][1] for c in chamadas)
+
+
+def test_escopo_todos_inclui_sem_etiqueta_no_prazo():
+    pedidos = [
+        {"brand": "apice", "order_id": "1", "order_status": "AWAITING_COLLECTION",
+         "paid_at": "2026-10-31T09:00:00", "pronto_em": "2026-11-03T15:00:00", "coletado_em": None},
+        # etiqueta so' depois do prazo: fora de "etiqueta_pronta", dentro de "todos" (LDR)
+        {"brand": "apice", "order_id": "2", "order_status": "IN_TRANSIT",
+         "paid_at": "2026-10-31T09:00:00", "pronto_em": "2026-11-05T10:00:00",
+         "coletado_em": "2026-11-05T18:00:00"},
+        {"brand": "apice", "order_id": "3", "order_status": "AWAITING_SHIPMENT",
+         "paid_at": "2026-11-01T09:00:00", "pronto_em": None, "coletado_em": None},
+    ]
+
+    def consultar(sql, params):
+        return [{"pedidos": pedidos}]
+
+    pronta = svc.obter_coleta_perdida(vencimento=date(2026, 11, 4), consultar=consultar, agora=AGORA)
+    todos = svc.obter_coleta_perdida(vencimento=date(2026, 11, 4), escopo="todos",
+                                     consultar=consultar, agora=AGORA)
+    assert [p["order_id"] for p in pronta["orders"]] == ["1"]
+    assert [p["order_id"] for p in todos["orders"]] == ["1", "2", "3"]
+    assert todos["status_counts"] == {"AWAITING_COLLECTION": 1, "IN_TRANSIT": 1, "AWAITING_SHIPMENT": 1}

@@ -455,7 +455,8 @@ test("o TikTok nao empilha mais banners antes do primeiro numero", () => {
 });
 
 test("serie sem vencimento fechado troca o grafico por uma linha", () => {
-  assert.match(TIKTOK, /\{temDiaMedido \? \(\s*<Grafico dias=\{ldr\.daily\} \/>\s*\) : \(/);
+  // EXPEDICAO-TIKTOK-COLETA-PERDIDA: o grafico ganhou o clique por dia.
+  assert.match(TIKTOK, /\{temDiaMedido \? \(\s*<Grafico\s+dias=\{ldr\.daily\}[\s\S]*?\/>\s*\) : \(/);
   assert.match(TIKTOK, /Nenhum vencimento da janela tem taxa fechada para desenhar\./);
 });
 

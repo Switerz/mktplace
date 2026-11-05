@@ -61,6 +61,8 @@ import CabecalhoExpedicao, { SeletorMarca } from "@/components/expedicao/Cabecal
 import JanelaPersonalizada from "@/components/expedicao/JanelaPersonalizada";
 import JornadaPedidos, { useJornada } from "@/components/expedicao/JornadaPedidos";
 import TikTokPedidosAbertos from "@/components/expedicao/TikTokPedidosAbertos";
+import { PopupColetaPerdida } from "@/components/expedicao/TikTokColetaPerdida";
+import { diaDentroDaJanelaDaLista } from "@/lib/expedicao-tiktok-abertos";
 import LayoutExpedicao, {
   CLASSE_CABECALHO,
   CLASSE_RAIZ_EXPEDICAO,
@@ -189,7 +191,17 @@ function valorDaMarca(m: TikTokMarca, coluna: string): string | number | null {
 // ---------------------------------------------------------------------------
 // Grafico
 // ---------------------------------------------------------------------------
-function Grafico({ dias }: { dias: TikTokLdrDia[] }) {
+
+function Grafico({
+  dias,
+  aoClicar,
+  clicavel,
+}: {
+  dias: TikTokLdrDia[];
+  /** EXPEDICAO-TIKTOK-COLETA-PERDIDA: clicar na barra abre os vencidos do dia. */
+  aoClicar?: (dia: string) => void;
+  clicavel?: (dia: string) => boolean;
+}) {
   const maximo = taxaMaxima(dias);
   const meta = alturaDaMeta(maximo);
   if (!dias.length) return null;
@@ -213,17 +225,30 @@ function Grafico({ dias }: { dias: TikTokLdrDia[] }) {
         ) : null}
         <div
           className="flex h-56 items-stretch gap-1 overflow-x-auto pb-1"
-          role="img"
-          aria-label={`Taxa por dia de vencimento. Máximo da série: ${formatarTaxa(
+          role={aoClicar ? "group" : "img"}
+          aria-label={`Taxa por dia de vencimento.${aoClicar ? " Clique num dia para ver os pedidos vencidos." : ""} Máximo da série: ${formatarTaxa(
             maximo,
           )}. Referência do TikTok: ${formatarTaxa(META_TIKTOK_LDR, 0)} (medição interna).`}
         >
           {dias.map((d) => {
             const sev = severidadeDoDia(d);
+            const podeClicar = Boolean(aoClicar) && (clicavel?.(d.due_date) ?? true);
+            const Coluna = podeClicar ? "button" : "div";
             return (
-              <div
+              <Coluna
                 key={d.due_date}
-                className="flex min-w-[38px] flex-1 flex-col items-center gap-1"
+                {...(podeClicar
+                  ? {
+                      type: "button" as const,
+                      onClick: () => aoClicar?.(d.due_date),
+                      "aria-label": `Ver os pedidos vencidos em ${formatarDiaLongo(d.due_date)} (${formatarTaxa(d.rate)})`,
+                    }
+                  : {})}
+                className={`flex min-w-[38px] flex-1 flex-col items-center gap-1 ${
+                  podeClicar
+                    ? "cursor-pointer rounded-md hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                    : ""
+                }`}
               >
                 <span className={`text-xs tabular-nums ${TEXTO_SEVERIDADE[sev]}`}>
                   {d.rate === null ? VALOR_SEM_TAXA : `${Math.round(d.rate * 100)}`}
@@ -240,7 +265,7 @@ function Grafico({ dias }: { dias: TikTokLdrDia[] }) {
                 <span className="text-xs tabular-nums text-ink-faint">
                   {formatarDiaCurto(d.due_date)}
                 </span>
-              </div>
+              </Coluna>
             );
           })}
         </div>
@@ -252,7 +277,7 @@ function Grafico({ dias }: { dias: TikTokLdrDia[] }) {
             {ROTULO_SEVERIDADE[s]}
           </span>
         ))}
-        <span className="text-ink-faint">Valores em %.</span>
+        <span className="text-ink-faint">Valores em %.{aoClicar ? " Clique num dia para ver os pedidos." : ""}</span>
       </div>
     </div>
   );
@@ -286,6 +311,8 @@ export default function TikTokDispatchPanel({
   const [dados, setDados] = useState<TikTokPayload | null>(null);
   const [estado, setEstado] = useState<"carregando" | "ok" | "erro">("carregando");
   const [erro, setErro] = useState<string>("");
+  // EXPEDICAO-TIKTOK-COLETA-PERDIDA: dia clicado na evolucao (popup dos vencidos).
+  const [diaVencido, setDiaVencido] = useState<string | null>(null);
 
   const url = useMemo(() => `${BASE}${queryDoTikTok(evento, dias, marca)}`, [evento, dias, marca]);
   // Com o campo livre a janela troca mais rapido: a resposta de uma janela
@@ -534,7 +561,12 @@ export default function TikTokDispatchPanel({
       }
     >
       {temDiaMedido ? (
-        <Grafico dias={ldr.daily} />
+        <Grafico
+          dias={ldr.daily}
+          // So' a coleta tem a lista por pedido; o despacho segue so' no grafico.
+          aoClicar={evento === "coleta" ? setDiaVencido : undefined}
+          clicavel={diaDentroDaJanelaDaLista}
+        />
       ) : (
         <p role="status" className="text-sm text-ink-muted">
           Nenhum vencimento da janela tem taxa fechada para desenhar.
@@ -786,6 +818,17 @@ export default function TikTokDispatchPanel({
     </Panel>
   );
 
+  const popupVencidos = diaVencido ? (
+    <PopupColetaPerdida
+      api={BASE}
+      marca={marca}
+      vencimento={diaVencido}
+      escopo="todos"
+      aberto
+      aoFechar={() => setDiaVencido(null)}
+    />
+  ) : null;
+
   return (
     // `div`, nao `main`: o landmark `main` e' do AppShell (um por pagina).
     <div className={CLASSE_RAIZ_EXPEDICAO} aria-busy={estado === "carregando"}>
@@ -889,6 +932,7 @@ export default function TikTokDispatchPanel({
         )
       ) : null}
     </LayoutExpedicao>
+    {popupVencidos}
     </div>
   );
 }
