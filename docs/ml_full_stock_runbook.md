@@ -193,22 +193,30 @@ Contraprova em PG16 descartável (24/24 com a fixture fiel ao produtor, inclui R
 
 **Atenção à cadeia:** se o #78 (028, DRE) for mesclado antes, o `down_revision` da 029 precisa ser reencadeado antes do `upgrade`. O certo é aplicar a cadeia que estiver na `main`, nunca uma revisão solta.
 
-### 7.2 Ordem operacional da 034 (T-0018, identificação por inventário)
+### 7.2 Ordem operacional da 037 (T-0018, identificação por inventário)
 
-A 034 acrescenta três colunas NULL-áveis, sem default, a `marts.fact_ml_full_stock_inventory_daily`: `anuncio_ancora_item_id`, `anuncio_ancora_variation_id` e `anuncios_extras`. O risco não está nas colunas, e sim no **head** do Neon. Outros publicadores leem esse head: a barreira do PMA (`pipelines.channel_offer_sync` / `assert_apply_authorized`) recusa um head que o grafo da imagem não conhece. Aplicar a 034 antes de os workers a conhecerem repete o apagão da passagem para a 033.
+A 037 (`037_ml_full_inventario_anuncio_ancora.py`, `down_revision = "036"`; nasceu 034 e foi renumerada porque a `main` já tinha 034, 035 e 036) acrescenta três colunas NULL-áveis, sem default, a `marts.fact_ml_full_stock_inventory_daily`: `anuncio_ancora_item_id`, `anuncio_ancora_variation_id` e `anuncios_extras`. O risco não está nas colunas, e sim no **head** do Neon. Outros publicadores leem esse head: a barreira do PMA (`pipelines.channel_offer_sync` / `assert_apply_authorized`) recusa um head que o grafo da imagem não conhece. Aplicar a 037 antes de os workers a conhecerem repete o apagão da passagem para a 033.
 
 Ordem segura (cada passo só depois do anterior):
 
-1. **Merge em `main`.** Nada roda: nenhuma DAG chama o publicador do ML Full, e o pacote humano de publicação tem `-Commit` fixo em `bad69cf`, que não conhece a 034.
-2. **Grafo compatível no runtime.** Pin da imagem do airflow (`MKTPLACE_PIPELINES_SHA`) e do runner Windows num commit que tenha a 034 no grafo, com rollout e prova em runtime: a barreira do PMA aceita 017→034 e todos os publicadores que validam o grafo continuam passando. É gate humano do supervisor, coordenado com a frente FRESHNESS/PMA.
-3. **DDL humana.** Só então `alembic upgrade 034` no Neon (hoje em 033), fora da janela das cadeias.
-4. **Publicador novo.** Só depois o publicador do ML Full com a T-0018 pode ser usado: o `-Commit` do pacote humano passa a um commit com a T-0018, numa revisão separada.
+- **(a) Merge no mktplace (inerte).** Nada muda em produção: o Neon segue sem a 037, a imagem do airflow segue no pin antigo e a API detecta as colunas a cada request (sem elas, responde como antes).
+- **(b) Grafo compatível no runtime.** Bump do pin `MKTPLACE_PIPELINES_SHA` no repo do airflow para o commit do merge (o grafo da imagem passa a conhecer a 037), com rollout e prova em runtime: a barreira do PMA aceita o head e os publicadores que validam o grafo continuam passando. Se o runner Windows do PMA ainda estiver ativo, ele também precisa de um commit com a 037 no grafo. É gate humano do supervisor, coordenado com a frente FRESHNESS/PMA. **Não dispare o modo `publicar` da DAG `mercadolivre_full_stock_neon_publish` entre (b) e (c):** a imagem nova já grava as colunas do anúncio-âncora e, sem a 037, o INSERT falha dentro da transação (`revertida_comprovada`, nada gravado). A DAG tem `schedule=None` e só roda por trigger manual.
+- **(c) DDL humana.** Só depois do rollout, `alembic upgrade 037` no Neon (o Neon precisa estar na 036; confira `SELECT version_num FROM alembic_version` antes), fora da janela das cadeias. Antes do rollout, o PMA recusaria a head.
+- **(c2) Identidade do destino.** A identidade do ML Full inclui `alembic_version_num` (`identidade_destino` no publicador e a cópia fiel em `neon_publish.py`). Depois da (c), a Variable `ML_FULL_NEON_DESTINO_ESPERADO` deixa de bater e o `publicar` recusa com `destino_divergente` (falha fechada). Rode a DAG `mercadolivre_full_stock_neon_publish` em modo `identificar` (só leitura), confira no JSON logado que **só** `alembic_version_num` mudou (de `036` para `037`) e atualize a Variable com o JSON novo. A edição é humana, na UI do Airflow.
+- **(d) Deploy da API (Render)** com o serviço da T-0018. Sem a 037, ou sem a 014 legível, a API não quebra: responde com `sku`/`titulo`/`anuncios_extras` nulos e uma limitação declarada.
+- **(e) Republicar** para preencher a âncora nas datas já publicadas (linhas publicadas antes da 037 ficam com as três colunas NULL, ou seja, "sem identificação" na tela).
+
+**Dá para republicar a mesma `(ref_date, marca)`? Sim** (lido no código em 05/11/2026):
+
+- O publicador substitui, não recusa. `publicar_em_transacao` faz `DELETE ... WHERE ref_date = :ref_date AND brand = ANY(:marcas)` nas três fatos e depois o INSERT, tudo na mesma transação (`pipelines/publish_ml_full_stock_daily.py` L636-641; contrato na docstring L61-62: "reexecutar substitui, nunca duplica"). Não existe trava de "escopo já publicado" nem de linhas preexistentes.
+- A única recusa de reexecução é o **id**: `publish_run_id` já presente em qualquer fato (`SQL_PUBLISH_RUN_ID_EM_USO`, L192-194) recusa com `publish_run_id_reutilizado`, na pré-checagem (L834-835) e de novo sob o lock (L684-686).
+- A DAG gera um id novo a cada run e por marca: `novo_publish_run_id = lambda: uuid.uuid4().hex`, chamado em cada `publicar_marca` (`src/marketplace_tower/ml_full_stock/neon_publish.py` L494 e L534, airflow `origin/main` 9fd71be7).
+- Logo, **2026-11-04 pode ser republicado** para preencher a âncora: trigger manual da DAG com `{"modo": "publicar", "ref_date": "2026-11-04", "marcas": {<marca>: <raw run_id>}}`. Condições: (b), (c) e (c2) feitos; o `raw run_id` de cada marca é o que está hoje no RAW para a data (o dry-run da DAG confere `linhagem_raw` == o da conf e a linhagem exige o run de 04/11, terminado e `PUBLICADA` para a marca; se o RAW de 04/11 tiver sido substituído ou apagado, a republicação recusa e nada é gravado). A reconciliação pré-COMMIT garante o mesmo número de linhas e a mesma soma do disponível; só as três colunas novas mudam.
 
 Compatibilidade:
 
-- O pacote aprovado (`bad69cf`) funciona com ou sem a 034: as colunas são NULL-áveis sem default e ele não as escreve. O piloto RAW e a primeira publicação não dependem da 034.
-- A API detecta as colunas a cada request: sem a 034, ela responde como antes, com `sku`/`titulo`/`anuncios_extras` nulos e uma limitação declarada.
-- **Gate, não risco aceito:** o publicador novo **não** roda antes da DDL do passo 3. Sem a 034, o INSERT dele falha dentro da transação (`revertida_comprovada`, nada gravado). Por isso o passo 4 vem depois do 3.
+- As colunas são NULL-áveis sem default: um publicador anterior à T-0018 funciona com ou sem a 037, porque não as escreve.
+- **Gate, não risco aceito:** o publicador novo não grava antes da DDL da (c). Sem a 037, o INSERT dele falha dentro da transação (`revertida_comprovada`, nada gravado).
 
 ## 8. Schedule recomendado (gate próprio)
 
