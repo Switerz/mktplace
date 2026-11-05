@@ -46,12 +46,13 @@ export const META_TETO: Record<CanalLdr, MetaTeto> = {
 export const DICA_LDR =
   "Pedidos com prazo vencendo nos últimos 7 dias fechados que foram coletados depois do prazo (ou ainda não " +
   "coletados) ÷ total desses pedidos. Shopee: prazo da Shopee, sem FBS. Mercado Livre: prazo oficial do ML, " +
-  "coletado até o fim do dia conta no prazo. TikTok: 2 dias úteis após o pagamento. Traço verde = meta, traço " +
+  "atrasado = coletado depois do dia do prazo ou marcado com atraso pelo próprio ML (na agência, entregar depois " +
+  "do horário do SLA já conta como atraso, mesmo no mesmo dia). TikTok: 2 dias úteis após o pagamento. Traço verde = meta, traço " +
   "vermelho = teto. Cálculo da Torre, não é a nota oficial da plataforma.";
 
 export const CANAIS_LDR: readonly { canal: CanalLdr; titulo: string; regra: string }[] = [
   { canal: "shopee", titulo: "Shopee", regra: "prazo Shopee × coleta" },
-  { canal: "mercadolivre", titulo: "Mercado Livre", regra: "prazo oficial ML × coleta até o fim do dia" },
+  { canal: "mercadolivre", titulo: "Mercado Livre", regra: "prazo oficial ML × coleta (ou atraso marcado pelo ML)" },
   { canal: "tiktokshop", titulo: "TikTok Shop", regra: "2 dias úteis após o pagamento × coleta" },
 ];
 
