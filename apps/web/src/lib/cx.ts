@@ -12,23 +12,17 @@
 import {
   JANELA_PADRAO,
   JANELAS_DIAS,
-  montarMotivos,
   problemaNoPayloadAtendimento,
   type AtendimentoResponse,
   type BlocoMotivos,
+  ROTULO_NATUREZA,
   type CanalAtendimento,
   type EstadoBloco,
   type JanelaDias,
-  type VisaoMotivos,
+  type Motivo,
 } from "./performance-contas-atendimento.ts";
 import { MOTIVO_TIMEOUT, TIMEOUT_API_MS } from "./performance-contas.ts";
-import {
-  diaCurto,
-  valorMetrica,
-  type ContaOficial,
-  type Situacao,
-  type Tom,
-} from "./expedicao-performance.ts";
+import { valorMetrica, type ContaOficial } from "./expedicao-performance.ts";
 
 export { JANELAS_DIAS, JANELA_PADRAO, type JanelaDias };
 
@@ -38,6 +32,12 @@ export interface NaoLidas {
   marca: string;
   valor: number | null;
   capturado_em: string | null;
+  /** Volume de conversas (get_conversation_list). Ausente/null = coleta ainda sem essa leitura. */
+  conversas_7d?: number | null;
+  conversas_30d?: number | null;
+  aguardando_resposta?: number | null;
+  /** true = a leitura bateu o teto de paginas: o numero e' um piso. */
+  conversas_truncado?: boolean | null;
 }
 
 export interface ChatShopee {
@@ -114,73 +114,6 @@ export function hrefCx(f: FiltrosCx): string {
 }
 
 // ---------------------------------------------------------------------------
-// Chat: uma linha por loja, uma coluna por metrica de atendimento
-// ---------------------------------------------------------------------------
-export interface CelulaChat {
-  valor: string;
-  situacao: Situacao | null;
-  meta: string | null;
-  anterior: string | null;
-}
-
-export interface VisaoChat {
-  estado: ChatShopee["estado"];
-  motivo: string | null;
-  colunas: { codigo: string; rotulo: string }[];
-  linhas: { marca: string; dia: string; tom: Tom; naoLidas: string | null; celulas: (CelulaChat | null)[] }[];
-  /** Coluna "Conversas não lidas": so' quando a coleta ja' publicou. */
-  comNaoLidas: boolean;
-  /** Por que a coluna nao aparece (sem coleta, erro), dito na tela. */
-  motivoNaoLidas: string | null;
-  semFoto: string[];
-  /** Lojas com alguma metrica fora da meta da Shopee. */
-  foraDaMeta: string[];
-}
-
-export function montarChat(chat: ChatShopee, rotuloMarca: (m: string) => string): VisaoChat {
-  const colunas: { codigo: string; rotulo: string }[] = [];
-  for (const conta of chat.contas) {
-    for (const m of conta.metricas) {
-      if (!colunas.some((c) => c.codigo === m.codigo)) colunas.push({ codigo: m.codigo, rotulo: m.rotulo });
-    }
-  }
-  const naoLidas = new Map((chat.nao_lidas ?? []).map((n) => [n.marca, n]));
-  const comNaoLidas = chat.nao_lidas_estado === "dado";
-  const linhas = chat.contas.map((conta) => ({
-    marca: rotuloMarca(conta.marca),
-    dia: diaCurto(conta.dia),
-    tom: conta.tom,
-    naoLidas: comNaoLidas ? celulaNaoLidas(naoLidas.get(conta.marca)) : null,
-    celulas: colunas.map((col) => {
-      const m = conta.metricas.find((x) => x.codigo === col.codigo);
-      if (!m) return null;
-      return {
-        valor: valorMetrica(m),
-        situacao: m.situacao ?? null,
-        meta: m.rotulo_meta ?? null,
-        anterior: m.anterior == null ? null : valorMetrica({ valor: m.anterior, unidade: m.unidade }),
-      };
-    }),
-  }));
-  return {
-    estado: chat.estado,
-    motivo: chat.motivo ?? null,
-    colunas,
-    linhas,
-    comNaoLidas,
-    motivoNaoLidas: comNaoLidas
-      ? null
-      : chat.nao_lidas_estado === "erro"
-        ? "Conversas não lidas indisponíveis nesta carga."
-        : "Conversas não lidas: aguardando a primeira coleta no Airflow (shopee_cx_coleta).",
-    semFoto: chat.sem_foto.map((s) => `${rotuloMarca(s.marca)}: ${s.motivo}`),
-    foraDaMeta: chat.contas
-      .filter((c) => c.metricas.some((m) => m.situacao === "fora"))
-      .map((c) => rotuloMarca(c.marca)),
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Payload e fetch no servidor
 // ---------------------------------------------------------------------------
 export function problemaNoPayloadCx(json: unknown): string | null {
@@ -244,85 +177,240 @@ export async function carregarCxShopee(
   }
 }
 
-/** Fontes que ainda faltam na aba CX, ditas na tela (ausencia nunca vira zero). */
-export const PROXIMAS_FONTES: readonly { titulo: string; motivo: string }[] = [
-  {
-    titulo: "Funil do chat (visitantes, CSAT, conversão)",
-    motivo: "Só existe no painel da Shopee (Informações Gerenciais → Chat); depende de exportação.",
-  },
-  {
-    titulo: "Mercado Livre e TikTok Shop",
-    motivo: "ML: falta a permissão “Comunicação pré e pós-venda” no app. TikTok: falta o escopo Customer Service.",
-  },
-];
-
 const FMT_INT = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 0 });
+const FMT_PCT = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 const FMT_BRL = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
 
-function celulaNaoLidas(n: NaoLidas | undefined): string {
-  if (!n || n.valor == null) return "—";
-  return FMT_INT.format(n.valor);
+function inteiro(v: number | null | undefined): string {
+  return v == null || !Number.isFinite(v) ? "—" : FMT_INT.format(v);
+}
+
+function pct(v: number | null | undefined): string {
+  return v == null || !Number.isFinite(v) ? "—" : `${FMT_PCT.format(v)}%`;
 }
 
 export function reais(v: number | null | undefined): string {
   return v == null || !Number.isFinite(v) ? "—" : FMT_BRL.format(v);
 }
 
+/** Soma ignorando ausentes; tudo ausente = null (nunca zero). */
+function somar(vals: (number | null | undefined)[]): number | null {
+  const ok = vals.filter((v): v is number => v != null && Number.isFinite(v));
+  return ok.length ? ok.reduce((a, b) => a + b, 0) : null;
+}
+
 // ---------------------------------------------------------------------------
-// Devolucoes (`raw.shopee_returns`)
+// Bloco 1 — Atendimento (planilha 1.2: nº de chats, em aberto, % respondido,
+// tempo de resposta, contact rate). Uma linha por loja Shopee.
 // ---------------------------------------------------------------------------
-export interface VisaoDevolucoes {
+export const COD_RESPONDIDO = "shopee_11";
+export const COD_NOTA = "shopee_22";
+
+export interface CelulaMeta {
+  valor: string;
+  fora: boolean;
+  meta: string | null;
+}
+
+export interface LinhaAtendimentoCx {
+  chave: string;
+  marca: string;
+  conversas: string;
+  aguardando: string;
+  naoLidas: string;
+  respondido: CelulaMeta | null;
+  nota: CelulaMeta | null;
+  contactRate: string;
+}
+
+export interface VisaoAtendimentoCx {
+  estado: "dado" | "sem_fonte" | "erro";
+  motivo: string | null;
+  rotuloConversas: string;
+  totais: { conversas: string; aguardando: string; naoLidas: string; foraDaMeta: string[] };
+  linhas: LinhaAtendimentoCx[];
+  /** Uma nota por coisa que falta, no rodape (ausencia nunca parece zero). */
+  notas: string[];
+}
+
+function celulaMeta(conta: ContaOficial | undefined, codigo: string): CelulaMeta | null {
+  const m = conta?.metricas.find((x) => x.codigo === codigo);
+  if (!m) return null;
+  return { valor: valorMetrica(m), fora: m.situacao === "fora", meta: m.rotulo_meta ?? null };
+}
+
+export function montarAtendimentoCx(
+  dados: Pick<CxShopeeResponse, "chat" | "atendimento" | "janela">,
+  rotuloMarca: (m: string) => string,
+): VisaoAtendimentoCx {
+  const { chat, atendimento } = dados;
+  const dias = dados.janela.dias;
+  const usa7 = dias === 7;
+  const comContactRate = dias === 7 || dias === 30;
+  const contas = new Map(chat.contas.map((c) => [c.marca, c]));
+  const fotos = chat.nao_lidas_estado === "dado" ? chat.nao_lidas ?? [] : [];
+  const conversas = new Map(fotos.map((n) => [n.marca, n]));
+  const pedidos = new Map(atendimento.marcas.map((m) => [m.marca, m.pedidos]));
+  const marcas = [...contas.keys(), ...[...conversas.keys()].filter((m) => !contas.has(m))];
+
+  const brutas = marcas.map((m) => {
+    const n = conversas.get(m);
+    const conv = n ? ((usa7 ? n.conversas_7d : n.conversas_30d) ?? null) : null;
+    return { m, n, conv, ped: pedidos.get(m) ?? null };
+  });
+  const linhas: LinhaAtendimentoCx[] = brutas.map(({ m, n, conv, ped }) => ({
+    chave: m,
+    marca: rotuloMarca(m),
+    conversas: conv == null ? "—" : `${n?.conversas_truncado ? "≥ " : ""}${inteiro(conv)}`,
+    aguardando: inteiro(n?.aguardando_resposta),
+    naoLidas: inteiro(n?.valor),
+    respondido: celulaMeta(contas.get(m), COD_RESPONDIDO),
+    nota: celulaMeta(contas.get(m), COD_NOTA),
+    contactRate: comContactRate && conv != null && ped ? pct((conv / ped) * 100) : "—",
+  }));
+
+  const notas: string[] = [];
+  if (chat.nao_lidas_estado === "erro") {
+    notas.push("Conversas indisponíveis nesta carga.");
+  } else if (brutas.every((b) => b.conv == null)) {
+    notas.push("Conversas e contact rate: aguardando a coleta com a lista de conversas (shopee_cx_coleta, a cada 2 h).");
+  }
+  if (!comContactRate) notas.push("Conversas cobrem os últimos 30 dias; contact rate só nos períodos de 7 e 30 dias.");
+  notas.push("Tempo de resposta: a Shopee não manda esse número pela API; ele será calculado pelas mensagens.");
+  if (brutas.some((b) => b.n?.conversas_truncado)) {
+    notas.push("“≥” = a loja tem mais conversas do que a coleta leu: o número é um piso.");
+  }
+  notas.push(...chat.sem_foto.map((s) => `${rotuloMarca(s.marca)}: ${s.motivo}`));
+
+  return {
+    estado: linhas.length ? "dado" : chat.estado === "erro" ? "erro" : "sem_fonte",
+    motivo: linhas.length ? null : (chat.motivo ?? "Nenhuma loja Shopee no filtro."),
+    rotuloConversas: usa7 ? "Conversas (7 dias)" : "Conversas (30 dias)",
+    totais: {
+      conversas: inteiro(somar(brutas.map((b) => b.conv))),
+      aguardando: inteiro(somar(brutas.map((b) => b.n?.aguardando_resposta))),
+      naoLidas: inteiro(somar(brutas.map((b) => b.n?.valor))),
+      foraDaMeta: linhas.filter((l) => l.respondido?.fora).map((l) => l.marca),
+    },
+    linhas,
+    notas,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Bloco 2 — Pareto dos problemas (planilha 1.1: motivos + quanto
+// reembolsamos, reenviamos e cancelamos). Devolucoes e cancelamentos juntos.
+// ---------------------------------------------------------------------------
+export const MAX_ITENS_PARETO = 10;
+
+export interface ItemPareto {
+  chave: string;
+  rotulo: string;
+  tipo: "Devolução" | "Cancelamento";
+  natureza: string;
+  quantidade: string;
+  pct: string;
+  acumulado: string;
+  /** 0-100, relativo ao maior motivo. */
+  largura: number;
+  mapeado: boolean;
+}
+
+export interface VisaoPareto {
   estado: EstadoBloco;
   motivo: string | null;
-  total: string;
-  aceitas: string;
-  emAndamento: string;
-  canceladas: string;
-  reembolsado: string;
-  motivos: VisaoMotivos | null;
+  totais: { reembolsado: string; devolucoes: string; cancelamentos: string; reenviados: string };
+  itens: ItemPareto[];
+  /** Motivos fora do top, somados numa linha. */
+  resto: string | null;
   linhas: {
     chave: string;
     marca: string;
+    pedidos: string;
+    cancelamentos: string;
     devolucoes: string;
-    aceitas: string;
-    emAndamento: string;
-    canceladas: string;
     reembolsado: string;
   }[];
+  notas: string[];
 }
 
-function inteiro(v: number | null | undefined): string {
-  return v == null ? "—" : FMT_INT.format(v);
-}
-
-export function montarDevolucoes(
-  d: DevolucoesShopee | undefined,
+export function montarPareto(
+  dados: Pick<CxShopeeResponse, "atendimento" | "devolucoes">,
   rotuloMarca: (m: string) => string,
-): VisaoDevolucoes {
-  if (!d) {
+): VisaoPareto {
+  const dev = dados.devolucoes;
+  const can = dados.atendimento;
+  const blocoDev = dev?.estado === "dado" && dev.motivos?.estado === "dado" ? dev.motivos : null;
+  const blocoCan = can.motivos?.estado === "dado" ? can.motivos : null;
+
+  const brutos: (Motivo & { tipo: ItemPareto["tipo"] })[] = [
+    ...(blocoDev?.itens ?? []).map((m) => ({ ...m, tipo: "Devolução" as const })),
+    ...(blocoCan?.itens ?? []).map((m) => ({ ...m, tipo: "Cancelamento" as const })),
+  ]
+    .filter((m) => m.quantidade > 0)
+    .sort((a, b) => b.quantidade - a.quantidade || a.rotulo.localeCompare(b.rotulo));
+  const total = brutos.reduce((a, m) => a + m.quantidade, 0);
+  const maior = brutos[0]?.quantidade ?? 0;
+  let acum = 0;
+  const todos: ItemPareto[] = brutos.map((m) => {
+    acum += m.quantidade;
     return {
-      estado: "sem_fonte", total: "—", aceitas: "—", emAndamento: "—", canceladas: "—",
-      reembolsado: "—", motivos: null, linhas: [],
-      motivo: "Aguardando a primeira coleta de CX da Shopee no Airflow (shopee_cx_coleta).",
+      chave: `${m.tipo}:${m.codigo}`,
+      rotulo: m.rotulo,
+      tipo: m.tipo,
+      natureza: ROTULO_NATUREZA[m.natureza] ?? m.natureza,
+      quantidade: inteiro(m.quantidade),
+      pct: pct((m.quantidade / total) * 100),
+      acumulado: pct((acum / total) * 100),
+      largura: maior ? Math.max(2, Math.round((m.quantidade / maior) * 100)) : 0,
+      mapeado: m.mapeado,
     };
+  });
+  const fora = brutos.slice(MAX_ITENS_PARETO);
+  const somaFora = fora.reduce((a, m) => a + m.quantidade, 0);
+
+  const devMarca = new Map((dev?.estado === "dado" ? dev.marcas : []).map((m) => [m.marca, m]));
+  const canMarca = new Map(can.marcas.map((m) => [m.marca, m]));
+  const marcas = [...canMarca.keys(), ...[...devMarca.keys()].filter((m) => !canMarca.has(m))];
+  /** Devolucoes sem as que o proprio comprador cancelou (a mesma base do Pareto). */
+  const liquidas = (m: { devolucoes: number | null; canceladas?: number | null } | undefined) =>
+    m?.devolucoes == null ? null : m.devolucoes - (m.canceladas ?? 0);
+
+  const notas: string[] = [];
+  if (!blocoDev) {
+    notas.push(
+      dev?.motivo_indisponivel ?? dev?.motivos?.motivo_indisponivel ??
+        "Devoluções: aguardando a coleta da Shopee (shopee_cx_coleta).",
+    );
   }
+  if (!blocoCan && can.motivos?.motivo_indisponivel) notas.push(`Cancelamentos: ${can.motivos.motivo_indisponivel}`);
+  for (const b of [blocoDev, blocoCan]) {
+    if (b?.excluidos && b.rotulo_excluidos) notas.push(`${inteiro(b.excluidos)} ${b.rotulo_excluidos}.`);
+  }
+  notas.push("Reenvios: nenhuma API da Shopee marca o pedido reenviado; sem fonte ainda.");
+
+  const erro = dev?.estado === "erro" || can.motivos?.estado === "erro";
   return {
-    estado: d.estado,
-    motivo: d.motivo_indisponivel ?? null,
-    total: inteiro(d.total),
-    aceitas: inteiro(d.aceitas),
-    emAndamento: inteiro(d.em_andamento),
-    canceladas: inteiro(d.canceladas),
-    reembolsado: reais(d.reembolsado),
-    motivos: d.estado === "dado" ? montarMotivos(d.motivos) : null,
-    linhas: d.marcas.map((m) => ({
-      chave: m.marca,
-      marca: rotuloMarca(m.marca),
-      devolucoes: inteiro(m.devolucoes),
-      aceitas: inteiro(m.aceitas),
-      emAndamento: inteiro(m.em_andamento),
-      canceladas: inteiro(m.canceladas),
-      reembolsado: reais(m.reembolsado),
+    estado: todos.length ? "dado" : erro ? "erro" : blocoDev || blocoCan ? "vazio_legitimo" : "sem_fonte",
+    motivo: todos.length ? null : erro ? "Fonte indisponível nesta carga." : "Nenhum problema registrado no período.",
+    totais: {
+      reembolsado: dev?.estado === "dado" ? reais(dev.reembolsado) : "—",
+      devolucoes: inteiro(blocoDev?.total),
+      cancelamentos: inteiro(somar(can.marcas.map((m) => m.cancelamentos))),
+      reenviados: "—",
+    },
+    itens: todos.slice(0, MAX_ITENS_PARETO),
+    resto: fora.length
+      ? `+ ${fora.length} motivo(s) com ${inteiro(somaFora)} caso(s) (${pct((somaFora / total) * 100)})`
+      : null,
+    linhas: marcas.map((m) => ({
+      chave: m,
+      marca: rotuloMarca(m),
+      pedidos: inteiro(canMarca.get(m)?.pedidos),
+      cancelamentos: inteiro(canMarca.get(m)?.cancelamentos),
+      devolucoes: inteiro(liquidas(devMarca.get(m))),
+      reembolsado: devMarca.has(m) ? reais(devMarca.get(m)?.reembolsado) : "—",
     })),
+    notas,
   };
 }

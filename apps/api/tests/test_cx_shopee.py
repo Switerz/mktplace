@@ -188,3 +188,21 @@ def test_rotulo_de_devolucao():
     assert svc.rotular_devolucao("CHANGE_MIND")[1:] == ("Mudou de ideia", "comprador", True)
     assert svc.rotular_devolucao(None)[0] == "sem_motivo"
     assert svc.rotular_devolucao("x_novo")[3] is False
+
+
+def test_conversas_vem_da_ultima_foto_e_coluna_ausente_vira_nulo():
+    """04/11/2026: volume de conversas (get_conversation_list) na mesma foto."""
+    resp, _ = _montar(fonte=FonteCx(nao_lidas=[
+        {"marca": "apice", "unread_count": 3, "captured_at": AGORA, "conversas_7d": 40,
+         "conversas_30d": 180, "aguardando_resposta": 5, "conversas_truncado": False},
+        {"marca": "barbours", "unread_count": 1, "captured_at": AGORA},
+    ]))
+    nl = {n.marca: n for n in resp.chat.nao_lidas}
+    assert (nl["apice"].conversas_7d, nl["apice"].conversas_30d, nl["apice"].aguardando_resposta) == (40, 180, 5)
+    assert nl["apice"].conversas_truncado is False
+    assert nl["barbours"].conversas_30d is None and nl["barbours"].conversas_truncado is None
+
+
+def test_sql_de_conversas_nao_quebra_sem_as_colunas_novas():
+    assert "to_jsonb(s) ->> 'conversas_30d'" in svc.SQL_NAO_LIDAS
+    assert "FROM raw.shopee_chat_snapshot s" in svc.SQL_NAO_LIDAS
