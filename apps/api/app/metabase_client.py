@@ -19,7 +19,7 @@ def query(sql: str) -> list[dict]:
         "type": "native",
         "native": {"query": sql},
     }
-    with httpx.Client(timeout=30.0) as client:
+    with httpx.Client(timeout=60.0) as client:  # consultas da Expedicao TikTok levam ~15 s
         resp = client.post(
             f"{settings.metabase_url}/api/dataset",
             headers={"x-api-key": settings.metabase_api_key},

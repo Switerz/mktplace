@@ -210,6 +210,10 @@ export type RespostaColetaPerdida = {
   paid_to: string | null;
   deadline_days: string[];
   brands: { brand: string; missed: number; still_waiting: number }[];
+  /** Todas as marcas do dia, sem filtro (opcoes do filtro de marca). */
+  all_brands?: string[];
+  /** Pedidos por status ATUAL, no recorte de marca (opcoes do filtro de status). */
+  status_counts?: Record<string, number>;
   list_total: number;
   still_waiting: number;
   orders: PedidoColetaPerdida[];
@@ -218,22 +222,53 @@ export type RespostaColetaPerdida = {
   has_more: boolean;
 };
 
-export function queryColetaPerdida(vencimento: string | null, marca: string | null, pagina = 1): string {
+/**
+ * `etiqueta_pronta`: so' os com etiqueta pronta ate' o fim do prazo (contestar
+ * a coleta). `todos`: todos os que venceram sem coleta (a leitura da LDR; e' o
+ * que o clique na barra da evolucao abre).
+ */
+export type EscopoColeta = "etiqueta_pronta" | "todos";
+
+/** Status atual do TikTok, na ordem do fluxo, com o nome em portugues. */
+export const ROTULO_STATUS_TIKTOK: Record<string, string> = {
+  ON_HOLD: "Retido pelo TikTok",
+  AWAITING_SHIPMENT: "Aguardando despacho",
+  AWAITING_COLLECTION: "Aguardando coleta",
+  IN_TRANSIT: "Em trânsito",
+  DELIVERED: "Entregue",
+  COMPLETED: "Concluído",
+  CANCELLED: "Cancelado",
+};
+
+export function rotuloStatusTikTok(st: string | null | undefined): string {
+  return st ? (ROTULO_STATUS_TIKTOK[st] ?? st) : "—";
+}
+
+export function queryColetaPerdida(
+  vencimento: string | null,
+  marca: string | null,
+  pagina = 1,
+  status: string | null = null,
+  escopo: EscopoColeta = "etiqueta_pronta",
+): string {
   const p = new URLSearchParams();
   if (vencimento) p.set("vencimento", vencimento);
   if (marca) p.set("brands", marca);
+  if (status) p.set("status", status);
+  if (escopo !== "etiqueta_pronta") p.set("escopo", escopo);
   if (pagina > 1) p.set("page", String(pagina));
   const q = p.toString();
   return `/api/v1/expedicao/tiktok/coleta-perdida${q ? `?${q}` : ""}`;
 }
 
 export function csvDaColetaPerdida(pedidos: PedidoColetaPerdida[], vencimento: string): string {
-  const cab = ["pedido", "marca", "loja", "prazo_coleta", "pago_em", "etiqueta_pronta_em", "coletado_em", "situacao", "horas_de_atraso"];
+  const cab = ["pedido", "marca", "loja", "status_tiktok", "prazo_coleta", "pago_em", "etiqueta_pronta_em", "coletado_em", "situacao", "horas_de_atraso"];
   const linhas = pedidos.map((p) =>
     [
       p.order_id,
       p.brand,
       p.shop_name ?? "",
+      rotuloStatusTikTok(p.status),
       vencimento,
       (p.paid_at ?? "").replace("T", " "),
       (p.ready_at ?? "").replace("T", " "),
@@ -267,4 +302,18 @@ export async function buscarTodasAsPaginas<T>(
     if (!r.has_more) return todos;
   }
   throw new Error("lista grande demais para um download");
+}
+
+/** Ate' quantos dias para tras a lista por pedido alcanca (limite da API). */
+export const JANELA_LISTA_DIAS = 30;
+
+/**
+ * O dia de prazo cabe na lista por pedido? (dos ultimos `JANELA_LISTA_DIAS`
+ * dias ate' hoje, em Brasilia). Fora disso a barra do grafico nao e' clicavel.
+ */
+export function diaDentroDaJanelaDaLista(dia: string, agora: Date = new Date()): boolean {
+  const brt = agora.getTime() - 3 * 3600000;
+  const hoje = new Date(brt).toISOString().slice(0, 10);
+  const limite = new Date(brt - JANELA_LISTA_DIAS * 86400000).toISOString().slice(0, 10);
+  return dia >= limite && dia <= hoje;
 }

@@ -32,6 +32,7 @@ Metabase so' aceita tipos fechados.
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Optional
@@ -402,55 +403,64 @@ def obter_abertos(
 #: Ate' quantos dias para tras o dia de prazo pode ser pedido.
 COLETA_PERDIDA_DIAS = 30
 
-_CTE_COLETA = """
+#: Status ATUAIS do TikTok que a lista aceita como filtro (allowlist).
+STATUS_COLETA_PERDIDA = ("ON_HOLD", "AWAITING_SHIPMENT", "AWAITING_COLLECTION", "IN_TRANSIT", "DELIVERED",
+                         "COMPLETED", "CANCELLED")
+
+# UMA consulta por dia de prazo, com o resultado inteiro numa linha (json_agg):
+# a reserva pelo Metabase corta em 2.000 LINHAS, nao em tamanho de celula, e a
+# consulta custa ~15 s (medido em 05/11). Paginar e filtrar em SQL refazia
+# esse custo a cada pagina e estourava o tempo do Metabase. Assim o dia e' lido
+# uma vez (cache de 10 min do `datamart_leitura`) e marca, status e pagina
+# saem da memoria.
+#
+# Ordem das juncoes, medida: o log (com `detected_at`, que usa o indice) corta
+# de ~35 mil para ~6 mil candidatos ANTES de tocar nos itens (3,2 GB).
+SQL_COLETA_DIA = """
 WITH ped AS MATERIALIZED (
     SELECT o.brand, o.order_id, o.shop_name, o.order_status, o.paid_at
       FROM raw.tiktok_shop_orders o
      WHERE o.paid_at >= CAST(:pago_ini AS date)
        AND o.paid_at <  CAST(:pago_fim AS date) + 1
        AND NOT (o.brand = ANY(CAST(:marcas_fora AS text[])))
-       {filtro_marca}
+), log AS (
+    SELECT l.order_id,
+           min(l.updated_at_tiktok) FILTER (WHERE l.new_status = 'IN_TRANSIT') AS coletado_em,
+           min(l.updated_at_tiktok) FILTER (WHERE l.new_status = 'CANCELLED')  AS cancelado_em
+      FROM raw.tiktok_shop_order_status_log l
+     WHERE l.detected_at >= CAST(:pago_ini AS date) - 1
+       AND l.new_status IN ('IN_TRANSIT', 'CANCELLED')
+       AND l.order_id IN (SELECT order_id FROM ped)
+     GROUP BY 1
+), cand AS MATERIALIZED (
+    SELECT p.*, g.coletado_em, g.cancelado_em
+      FROM ped p
+      LEFT JOIN log g ON g.order_id = p.order_id
+     WHERE (g.coletado_em IS NULL OR g.coletado_em >= CAST(:limite AS timestamp))
+       AND (g.cancelado_em IS NULL OR g.cancelado_em >= CAST(:limite AS timestamp))
+       AND NOT (p.order_status = 'CANCELLED' AND g.cancelado_em IS NULL)
 ), rts AS (
     SELECT li.order_id, max(li.rts_time) AS t, count(*) AS itens, count(li.rts_time) AS com
       FROM raw.tiktok_shop_line_items li
-     WHERE li.order_id IN (SELECT order_id FROM ped)
+     WHERE li.order_id IN (SELECT order_id FROM cand)
      GROUP BY 1
-), col AS (
-    SELECT l.order_id, min(l.updated_at_tiktok) AS t
-      FROM raw.tiktok_shop_order_status_log l
-     WHERE l.order_id IN (SELECT order_id FROM ped) AND l.new_status = 'IN_TRANSIT'
-     GROUP BY 1
-), canc AS (
-    SELECT l.order_id, min(l.updated_at_tiktok) AS t
-      FROM raw.tiktok_shop_order_status_log l
-     WHERE l.order_id IN (SELECT order_id FROM ped) AND l.new_status = 'CANCELLED'
-     GROUP BY 1
-), m AS (
-    SELECT p.brand, p.order_id, p.shop_name, p.order_status, p.paid_at,
-           r.t AS pronto_em, c.t AS coletado_em
-      FROM ped p
-      JOIN rts r       ON r.order_id = p.order_id
-      LEFT JOIN col c  ON c.order_id = p.order_id
-      LEFT JOIN canc k ON k.order_id = p.order_id
-     WHERE r.com = r.itens
-       AND r.t < CAST(:limite AS timestamp)
-       AND (c.t IS NULL OR c.t >= CAST(:limite AS timestamp))
-       AND (k.t IS NULL OR k.t >= CAST(:limite AS timestamp))
-       AND NOT (p.order_status = 'CANCELLED' AND k.t IS NULL)
 )
+SELECT json_agg(json_build_object(
+           'brand', c.brand, 'order_id', c.order_id, 'shop_name', c.shop_name,
+           'order_status', c.order_status, 'paid_at', c.paid_at,
+           'pronto_em', CASE WHEN r.com = r.itens THEN r.t END,
+           'coletado_em', c.coletado_em)
+         ORDER BY c.brand, c.paid_at, c.order_id) AS pedidos
+  FROM cand c
+  LEFT JOIN rts r ON r.order_id = c.order_id
 """
+# A consulta traz TODOS os que venceram sem coleta (a leitura da LDR). O
+# recorte "etiqueta pronta ate' o fim do prazo" e' feito em Python, para que
+# as duas leituras usem a MESMA consulta (e o mesmo cache).
 
-SQL_COLETA_RESUMO = _CTE_COLETA + """
-SELECT brand, COUNT(*) AS n, COUNT(*) FILTER (WHERE coletado_em IS NULL) AS sem_coleta
-  FROM m GROUP BY brand
-"""
-
-SQL_COLETA_LISTA = _CTE_COLETA + """
-SELECT brand, order_id, shop_name, order_status, paid_at, pronto_em, coletado_em
-  FROM m
- ORDER BY brand ASC, paid_at ASC, order_id ASC
- LIMIT {limite_sql} OFFSET {deslocamento}
-"""
+#: `escopo` da lista: so' com etiqueta pronta no prazo (contestacao da coleta)
+#: ou todos os que venceram sem coleta (clique na barra da evolucao, = LDR).
+ESCOPOS_COLETA = ("etiqueta_pronta", "todos")
 
 
 def pagamentos_do_prazo(vencimento: date) -> Optional[tuple[date, date]]:
@@ -470,10 +480,20 @@ def dias_de_prazo(hoje: date, n: int = 10) -> list[str]:
     return saida
 
 
+def _lista_json(v: Any) -> list[dict]:
+    if v is None:
+        return []
+    if isinstance(v, str):
+        v = json.loads(v)
+    return [dict(x) for x in v] if isinstance(v, list) else []
+
+
 def obter_coleta_perdida(
     *,
     vencimento: date,
     brands: Optional[list[str]] = None,
+    status: Optional[list[str]] = None,
+    escopo: str = "etiqueta_pronta",
     pagina: int = 1,
     consultar: Optional[Consultar] = None,
     agora: Optional[datetime] = None,
@@ -485,12 +505,14 @@ def obter_coleta_perdida(
     faixa = pagamentos_do_prazo(vencimento)
     fim_do_prazo = datetime.combine(vencimento + timedelta(days=1), datetime.min.time())
     base: dict[str, Any] = {
-        "channel": CANAL, "deadline": vencimento.isoformat(),
+        "channel": CANAL, "deadline": vencimento.isoformat(), "scope": escopo,
         "paid_from": faixa[0].isoformat() if faixa else None,
         "paid_to": faixa[1].isoformat() if faixa else None,
         "deadline_days": dias_de_prazo(agora_brt.date()),
         "excluded_brands": list(MARCAS_FORA_DO_ESCOPO),
-        "brands": [], "list_total": 0, "still_waiting": 0, "orders": [],
+        "filters": {"brands": marcas or None, "status": status or None},
+        "brands": [], "all_brands": [], "status_counts": {}, "list_total": 0,
+        "still_waiting": 0, "orders": [],
         "page": pagina, "page_size": TAMANHO_PAGINA, "has_more": False,
     }
     if not faixa or (brands and not marcas):
@@ -500,25 +522,37 @@ def obter_coleta_perdida(
         "marcas_fora": list(MARCAS_FORA_DO_ESCOPO),
         "limite": fim_do_prazo.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    filtro_marca = ""
-    if marcas:
-        params["marcas"] = marcas
-        filtro_marca = "AND o.brand = ANY(CAST(:marcas AS text[]))"
     try:
-        resumo = consultar(SQL_COLETA_RESUMO.format(filtro_marca=filtro_marca), params)
-        linhas = consultar(SQL_COLETA_LISTA.format(
-            filtro_marca=filtro_marca, limite_sql=TAMANHO_PAGINA + 1,
-            deslocamento=(pagina - 1) * TAMANHO_PAGINA), params)
+        linhas = consultar(SQL_COLETA_DIA, params)
+        todos = _lista_json(linhas[0].get("pedidos")) if linhas else []
     except Exception as exc:  # noqa: BLE001 — motivo fixo, texto nunca sai
         logger.warning("tiktok_coleta_perdida: consulta falhou (%s)", type(exc).__name__)
         return {**base, "availability": "unavailable", "unavailable_reason": "source_error"}
-    marcas_out = sorted(
-        ({"brand": str(r.get("brand")), "missed": _int(r.get("n")),
-          "still_waiting": _int(r.get("sem_coleta"))} for r in resumo),
-        key=lambda x: (-x["missed"], x["brand"]),
-    )
+    if escopo == "etiqueta_pronta":
+        todos = [p for p in todos
+                 if (pronto := _como_instante(p.get("pronto_em"))) is not None and pronto < fim_do_prazo]
+
+    # Marca recorta tudo; status recorta so' a lista (as contagens por status
+    # sao o que o filtro de status mostra ao lado de cada opcao).
+    todas_marcas = sorted({str(p.get("brand")) for p in todos})
+    da_marca = [p for p in todos if not marcas or p.get("brand") in marcas]
+    contagem_status: dict[str, int] = {}
+    for p in da_marca:
+        st = str(p.get("order_status"))
+        contagem_status[st] = contagem_status.get(st, 0) + 1
+    filtrados = [p for p in da_marca if not status or p.get("order_status") in status]
+
+    por_marca: dict[str, dict] = {}
+    for p in filtrados:
+        b = por_marca.setdefault(str(p.get("brand")), {"brand": str(p.get("brand")), "missed": 0, "still_waiting": 0})
+        b["missed"] += 1
+        if not p.get("coletado_em"):
+            b["still_waiting"] += 1
+    marcas_out = sorted(por_marca.values(), key=lambda x: (-x["missed"], x["brand"]))
+
+    ini = (pagina - 1) * TAMANHO_PAGINA
     pedidos = []
-    for p in linhas[:TAMANHO_PAGINA]:
+    for p in filtrados[ini:ini + TAMANHO_PAGINA]:
         pago = _como_instante(p.get("paid_at"))
         pronto = _como_instante(p.get("pronto_em"))
         coletado = _como_instante(p.get("coletado_em"))
@@ -531,8 +565,8 @@ def obter_coleta_perdida(
         })
     return {
         **base, "availability": "available", "brands": marcas_out,
-        "list_total": sum(b["missed"] for b in marcas_out),
+        "all_brands": todas_marcas, "status_counts": contagem_status,
+        "list_total": len(filtrados),
         "still_waiting": sum(b["still_waiting"] for b in marcas_out),
-        "orders": pedidos, "has_more": len(linhas) > TAMANHO_PAGINA,
+        "orders": pedidos, "has_more": ini + TAMANHO_PAGINA < len(filtrados),
     }
-

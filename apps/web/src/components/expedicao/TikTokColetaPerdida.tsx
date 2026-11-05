@@ -22,8 +22,11 @@ import {
   csvDaColetaPerdida,
   diaCurto,
   faixaDaPagina,
+  ROTULO_STATUS_TIKTOK,
   instanteCurto,
   queryColetaPerdida,
+  rotuloStatusTikTok,
+  type EscopoColeta,
   type PedidoColetaPerdida,
   type RespostaColetaPerdida,
 } from "@/lib/expedicao-tiktok-abertos";
@@ -91,8 +94,17 @@ export function BotaoCsvCompleto({
   );
 }
 
-async function buscarPagina(api: string, vencimento: string, marca: string | null, pagina: number) {
-  const r = await buscarExpedicao(`${api}${queryColetaPerdida(vencimento, marca, pagina)}`, { cache: "no-store" });
+async function buscarPagina(
+  api: string,
+  vencimento: string,
+  marca: string | null,
+  pagina: number,
+  status: string | null = null,
+  escopo: EscopoColeta = "etiqueta_pronta",
+) {
+  const r = await buscarExpedicao(`${api}${queryColetaPerdida(vencimento, marca, pagina, status, escopo)}`, {
+    cache: "no-store",
+  });
   if (!r.ok) throw new Error(String(r.status));
   const dados = (await r.json()) as RespostaColetaPerdida;
   if (dados.availability !== "available") throw new Error("indisponivel");
@@ -101,45 +113,114 @@ async function buscarPagina(api: string, vencimento: string, marca: string | nul
 
 type Carga = { tipo: "carregando" } | { tipo: "erro" } | { tipo: "ok"; dados: RespostaColetaPerdida };
 
-function Popup({
+export function PopupColetaPerdida({
   api,
   marca,
   vencimento,
   aberto,
   aoFechar,
+  escopo = "etiqueta_pronta",
 }: {
   api: string;
   marca: string | null;
   vencimento: string;
   aberto: boolean;
   aoFechar: () => void;
+  escopo?: EscopoColeta;
 }) {
   const [pagina, setPagina] = useState(1);
   const [carga, setCarga] = useState<Carga>({ tipo: "carregando" });
   const [tentativa, setTentativa] = useState(0);
+  // Filtros do popup. A marca comeca na da tela; o CSV baixa SO' o filtrado.
+  const [marcaSel, setMarcaSel] = useState<string | null>(marca);
+  const [statusSel, setStatusSel] = useState<string | null>(null);
+  // Opcoes dos filtros: ficam da ultima resposta enquanto a proxima carrega.
+  const [opcoes, setOpcoes] = useState<{ marcas: string[]; status: Record<string, number> }>({
+    marcas: [],
+    status: {},
+  });
 
-  useEffect(() => setPagina(1), [vencimento, marca]);
+  useEffect(() => setMarcaSel(marca), [marca]);
+  useEffect(() => setPagina(1), [vencimento, marcaSel, statusSel]);
   useEffect(() => {
     if (!aberto) return;
     let vivo = true;
     setCarga({ tipo: "carregando" });
-    buscarPagina(api, vencimento, marca, pagina)
-      .then((dados) => vivo && setCarga({ tipo: "ok", dados }))
+    buscarPagina(api, vencimento, marcaSel, pagina, statusSel, escopo)
+      .then((dados) => {
+        if (!vivo) return;
+        setCarga({ tipo: "ok", dados });
+        setOpcoes({ marcas: dados.all_brands ?? [], status: dados.status_counts ?? {} });
+      })
       .catch(() => vivo && setCarga({ tipo: "erro" }));
     return () => {
       vivo = false;
     };
-  }, [api, vencimento, marca, pagina, aberto, tentativa]);
+  }, [api, vencimento, marcaSel, statusSel, pagina, aberto, tentativa, escopo]);
 
   const dados = carga.tipo === "ok" ? carga.dados : null;
   const pedidos: PedidoColetaPerdida[] = dados?.orders ?? [];
   const total = dados?.list_total ?? 0;
-  const variasMarcas = !marca && (dados?.brands.length ?? 0) > 1;
-  const titulo = `Não coletados no prazo — coleta vencida ${diaCurto(vencimento)} (TikTok)`;
+  const variasMarcas = !marcaSel && (dados?.brands.length ?? 0) > 1;
+  const totalStatus = Object.values(opcoes.status).reduce((a, b) => a + b, 0);
+  const filtrado = marcaSel !== marca || Boolean(statusSel);
+  const filtros = (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2" data-testid="exp-tiktok-coleta-perdida-filtros">
+      <label className="flex items-center gap-2 text-xs text-ink-muted">
+        Marca
+        <select
+          value={marcaSel ?? ""}
+          onChange={(e) => setMarcaSel(e.target.value || null)}
+          className="min-h-9 rounded-md border border-line bg-raised px-2 text-sm text-ink"
+        >
+          <option value="">Todas</option>
+          {opcoes.marcas.map((m) => (
+            <option key={m} value={m}>
+              {brandLabel(m)}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="flex items-center gap-2 text-xs text-ink-muted">
+        Status no TikTok
+        <select
+          value={statusSel ?? ""}
+          onChange={(e) => setStatusSel(e.target.value || null)}
+          className="min-h-9 rounded-md border border-line bg-raised px-2 text-sm text-ink"
+        >
+          <option value="">Todos ({formatarInteiro(totalStatus)})</option>
+          {Object.keys(ROTULO_STATUS_TIKTOK)
+            .filter((st) => (opcoes.status[st] ?? 0) > 0 || st === statusSel)
+            .map((st) => (
+              <option key={st} value={st}>
+                {rotuloStatusTikTok(st)} ({formatarInteiro(opcoes.status[st] ?? 0)})
+              </option>
+            ))}
+        </select>
+      </label>
+      {filtrado ? (
+        <button
+          type="button"
+          onClick={() => {
+            setMarcaSel(marca);
+            setStatusSel(null);
+          }}
+          className="min-h-9 text-xs font-semibold text-accent-ink underline-offset-4 hover:underline"
+        >
+          Limpar filtros
+        </button>
+      ) : null}
+    </div>
+  );
+  const titulo =
+    escopo === "todos"
+      ? `Vencidos sem coleta — prazo de coleta ${diaCurto(vencimento)} (TikTok)`
+      : `Não coletados no prazo — coleta vencida ${diaCurto(vencimento)} (TikTok)`;
 
   return (
     <KpiDrilldownDialog open={aberto} onClose={aoFechar} title={titulo} largura="larga" focusResetKey={vencimento}>
       <div className="flex flex-col gap-4 text-sm" data-testid="exp-tiktok-coleta-perdida-popup">
+        {opcoes.marcas.length || dados ? filtros : null}
         {carga.tipo === "carregando" && !dados ? (
           <p role="status" className="text-ink-muted">Carregando pedidos…</p>
         ) : carga.tipo === "erro" ? (
@@ -150,7 +231,11 @@ function Popup({
             </button>
           </p>
         ) : dados && total === 0 ? (
-          <p role="status" className="text-ink-muted">Nenhum pedido ficou sem coleta no prazo de {diaCurto(vencimento)}.</p>
+          <p role="status" className="text-ink-muted">
+            {filtrado
+              ? "Nenhum pedido com esses filtros."
+              : `Nenhum pedido ficou sem coleta no prazo de ${diaCurto(vencimento)}.`}
+          </p>
         ) : dados ? (
           <>
             <div className="flex flex-wrap items-end gap-x-3 gap-y-1.5">
@@ -159,7 +244,8 @@ function Popup({
               </span>
               <span className="pb-0.5 text-xs text-ink-faint">
                 {formatarInteiro(total - dados.still_waiting)} coletados depois · {formatarInteiro(dados.still_waiting)} ainda
-                sem coleta · {marca ? brandLabel(marca) : "todas as marcas"}
+                sem coleta · {marcaSel ? brandLabel(marcaSel) : "todas as marcas"}
+                {statusSel ? ` · ${rotuloStatusTikTok(statusSel)}` : ""}
               </span>
             </div>
             {variasMarcas ? (
@@ -187,12 +273,12 @@ function Popup({
                     testId="exp-tiktok-coleta-perdida-csv"
                     baixar={async (aoAvancar) => {
                       const todos = await buscarTodasAsPaginas(
-                        (p) => buscarPagina(api, vencimento, marca, p),
+                        (p) => buscarPagina(api, vencimento, marcaSel, p, statusSel, escopo),
                         aoAvancar,
                       );
                       baixarCsv(
                         csvDaColetaPerdida(todos, vencimento),
-                        `tiktok-nao-coletados-prazo-${vencimento}${marca ? `-${marca}` : ""}.csv`,
+                        `tiktok-${escopo === "todos" ? "vencidos-sem-coleta" : "nao-coletados-prazo"}-${vencimento}${marcaSel ? `-${marcaSel}` : ""}${statusSel ? `-${statusSel.toLowerCase()}` : ""}.csv`,
                       );
                     }}
                   />
@@ -206,6 +292,7 @@ function Popup({
                     <tr>
                       <th scope="col">Pedido</th>
                       {variasMarcas ? <th scope="col">Marca</th> : null}
+                      <th scope="col">Status</th>
                       <th scope="col">Pago em</th>
                       <th scope="col">Etiqueta pronta</th>
                       <th scope="col">Coleta</th>
@@ -216,6 +303,7 @@ function Popup({
                       <tr key={p.order_id} className="border-t border-line">
                         <td className="whitespace-nowrap font-mono text-xs text-ink">{p.order_id}</td>
                         {variasMarcas ? <td className="whitespace-nowrap text-ink">{brandLabel(p.brand)}</td> : null}
+                        <td className="whitespace-nowrap text-ink">{rotuloStatusTikTok(p.status)}</td>
                         <td className="whitespace-nowrap tabular-nums text-ink-muted">{instanteCurto(p.paid_at)}</td>
                         <td className="whitespace-nowrap tabular-nums text-ink-muted">{instanteCurto(p.ready_at)}</td>
                         <td className={`whitespace-nowrap tabular-nums ${p.collected_at ? "text-warn-ink" : "font-semibold text-crit-ink"}`}>
@@ -256,7 +344,10 @@ function Popup({
         ) : null}
         <p className="text-xs text-ink-faint">
           Pedidos com prazo de coleta em {diaCurto(vencimento)} (pagos de {diaCurto(dados?.paid_from)} a{" "}
-          {diaCurto(dados?.paid_to)}), etiqueta pronta até o fim desse dia e sem coleta (IN_TRANSIT) até o fim dele.
+          {diaCurto(dados?.paid_to)}),{" "}
+          {escopo === "todos"
+            ? "sem coleta (IN_TRANSIT) até o fim desse dia, com ou sem etiqueta pronta — a mesma conta da LDR."
+            : "etiqueta pronta até o fim desse dia e sem coleta (IN_TRANSIT) até o fim dele."}
           Prazo reconstruído pela política do TikTok (coleta até 2 dias úteis após o pagamento).
         </p>
       </div>
@@ -331,7 +422,7 @@ export default function TikTokColetaPerdida({ api, marca }: { api: string; marca
         Ver pedidos
       </button>
       {vencimento ? (
-        <Popup api={api} marca={marca} vencimento={vencimento} aberto={aberto} aoFechar={() => setAberto(false)} />
+        <PopupColetaPerdida api={api} marca={marca} vencimento={vencimento} aberto={aberto} aoFechar={() => setAberto(false)} />
       ) : null}
     </div>
   );

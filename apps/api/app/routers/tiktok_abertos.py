@@ -46,6 +46,13 @@ def tiktok_coleta_perdida(
     vencimento: Optional[str] = Query(
         None, description="Dia do prazo de COLETA (AAAA-MM-DD). Omitido = ultimo dia util antes de hoje."),
     brands: Optional[str] = Query(None, description="Marcas separadas por virgula. Omitido = todas."),
+    status: Optional[str] = Query(
+        None, description="Status ATUAL do pedido no TikTok, separados por virgula: "
+                          + ", ".join(svc.STATUS_COLETA_PERDIDA) + ". Omitido = todos."),
+    escopo: str = Query(
+        "etiqueta_pronta",
+        description="etiqueta_pronta = so' com etiqueta pronta ate' o fim do prazo; "
+                    "todos = todos os que venceram sem coleta (leitura da LDR)."),
     page: int = Query(1, description=f"Pagina da lista ({svc.TAMANHO_PAGINA} pedidos por pagina)."),
 ):
     """Pedidos com prazo de coleta no dia, etiqueta pronta ate' o fim dele e
@@ -71,4 +78,12 @@ def tiktok_coleta_perdida(
             raise HTTPException(422, _MSG_BRANDS)
     if page < 1 or page > svc.PAGINA_MAX:
         raise HTTPException(422, f"Pagina invalida. Informe entre 1 e {svc.PAGINA_MAX}.")
-    return svc.obter_coleta_perdida(vencimento=dia, brands=marcas, pagina=page)
+    lista_status = None
+    if status is not None:
+        lista_status = [x.strip().upper() for x in status.split(",") if x.strip()]
+        if not lista_status or any(x not in svc.STATUS_COLETA_PERDIDA for x in lista_status):
+            raise HTTPException(422, "Status invalido. Valores aceitos: " + ", ".join(svc.STATUS_COLETA_PERDIDA))
+    if escopo not in svc.ESCOPOS_COLETA:
+        raise HTTPException(422, "Escopo invalido. Valores aceitos: " + ", ".join(svc.ESCOPOS_COLETA))
+    return svc.obter_coleta_perdida(vencimento=dia, brands=marcas, status=lista_status,
+                                    escopo=escopo, pagina=page)
