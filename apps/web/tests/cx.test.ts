@@ -6,11 +6,13 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  AJUDA_CX,
   carregarCxShopee,
   hrefCx,
   lerFiltrosCx,
   montarAtendimentoCx,
   montarPareto,
+  montarStatusMarcas,
   problemaNoPayloadCx,
   urlCxShopee,
   type ChatShopee,
@@ -219,4 +221,49 @@ test("pareto: top 10 e o resto somado numa linha; sem devolucoes = nota, nao zer
   assert.equal(v.totais.devolucoes, "—");
   assert.equal(v.totais.reembolsado, "—");
   assert.ok(v.notas.some((n) => /aguardando a coleta/.test(n)));
+});
+
+// ---------------------------------------------------------------------------
+// 05/11/2026: status por marca, ajuda dos numeros e filtro automatico
+// ---------------------------------------------------------------------------
+test("status por marca: nivel oficial, metrica fora da meta em alerta, pior primeiro", () => {
+  const s = montarStatusMarcas(comConversas(30), rotulo);
+  assert.deepEqual(s.map((x) => x.chave), ["rituaria", "apice", "lescent"]);
+  const rit = s[0];
+  assert.equal(rit.tom, "atencao");
+  assert.equal(rit.rotulo, "Bom");
+  assert.equal(rit.alertas.length, 1);
+  assert.match(rit.alertas[0], /^Taxa de resposta do chat 45,31% \(meta >= 60\)$/);
+  const apice = s[1];
+  assert.deepEqual([apice.tom, apice.alertas, apice.aguardando, apice.cancelamento, apice.devolucoes], ["bom", [], "3", "2,0%", "10"]);
+  const lescent = s[2];
+  assert.equal(lescent.tom, "ausente");
+  assert.deepEqual(lescent.alertas, ["Sem fotografia capturada ainda."]);
+  assert.equal(lescent.cancelamento, "—", "sem pedidos = ausente, nunca 0%");
+});
+
+test("status por marca: conta 'bom' com metrica fora nunca fica verde", () => {
+  const p = comConversas(30);
+  p.chat.contas[1] = { ...p.chat.contas[1], tom: "bom" };
+  const rit = montarStatusMarcas(p, rotulo).find((x) => x.chave === "rituaria")!;
+  assert.equal(rit.tom, "atencao");
+});
+
+test("ajuda: conversas e cancelamentos explicados no ⓘ, nao em nota", () => {
+  assert.match(AJUDA_CX.conversas, /Cada comprador conta uma vez/);
+  assert.match(AJUDA_CX.cancelamentos, /não pagos/);
+  const tela = readFileSync(new URL("../app/cx/CxConteudo.tsx", import.meta.url), "utf8");
+  assert.match(tela, /<ThAjuda ajuda=\{AJUDA_CX\.conversas\}>Conversas<\/ThAjuda>/);
+  assert.match(tela, /<ThAjuda ajuda=\{AJUDA_CX\.cancelamentos\}>Cancel\.<\/ThAjuda>/);
+  assert.match(tela, /\{!marca && <StatusMarcas/);
+});
+
+test("filtro aplica sozinho: sem botao Aplicar (so' no noscript) e navega por hrefCx", () => {
+  const f = readFileSync(new URL("../app/cx/FiltrosCx.tsx", import.meta.url), "utf8");
+  assert.match(f, /^"use client";/);
+  assert.match(f, /onChange=\{aoMudar\}/);
+  assert.match(f, /router\.push\(hrefCx\(novo\)/);
+  assert.match(f, /<noscript>[\s\S]*Aplicar[\s\S]*<\/noscript>/);
+  const pagina = readFileSync(new URL("../app/cx/page.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(pagina, /Aplicar/);
 });

@@ -18,13 +18,18 @@
  */
 import { useCallback, useEffect, useState } from "react";
 
+import Chip from "@/components/ui/Chip";
+import InfoDica from "@/components/ui/InfoDica";
 import Panel from "@/components/ui/Panel";
 import StateBlock from "@/components/ui/StateBlock";
 import {
+  AJUDA_CX,
   carregarCxShopee,
   montarAtendimentoCx,
   montarPareto,
+  montarStatusMarcas,
   type CelulaMeta,
+  type StatusMarca,
   type FiltrosCx,
   type ResultadoCx,
   type VisaoAtendimentoCx,
@@ -80,6 +85,7 @@ export default function CxConteudo({ filtros }: { filtros: FiltrosCx }) {
   return (
     <>
       <p className="text-xs text-ink-muted" data-testid="cx-escopo">{escopo}</p>
+      {!marca && <StatusMarcas itens={montarStatusMarcas(dados, brandLabel)} />}
       <Atendimento v={montarAtendimentoCx(dados, brandLabel)} />
       <Pareto v={montarPareto(dados, brandLabel)} />
     </>
@@ -89,12 +95,16 @@ export default function CxConteudo({ filtros }: { filtros: FiltrosCx }) {
 // ---------------------------------------------------------------------------
 // Pecas
 // ---------------------------------------------------------------------------
-function Numeros({ itens }: { itens: [string, string][] }) {
+/** [rotulo, valor, ajuda do "ⓘ"] */
+function Numeros({ itens }: { itens: [string, string, string?][] }) {
   return (
     <dl className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-      {itens.map(([rotulo, valor]) => (
+      {itens.map(([rotulo, valor, ajuda]) => (
         <div key={rotulo} className="rounded-lg border border-line bg-surface p-3">
-          <dt className="text-xs font-semibold uppercase tracking-wide text-ink-faint">{rotulo}</dt>
+          <dt className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-ink-faint">
+            {rotulo}
+            {ajuda && <InfoDica texto={ajuda} titulo={rotulo} />}
+          </dt>
           <dd className="mt-1 break-words text-2xl font-semibold tabular-nums text-ink">{valor}</dd>
         </div>
       ))}
@@ -114,6 +124,18 @@ function Notas({ notas }: { notas: string[] }) {
 }
 
 const TH = "whitespace-nowrap px-2 py-2 text-right";
+
+/** Cabecalho de coluna com "ⓘ". */
+function ThAjuda({ children, ajuda }: { children: string; ajuda: string }) {
+  return (
+    <th scope="col" className={TH}>
+      <span className="inline-flex items-center justify-end gap-1">
+        {children}
+        <InfoDica texto={ajuda} titulo={children} />
+      </span>
+    </th>
+  );
+}
 const TD = "whitespace-nowrap px-2 py-2 text-right tabular-nums text-ink-muted";
 
 /** Valor oficial com a meta da Shopee; fora da meta em vermelho. */
@@ -146,9 +168,9 @@ function Atendimento({ v }: { v: VisaoAtendimentoCx }) {
         <div className="flex flex-col gap-4" data-testid="cx-atendimento">
           <Numeros
             itens={[
-              [v.rotuloConversas, v.totais.conversas],
-              ["Aguardando resposta", v.totais.aguardando],
-              ["Não lidas agora", v.totais.naoLidas],
+              [v.rotuloConversas, v.totais.conversas, AJUDA_CX.conversas],
+              ["Aguardando resposta", v.totais.aguardando, AJUDA_CX.aguardando],
+              ["Não lidas agora", v.totais.naoLidas, AJUDA_CX.naoLidas],
               ["Lojas fora da meta", v.totais.foraDaMeta.length ? v.totais.foraDaMeta.join(", ") : "Nenhuma"],
             ]}
           />
@@ -158,13 +180,13 @@ function Atendimento({ v }: { v: VisaoAtendimentoCx }) {
               <thead>
                 <tr className="border-b border-line text-left text-xs font-semibold uppercase tracking-wide text-ink-faint">
                   <th scope="col" className="py-2 pr-3">Marca</th>
-                  <th scope="col" className={TH} title={v.rotuloConversas}>Conversas</th>
-                  <th scope="col" className={TH} title="Última mensagem é do comprador">Aguardando</th>
-                  <th scope="col" className={TH}>Não lidas</th>
+                  <ThAjuda ajuda={AJUDA_CX.conversas}>Conversas</ThAjuda>
+                  <ThAjuda ajuda={AJUDA_CX.aguardando}>Aguardando</ThAjuda>
+                  <ThAjuda ajuda={AJUDA_CX.naoLidas}>Não lidas</ThAjuda>
                   <th scope="col" className={TH}>% respondido</th>
                   <th scope="col" className={TH}>Nota</th>
                   <th scope="col" className={TH}>Tempo resp.</th>
-                  <th scope="col" className={TH}>Contact rate</th>
+                  <ThAjuda ajuda={AJUDA_CX.contactRate}>Contact rate</ThAjuda>
                 </tr>
               </thead>
               <tbody>
@@ -183,7 +205,7 @@ function Atendimento({ v }: { v: VisaoAtendimentoCx }) {
               </tbody>
             </table>
           </div>
-          <Notas notas={["Aguardando = a última mensagem é do comprador. Contact rate = conversas ÷ pedidos do período.", ...v.notas]} />
+          <Notas notas={v.notas} />
         </div>
       )}
     </Panel>
@@ -206,8 +228,8 @@ function Pareto({ v }: { v: VisaoPareto }) {
         <Numeros
           itens={[
             ["Reembolsado", v.totais.reembolsado],
-            ["Devoluções", v.totais.devolucoes],
-            ["Cancelamentos", v.totais.cancelamentos],
+            ["Devoluções", v.totais.devolucoes, AJUDA_CX.devolucoes],
+            ["Cancelamentos", v.totais.cancelamentos, AJUDA_CX.cancelamentos],
             ["Reenviados", v.totais.reenviados],
           ]}
         />
@@ -246,8 +268,8 @@ function Pareto({ v }: { v: VisaoPareto }) {
                   <tr className="border-b border-line text-left text-xs font-semibold text-ink-faint">
                     <th scope="col" className="py-2 pr-3">Marca</th>
                     <th scope="col" className={TH}>Pedidos</th>
-                    <th scope="col" className={TH}>Cancel.</th>
-                    <th scope="col" className={TH}>Devol.</th>
+                    <ThAjuda ajuda={AJUDA_CX.cancelamentos}>Cancel.</ThAjuda>
+                    <ThAjuda ajuda={AJUDA_CX.devolucoes}>Devol.</ThAjuda>
                     <th scope="col" className={TH}>Reembolsado</th>
                   </tr>
                 </thead>
@@ -268,6 +290,69 @@ function Pareto({ v }: { v: VisaoPareto }) {
         )}
         <Notas notas={v.notas} />
       </div>
+    </Panel>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 0. Status por marca (so' com "Todas as marcas")
+// ---------------------------------------------------------------------------
+const BORDA_TOM: Record<StatusMarca["tom"], string> = {
+  critico: "border-crit/40",
+  atencao: "border-warn/40",
+  bom: "border-line",
+  neutro: "border-line",
+  ausente: "border-dashed border-line",
+};
+
+function StatusMarcas({ itens }: { itens: StatusMarca[] }) {
+  if (!itens.length) return null;
+  return (
+    <Panel
+      titulo={
+        <span className="inline-flex items-center gap-1.5">
+          Status por marca
+          <InfoDica texto={AJUDA_CX.status} titulo="Status por marca" />
+        </span>
+      }
+      descricao="Saúde da Conta da Shopee, da pior para a melhor"
+      aria-label="Status por marca"
+    >
+      <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5" data-testid="cx-status-marcas">
+        {itens.map((s) => (
+          <li key={s.chave} className={`flex min-w-0 flex-col gap-2 rounded-lg border bg-surface p-3 ${BORDA_TOM[s.tom]}`}>
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate text-sm font-semibold text-ink">{s.marca}</span>
+              <Chip tom={s.tom} ponto={s.tom !== "ausente"}>{s.rotulo}</Chip>
+            </div>
+            {s.tom === "ausente" ? (
+              <p className="text-xs text-ink-faint">{s.alertas[0] ?? "Sem fotografia da Saúde da Conta."}</p>
+            ) : s.alertas.length ? (
+              <ul className="flex flex-col gap-0.5 text-xs font-medium text-crit-ink">
+                {s.alertas.map((a) => (
+                  <li key={a}>{a}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-xs text-ok-ink">Todas as métricas na meta</p>
+            )}
+            <dl className="mt-auto grid grid-cols-3 gap-2 border-t border-line pt-2 text-xs">
+              {(
+                [
+                  ["Aguardando", s.aguardando],
+                  ["Cancel.", s.cancelamento],
+                  ["Devol.", s.devolucoes],
+                ] as const
+              ).map(([r, v]) => (
+                <div key={r} className="min-w-0">
+                  <dt className="truncate text-ink-faint">{r}</dt>
+                  <dd className="font-semibold tabular-nums text-ink">{v}</dd>
+                </div>
+              ))}
+            </dl>
+          </li>
+        ))}
+      </ul>
     </Panel>
   );
 }

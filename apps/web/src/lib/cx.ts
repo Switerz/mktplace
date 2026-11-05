@@ -275,7 +275,7 @@ export function montarAtendimentoCx(
   } else if (brutas.every((b) => b.conv == null)) {
     notas.push("Conversas e contact rate: aguardando a coleta com a lista de conversas (shopee_cx_coleta, a cada 2 h).");
   }
-  if (!comContactRate) notas.push("Conversas cobrem os últimos 30 dias; contact rate só nos períodos de 7 e 30 dias.");
+  if (!comContactRate) notas.push("Conversas cobrem os últimos 30 dias; contact rate só em 7 e 30 dias.");
   notas.push("Tempo de resposta: a Shopee não manda esse número pela API; ele será calculado pelas mensagens.");
   if (brutas.some((b) => b.n?.conversas_truncado)) {
     notas.push("“≥” = a loja tem mais conversas do que a coleta leu: o número é um piso.");
@@ -295,6 +295,80 @@ export function montarAtendimentoCx(
     linhas,
     notas,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Ajuda dos numeros (o "ⓘ" ao lado do rotulo; a tela fica so' com o numero)
+// ---------------------------------------------------------------------------
+export const AJUDA_CX = {
+  conversas:
+    "Conversas do chat da Shopee com mensagem no período (7 ou 30 dias, pela última mensagem). Cada comprador conta uma vez, mesmo que mande várias mensagens.",
+  aguardando: "Conversas em que a última mensagem é do comprador: ele está esperando a loja responder.",
+  naoLidas: "Conversas com mensagem ainda não aberta pela loja, na última leitura do chat (a cada 2 h).",
+  contactRate: "Conversas ÷ pedidos do período: de cada 100 pedidos, quantos viraram conversa no chat.",
+  cancelamentos:
+    "Pedidos criados no período e cancelados, por qualquer autor (comprador, loja, Shopee ou logística). Os pedidos não pagos, que a Shopee cancela sozinha, ficam de fora.",
+  devolucoes:
+    "Pedidos de devolução ou reembolso abertos pelo comprador no período. Os que o próprio comprador cancelou ficam de fora.",
+  status:
+    "Classificação oficial da Saúde da Conta da Shopee (Excelente, Bom, Precisa melhorar ou Ruim). Em vermelho, as métricas fora da meta da Shopee.",
+} as const;
+
+// ---------------------------------------------------------------------------
+// Status por marca (visao com todas as marcas): a nota oficial da Shopee e o
+// que esta' fora da meta, para achar a loja com problema sem ler a tabela.
+// ---------------------------------------------------------------------------
+export type TomStatus = "bom" | "atencao" | "critico" | "neutro" | "ausente";
+
+export interface StatusMarca {
+  chave: string;
+  marca: string;
+  tom: TomStatus;
+  /** Nivel oficial ("Bom") ou o motivo de nao haver foto. */
+  rotulo: string;
+  /** Metricas fora da meta: "Taxa de resposta do chat 45,3% (meta >= 60)". */
+  alertas: string[];
+  aguardando: string;
+  cancelamento: string;
+  devolucoes: string;
+}
+
+const ORDEM_TOM: Record<TomStatus, number> = { critico: 0, atencao: 1, neutro: 2, bom: 3, ausente: 4 };
+
+export function montarStatusMarcas(
+  dados: Pick<CxShopeeResponse, "chat" | "atendimento" | "devolucoes">,
+  rotuloMarca: (m: string) => string,
+): StatusMarca[] {
+  const { chat, atendimento, devolucoes } = dados;
+  const contas = new Map(chat.contas.map((c) => [c.marca, c]));
+  const semFoto = new Map(chat.sem_foto.map((s) => [s.marca, s.motivo]));
+  const fotos = new Map((chat.nao_lidas_estado === "dado" ? chat.nao_lidas ?? [] : []).map((n) => [n.marca, n]));
+  const pedidos = new Map(atendimento.marcas.map((m) => [m.marca, m]));
+  const dev = new Map((devolucoes?.estado === "dado" ? devolucoes.marcas : []).map((m) => [m.marca, m]));
+  const marcas = [...new Set([...pedidos.keys(), ...contas.keys(), ...semFoto.keys()])];
+
+  return marcas
+    .map((m): StatusMarca => {
+      const conta = contas.get(m);
+      const d = dev.get(m);
+      const base = {
+        chave: m,
+        marca: rotuloMarca(m),
+        aguardando: inteiro(fotos.get(m)?.aguardando_resposta),
+        cancelamento: pct(pedidos.get(m)?.taxa_cancelamento_pct),
+        devolucoes: inteiro(d?.devolucoes == null ? null : d.devolucoes - (d.canceladas ?? 0)),
+      };
+      if (!conta) {
+        return { ...base, tom: "ausente", rotulo: "Sem Saúde da Conta", alertas: semFoto.has(m) ? [semFoto.get(m)!] : [] };
+      }
+      const alertas = conta.metricas
+        .filter((x) => x.situacao === "fora")
+        .map((x) => `${x.rotulo} ${valorMetrica(x)}${x.rotulo_meta ? ` (${x.rotulo_meta.toLowerCase()})` : ""}`);
+      // Tom e' o da propria Shopee (nivel); metrica fora da meta nunca fica verde.
+      const tom: TomStatus = alertas.length && conta.tom === "bom" ? "atencao" : conta.tom;
+      return { ...base, tom, rotulo: conta.nivel ?? "Sem nível", alertas };
+    })
+    .sort((a, b) => ORDEM_TOM[a.tom] - ORDEM_TOM[b.tom] || a.marca.localeCompare(b.marca));
 }
 
 // ---------------------------------------------------------------------------
