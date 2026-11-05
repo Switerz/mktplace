@@ -119,13 +119,39 @@ Shopee; sem curva, todos os dias pesam igual. Só os canais com meta entram no
 "% da meta". O GMV vem de `marts.fact_marketplace_daily_performance`, a mesma
 tabela da Gerencial.
 
+## Formato das mensagens
+
+As DMs usam blocos do Slack (Block Kit, montados em `app/services/slack_blocks.py`):
+
+* **título** curto e uma linha de resumo. O campo `text` da mensagem é esse
+  resumo, que é o que aparece na notificação;
+* **um grupo por canal**, com 🔴 por marca e números curtos (`%` e
+  "atrasados de total");
+* **um botão em cada grupo** que abre a Torre já filtrada:
+
+| Grupo | Link |
+|---|---|
+| LDR | `/expedicao?channel=<canal>` (+ `&marca=<marca>` quando é uma só) |
+| Vencidos | `/expedicao?channel=<canal>&visao=detalhe` |
+| Performance oficial | `/performance-contas?canal=<shopee\|mercado_livre\|tiktok>&brands=<marca>` |
+| Report | `/metas`; atalhos Metas, Expedição e Performance no fim |
+
+* **notas** curtas em `context` (prazo reconstruído, definição da LDR, canais
+  com meta);
+* **report:** números do dia em duas colunas e uma bola por marca, conforme o
+  % da meta do dia: 🟢 ≥100%, 🟡 ≥80%, 🟠 ≥70%, 🔴 <70%.
+
+`?simular=true` devolve `mensagem` (o resumo) e `blocos` (o JSON). Para ver o
+desenho, cole os blocos no Block Kit Builder (app.slack.com/block-kit-builder).
+
 ## Testar sem mandar nada
 
 Todas as rotas aceitam `?simular=true`: avaliam e devolvem a mensagem sem
 enviar. Exigem o header `X-Alerta-Token` (o segredo `ALERTA_WEBHOOK_SECRET`).
 
-## O que falta para chegar de verdade
+## No ar (05/11/2026)
 
-* `SLACK_BOT_TOKEN` (`xoxb-…` do app "Torre de Marketplaces") no Render. Sem
-  ele, as rotas respondem 503 "Envio nao configurado.".
-* Os crons ligados no GoDeploy (tabela acima).
+* `SLACK_BOT_TOKEN` (bot "torre", app `A0CDDSL102W`) está no Render. Sem ele, as
+  rotas respondem 503 "Envio nao configurado.".
+* Os crons estão ligados no GoDeploy `04cc2f20` (tabela acima). Para diagnosticar,
+  use os logs do app: a linha `api=<status> enviados=… ja_tinham=…`.
