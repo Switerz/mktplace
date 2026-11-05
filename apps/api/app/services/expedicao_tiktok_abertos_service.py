@@ -208,6 +208,20 @@ def consultar_datamart(sql: str, params: dict) -> list[dict]:
     return datamart_leitura.consultar(sql, params)
 
 
+#: Espera da consulta dos vencidos sem coleta pelo Metabase. Medido em
+#: 05/11/2026: ~17 s com o banco folgado e de 50 s a 150 s depois da
+#: recuperacao do Data Mart — com 60 s, a lista dava `source_error` a cada
+#: tentativa (log do Render, desde 15:10). O resultado fica 10 min em cache,
+#: entao so' a primeira abertura do dia paga a espera.
+TIMEOUT_COLETA_PERDIDA_S = 170.0
+
+
+def consultar_datamart_pesado(sql: str, params: dict) -> list[dict]:
+    from app.services import datamart_leitura
+
+    return datamart_leitura.consultar(sql, params, timeout_metabase=TIMEOUT_COLETA_PERDIDA_S)
+
+
 def _int(v: Any) -> int:
     try:
         return int(v or 0)
@@ -518,7 +532,7 @@ def obter_coleta_perdida(
     agora: Optional[datetime] = None,
 ) -> dict:
     agora = agora or datetime.now(timezone.utc)
-    consultar = consultar or consultar_datamart
+    consultar = consultar or consultar_datamart_pesado
     agora_brt = (agora.astimezone(timezone.utc) + BRT).replace(tzinfo=None)
     marcas = [m for m in (brands or []) if m not in MARCAS_FORA_DO_ESCOPO]
     faixa = pagamentos_do_prazo(vencimento)

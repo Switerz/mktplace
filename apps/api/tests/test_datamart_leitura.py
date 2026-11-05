@@ -220,3 +220,46 @@ def test_falha_nao_e_guardada(monkeypatch):
             dl.consultar("SELECT 1", {})
     assert len(chamadas) == 2
 
+
+
+def test_timeout_maior_so_quando_pedido(monkeypatch):
+    """EXPEDICAO-TIKTOK-COLETA-PERDIDA: a consulta pesada pede mais tempo ao
+    Metabase; as outras seguem com o padrao do cliente."""
+    from app import metabase_client
+    from app.services import datamart_leitura as dl2
+
+    dl2.limpar_cache()
+    recebidos = []
+
+    def query(sql, timeout=metabase_client.TIMEOUT_PADRAO_S):
+        recebidos.append(timeout)
+        return [{"n": 1}]
+
+    def direto(sql, params):
+        raise RuntimeError("datamart indisponivel")
+
+    monkeypatch.setattr(metabase_client, "query", query)
+    monkeypatch.setattr(dl2, "_ler_direto", direto)
+    monkeypatch.setattr(dl2.settings, "metabase_api_key", "chave-de-teste")
+    dl2.consultar("SELECT 1 AS n", {})
+    dl2.consultar("SELECT 2 AS n", {}, timeout_metabase=170.0)
+    assert recebidos == [metabase_client.TIMEOUT_PADRAO_S, 170.0]
+    dl2.limpar_cache()
+
+
+def test_coleta_perdida_usa_a_espera_maior(monkeypatch):
+    from datetime import date
+
+    from app.services import datamart_leitura as dl2
+    from app.services import expedicao_tiktok_abertos_service as svc
+
+    pedidos = []
+
+    def consultar(sql, params, timeout_metabase=None):
+        pedidos.append(timeout_metabase)
+        return [{"pedidos": []}]
+
+    monkeypatch.setattr(dl2, "consultar", consultar)
+    r = svc.obter_coleta_perdida(vencimento=date(2026, 11, 4))
+    assert r["availability"] == "available"
+    assert pedidos == [svc.TIMEOUT_COLETA_PERDIDA_S] and svc.TIMEOUT_COLETA_PERDIDA_S > 60
