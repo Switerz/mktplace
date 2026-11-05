@@ -282,3 +282,68 @@ eligible_offers = active_offers - kit_confirmed - kit_suspected
 "derived_from_kit_components"`, e seis campos de procedência viajam na linha.
 Kit sem referência derivada continua exatamente como antes: `NULL`,
 `kit_composition_missing`, nunca zero.
+
+---
+
+## 10. Segunda fonte de composição: API da Avoe (T-0053)
+
+Implementado em
+[`pipelines/avoe_kits_source.py`](../pipelines/avoe_kits_source.py), ligado ao
+publisher por `--source`, travado em
+[`pipelines/tests/test_avoe_kits_source.py`](../pipelines/tests/test_avoe_kits_source.py).
+
+### Por que existe
+
+As lojas Ápice, Barbour's e Lescent anunciam kit com `seller_sku` no formato
+`KITnnn`. Esse código **não** existe na BOM do Protheus nem tem nó com
+`codigo_protheus` no cadastro, então a oferta fica `UNMAPPED` ou
+`CANDIDATE_REVIEW` e não produz linha. A ferramenta `consultar_kit` da Avoe
+devolve exatamente esse código, por marca, com a lista de componentes.
+
+### O que muda e o que não muda
+
+A Avoe entra **só como origem de linhas**. A validação da BOM, a ponte, a
+promoção, a referência B2B do componente, a faixa de desconto e o vocabulário
+de motivos continuam os das seções 2 a 6, sem exceção.
+
+| `--source` | BOM usada | uso |
+|---|---|---|
+| `protheus` (padrão) | `raw.protheus_kit_components` | comportamento anterior, inalterado |
+| `avoe` | só a da Avoe | diagnóstico isolado da fonte nova |
+| `ambas` | por oferta: a da Avoe se ela resolve a oferta, senão a do Protheus | publicação: Avoe prioritária, Protheus como fallback |
+
+A publicação apaga e regrava o escopo `(marketplace, observed_date)`:
+`--apply --source avoe` **apagaria** as linhas derivadas do Protheus naquele
+escopo, e por isso o CLI a **recusa** (exit 2) antes de abrir conexão. Para
+publicar, o modo é `ambas`; `avoe` sozinho é só diagnóstico.
+
+O publisher **nunca chama a Avoe**: ele lê um snapshot JSON gravado antes por
+`python -m pipelines.avoe_kits_source`. A credencial vem de um **arquivo** cujo
+caminho é passado por `--secret-file` ou `AVOE_API_SECRET_FILE`; o valor nunca
+é logado, impresso nem gravado no snapshot.
+
+### Regras da tradução
+
+| tema | regra |
+|---|---|
+| chave do kit | `AVOE:<MARCA>:<SKU>` — a Avoe numera kit **por marca** (`KIT001` existe em várias); a chave crua colidiria no `KitBomIndex` |
+| ponte oferta → kit | `(marca da oferta, seller_sku)` **exato** → `brand_code_exact` → `EXACT_DIRECT`. Nenhum método novo |
+| marca | allowlist (`MARCAS`). Marca fora dela: kit recusado |
+| componente | `(marca do kit, código)` **exato e único** em `gold.map_produto_codigo_gobeauty` → SKU Protheus. Códigos colidem entre ERPs de marcas diferentes; por isso a marca escopa sempre |
+| componente sem tradução única | entra como `AVOE:<MARCA>:<código>`; o catálogo não o conhece e o kit sai `blocked` com `kit_component_not_in_catalog`. **Nunca descartado** (kit mais barato) **nem inventado** |
+| EAN | nunca é critério. Fica só como evidência na resposta bruta |
+| quantidade | a Avoe não tem coluna de quantidade: o componente vem **repetido**. `qty_per_kit` = número de repetições |
+| vigência | sem datas na fonte: bordas abertas, `active = true` |
+| `sku_kit` inválido (vazio, espaço, apóstrofo) | kit recusado — medido: há kit cujo `sku_kit` é o nome |
+| mesma `(marca, sku_kit)` com composições diferentes | as duas recusadas |
+| oferta que alcança kit nas duas fontes | **Avoe vence** (decisão do Mário). A escolha da fonte é feita por oferta em `montar_fontes`, **antes** do contrato, que então vê só uma BOM — nunca `AMBIGUOUS` entre fontes. Sobreposições contadas em `avoe_summary.precedencia` (`sobrepostas`, `identicas`, `divergentes`), com a lista das divergentes. A fonte de cada linha é o prefixo `AVOE:` de `kit_protheus_sku` (sem coluna nova, sem migration) |
+
+### O que a Avoe **não** substitui
+
+- `preco_custo`, `preco_venda` e `precos_por_canal` (De/Por) **não** entram em
+  nenhum cálculo. A referência do kit continua derivada da planilha B2B por
+  componente; preço de tabela da Avoe como referência seria regra paralela.
+- O teto da seção 7 continua valendo: sem referência B2B do componente, o kit
+  é publicado `blocked`, com motivo.
+- O nome do kit da Avoe não é usado. Observado: o `nome` vem associado ao SKU
+  sem escopo de marca (um kit de uma marca chega com o nome de outra).

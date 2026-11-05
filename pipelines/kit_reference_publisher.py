@@ -1,7 +1,30 @@
 """Publisher da referencia de kit derivada dos componentes (gate KITS-PMA-3).
 
-    python -m pipelines.kit_reference_publisher --diagnose
+    python -m pipelines.kit_reference_publisher           (diagnostico)
     python -m pipelines.kit_reference_publisher --apply
+    python -m pipelines.kit_reference_publisher --source ambas
+        --avoe-snapshot <snapshot.json> [--apply]
+
+Nao existe flag `--diagnose`: sem `--apply` o comando so' diagnostica
+(argparse recusaria a flag com exit 2).
+
+FONTE DA COMPOSICAO (`--source`)
+--------------------------------
+- `protheus` (padrao): `raw.protheus_kit_components`, exatamente como antes;
+- `avoe`: so' a BOM da API da Avoe (`pipelines.avoe_kits_source`), lida de um
+  snapshot JSON local — o publisher nunca chama a Avoe;
+- `ambas`: AVOE PRIMEIRO, PROTHEUS COMO FALLBACK, por oferta. Se a ponte da
+  Avoe resolve `(marca, seller_sku)`, a oferta usa so' a BOM da Avoe; senao,
+  so' a do Protheus. A escolha acontece ANTES do contrato (`montar_fontes`),
+  e as sobreposicoes — identicas e divergentes, estas listadas — saem em
+  `avoe_summary["precedencia"]`. As chaves da Avoe sao `AVOE:<MARCA>:<SKU>`:
+  o prefixo de `kit_protheus_sku` diz a fonte de cada linha publicada.
+
+A publicacao apaga e regrava o escopo `(marketplace, observed_date)` inteiro,
+entao `--apply --source avoe` apagaria as linhas derivadas do Protheus naquele
+escopo. Por isso a combinacao e' RECUSADA no CLI (exit 2), antes de abrir
+qualquer conexao. `--source avoe` serve so' para diagnostico; para publicar a
+Avoe somada ao que ja' existe, o modo e' `ambas`.
 
 ONDE A TRANSFORMACAO ACONTECE, E POR QUE AQUI
 ----------------------------------------------
@@ -80,6 +103,9 @@ LOCK_KEY = 4_2026_0925
 
 ENV_TARGET = "DATABASE_URL"
 ENV_SOURCE = "DATAMART_DATABASE_URL"
+
+SOURCE_PROTHEUS, SOURCE_AVOE, SOURCE_AMBAS = "protheus", "avoe", "ambas"
+SOURCES = (SOURCE_PROTHEUS, SOURCE_AVOE, SOURCE_AMBAS)
 
 #: Tamanho da pagina de INSERT. O volume e' de dezenas de linhas; a paginacao
 #: existe para que o contrato nao mude quando a cobertura crescer.
@@ -308,6 +334,159 @@ def build_plan(*, scope: Scope, offers, references, bom_rows, catalog_rows,
     return Plan(scope=scope, records=registros, summary=resumo)
 
 
+#: Chaves de `dados` que cada fonte fornece ao contrato. Referencia B2B,
+#: catalogo e fotografia sao comuns as duas.
+_CHAVES_DE_FONTE = ("bom_rows", "bridge_brand_code", "bridge_alias",
+                    "kit_brand_rows")
+
+
+def _composicao(bom, kit_sku) -> tuple:
+    return tuple((c.component_sku, c.qty_per_kit) for c in bom.components(kit_sku))
+
+
+def montar_fontes(dados: dict, *, source: str, avoe_kits=None,
+                  today: date | None = None) -> dict:
+    """Escolhe a origem da composicao. Puro, sem banco.
+
+    Nao decide nada sobre kit: so' entrega ao contrato linhas de outra origem,
+    no mesmo formato. `protheus` devolve `dados` intacto.
+
+    `ambas` — PRECEDENCIA POR OFERTA, AVOE PRIMEIRO
+    ------------------------------------------------
+    Cada oferta e' atribuida a UMA fonte antes do contrato: se a ponte da Avoe
+    resolve `(marca, seller_sku)` para um kit promovivel, a oferta e' planejada
+    so' com a BOM da Avoe; senao, so' com a do Protheus (exatamente como no
+    padrao). Sem isso, a uniao das duas BOMs faria o contrato marcar
+    `AMBIGUOUS` toda oferta presente nas duas — inclusive as de composicao
+    IDENTICA — e ela ficaria sem linha.
+
+    A precedencia nao relaxa nada: dentro de cada grupo valem as mesmas regras
+    do contrato. Quando a oferta tambem resolveria no Protheus, a sobreposicao
+    e' contada, e as composicoes divergentes sao LISTADAS em
+    `avoe_summary["precedencia"]` — a Avoe vence, mas a divergencia fica visivel.
+    """
+    if source not in SOURCES:
+        raise KitPublisherError(f"fonte desconhecida: {source!r}")
+    if source == SOURCE_PROTHEUS:
+        return dados
+
+    from pipelines.avoe_kits_source import build_avoe_bom
+
+    if not avoe_kits:
+        raise KitPublisherError(
+            f"--source {source} sem kits da Avoe: snapshot ausente ou vazio")
+    avoe = build_avoe_bom(avoe_kits,
+                          brand_code_rows=dados["bridge_brand_code"])
+    if not avoe.bom_rows:
+        raise KitPublisherError(
+            "nenhum kit da Avoe passou na validacao de entrada")
+
+    fonte_avoe = {"bom_rows": avoe.bom_rows,
+                  "bridge_brand_code": avoe.brand_code_rows,
+                  "bridge_alias": [],
+                  "kit_brand_rows": avoe.kit_brand_rows}
+    saida = dict(dados)
+    saida["avoe_summary"] = dict(avoe.summary)
+
+    if source == SOURCE_AVOE:
+        saida.update(fonte_avoe)
+        return saida
+
+    # --- ambas: atribui cada oferta a uma fonte -------------------------------
+    hoje = today or date.today()
+    bom_avoe = kb.KitBomIndex.build(fonte_avoe["bom_rows"], today=hoje)
+    ponte_avoe = kb.KitBridgeIndex.build(
+        brand_code_rows=fonte_avoe["bridge_brand_code"],
+        kit_brand_rows=fonte_avoe["kit_brand_rows"])
+    bom_prot = kb.KitBomIndex.build(dados["bom_rows"], today=hoje)
+    ponte_prot = kb.KitBridgeIndex.build(
+        brand_code_rows=dados["bridge_brand_code"],
+        alias_rows=dados["bridge_alias"],
+        kit_brand_rows=dados["kit_brand_rows"])
+
+    ofertas_avoe, ofertas_prot = [], []
+    identicas, divergentes = 0, []
+    for oferta in dados["offers"]:
+        b_avoe = kb.resolve_bridge(oferta.get("seller_sku"), oferta.get("brand"),
+                                   bom=bom_avoe, index=ponte_avoe)
+        if not kb.is_promotable(b_avoe)[0]:
+            ofertas_prot.append(oferta)
+            continue
+        ofertas_avoe.append(oferta)
+        if oferta.get("product_type") not in SINAIS_DE_KIT:
+            continue
+        b_prot = kb.resolve_bridge(oferta.get("seller_sku"), oferta.get("brand"),
+                                   bom=bom_prot, index=ponte_prot)
+        if not kb.is_promotable(b_prot)[0]:
+            continue
+        if _composicao(bom_avoe, b_avoe.kit_sku) == _composicao(bom_prot,
+                                                                b_prot.kit_sku):
+            identicas += 1
+        else:
+            divergentes.append({"offer_key": oferta.get("offer_key"),
+                                "brand": oferta.get("brand"),
+                                "seller_sku": oferta.get("seller_sku"),
+                                "kit_avoe": b_avoe.kit_sku,
+                                "kit_protheus": b_prot.kit_sku})
+
+    saida["avoe_summary"]["precedencia"] = {
+        "regra": "avoe_primeiro_protheus_fallback",
+        "ofertas_pela_avoe": len(ofertas_avoe),
+        "ofertas_pelo_protheus": len(ofertas_prot),
+        "sobrepostas": identicas + len(divergentes),
+        "identicas": identicas,
+        "divergentes": len(divergentes),
+        "divergentes_lista": divergentes,
+    }
+    grupo_prot = {k: dados[k] for k in _CHAVES_DE_FONTE}
+    saida["grupos"] = [
+        dict(fonte_avoe, fonte=SOURCE_AVOE, offers=ofertas_avoe),
+        dict(grupo_prot, fonte=SOURCE_PROTHEUS, offers=ofertas_prot),
+    ]
+    return saida
+
+
+def _somar_resumos(resumos: list) -> dict:
+    """Soma os resumos de `build_plan` de cada grupo, chave a chave."""
+    total: dict = {}
+    for r in resumos:
+        for k, v in r.items():
+            if isinstance(v, dict):
+                alvo = total.setdefault(k, {})
+                for kk, vv in v.items():
+                    alvo[kk] = alvo.get(kk, 0) + vv
+            elif isinstance(v, list):
+                total.setdefault(k, []).extend(v)
+            else:
+                total[k] = total.get(k, 0) + v
+    if "amounts" in total:
+        total["amounts"] = sorted(total["amounts"])
+    return total
+
+
+def planejar(dados: dict, *, scope: Scope, source_run_id: str,
+             today: date) -> Plan:
+    """`build_plan` uma vez por grupo de fonte (ou uma vez so', sem grupos)."""
+    grupos = dados.get("grupos") or [dados]
+    planos = [
+        build_plan(scope=scope, offers=g["offers"],
+                   references=dados["references"], bom_rows=g["bom_rows"],
+                   catalog_rows=dados["catalog_rows"],
+                   bridge_brand_code=g["bridge_brand_code"],
+                   bridge_alias=g["bridge_alias"],
+                   kit_brand_rows=g["kit_brand_rows"],
+                   snapshot_id=dados["snapshot_id"],
+                   reference_captured_at=dados["reference_captured_at"],
+                   source_run_id=source_run_id, today=today)
+        for g in grupos
+    ]
+    if len(planos) == 1:
+        return planos[0]
+    registros = [r for pl in planos for r in pl.records]
+    return Plan(scope=scope, records=registros,
+                summary=_somar_resumos([pl.summary for pl in planos]))
+
+
 # ---------------------------------------------------------------------------
 # Execucao
 # ---------------------------------------------------------------------------
@@ -395,7 +574,8 @@ def audit_finish(audit_conn, sync_run_id: int, status: str,
 
 
 def carregar(source_conn, target_conn, *, marketplace: str,
-             observed_date: date | None) -> dict:
+             observed_date: date | None, source: str = SOURCE_PROTHEUS,
+             avoe_kits=None, today: date | None = None) -> dict:
     """Le' os dois bancos. O Data Mart e' somente leitura, por conexao."""
     if observed_date is None:
         linhas = _rows(target_conn, SQL_LATEST_OFFER_DATE,
@@ -410,7 +590,7 @@ def carregar(source_conn, target_conn, *, marketplace: str,
         raise KitPublisherError(
             "sem snapshot de referencia B2B: a referencia de kit nao tem insumo")
 
-    return {
+    dados = {
         "observed_date": observed_date,
         "snapshot_id": snap[0]["snapshot_id"],
         "reference_captured_at": snap[0]["captured_at"],
@@ -424,13 +604,17 @@ def carregar(source_conn, target_conn, *, marketplace: str,
         "bridge_alias": _rows(source_conn, SQL_BRIDGE_ALIAS),
         "kit_brand_rows": _rows(source_conn, SQL_KIT_BRAND),
     }
+    return montar_fontes(dados, source=source, avoe_kits=avoe_kits,
+                         today=today)
 
 
 def publish(*, target_conn, audit_conn, source_conn, marketplace: str,
             observed_date: date | None, today: date,
-            source_run_id: str | None = None) -> dict:
+            source_run_id: str | None = None,
+            source: str = SOURCE_PROTHEUS, avoe_kits=None) -> dict:
     """Publica UM escopo `(marketplace, observed_date)`, atomicamente."""
-    run_id = source_run_id or f"kitref-{uuid.uuid4().hex[:12]}"
+    prefixo = "kitref" if source == SOURCE_PROTHEUS else f"kitref-{source}"
+    run_id = source_run_id or f"{prefixo}-{uuid.uuid4().hex[:12]}"
 
     with target_conn.cursor() as cur:
         cur.execute("SELECT pg_try_advisory_lock(%s)", (LOCK_KEY,))
@@ -440,17 +624,10 @@ def publish(*, target_conn, audit_conn, source_conn, marketplace: str,
 
     try:
         dados = carregar(source_conn, target_conn, marketplace=marketplace,
-                         observed_date=observed_date)
+                         observed_date=observed_date, source=source,
+                         avoe_kits=avoe_kits, today=today)
         scope = Scope(marketplace, dados["observed_date"])
-        plano = build_plan(
-            scope=scope, offers=dados["offers"], references=dados["references"],
-            bom_rows=dados["bom_rows"], catalog_rows=dados["catalog_rows"],
-            bridge_brand_code=dados["bridge_brand_code"],
-            bridge_alias=dados["bridge_alias"],
-            kit_brand_rows=dados["kit_brand_rows"],
-            snapshot_id=dados["snapshot_id"],
-            reference_captured_at=dados["reference_captured_at"],
-            source_run_id=run_id, today=today)
+        plano = planejar(dados, scope=scope, source_run_id=run_id, today=today)
 
         sync_run_id = audit_start(audit_conn, len(plano.records))
         try:
@@ -473,9 +650,11 @@ def publish(*, target_conn, audit_conn, source_conn, marketplace: str,
 
         return {"state": "published", "source_run_id": run_id,
                 "sync_run_id": sync_run_id, "rows": inseridas,
+                "bom_source": source,
                 "scope": {"marketplace": marketplace,
                           "observed_date": str(scope.observed_date)},
-                "summary": plano.summary}
+                "summary": plano.summary,
+                "avoe_summary": dados.get("avoe_summary")}
     finally:
         with target_conn.cursor() as cur:
             cur.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
@@ -483,25 +662,21 @@ def publish(*, target_conn, audit_conn, source_conn, marketplace: str,
 
 
 def diagnose(*, target_conn, source_conn, marketplace: str,
-             observed_date: date | None, today: date) -> dict:
+             observed_date: date | None, today: date,
+             source: str = SOURCE_PROTHEUS, avoe_kits=None) -> dict:
     """Calcula e relata SEM lock, SEM transacao de destino e SEM escrever."""
     dados = carregar(source_conn, target_conn, marketplace=marketplace,
-                     observed_date=observed_date)
-    plano = build_plan(
-        scope=Scope(marketplace, dados["observed_date"]),
-        offers=dados["offers"], references=dados["references"],
-        bom_rows=dados["bom_rows"], catalog_rows=dados["catalog_rows"],
-        bridge_brand_code=dados["bridge_brand_code"],
-        bridge_alias=dados["bridge_alias"],
-        kit_brand_rows=dados["kit_brand_rows"],
-        snapshot_id=dados["snapshot_id"],
-        reference_captured_at=dados["reference_captured_at"],
-        source_run_id="diagnose", today=today)
+                     observed_date=observed_date, source=source,
+                     avoe_kits=avoe_kits, today=today)
+    plano = planejar(dados, scope=Scope(marketplace, dados["observed_date"]),
+                     source_run_id="diagnose", today=today)
     return {"state": "diagnosed", "rows_that_would_publish": len(plano.records),
             "scope": {"marketplace": marketplace,
                       "observed_date": str(dados["observed_date"])},
             "snapshot_id": dados["snapshot_id"],
-            "summary": plano.summary}
+            "bom_source": source,
+            "summary": plano.summary,
+            "avoe_summary": dados.get("avoe_summary")}
 
 
 # ---------------------------------------------------------------------------
@@ -521,16 +696,48 @@ def build_cli() -> argparse.ArgumentParser:
     p.add_argument("--apply", action="store_true",
                    help="PUBLICA. Sem esta flag o comando so' diagnostica")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--source", choices=SOURCES, default=SOURCE_PROTHEUS,
+                   help="origem da composicao do kit. Padrao: protheus "
+                        "(comportamento anterior). `ambas` soma a Avoe")
+    p.add_argument("--avoe-snapshot", default=None,
+                   help="snapshot JSON de `pipelines.avoe_kits_source`. "
+                        "Padrao: a variavel AVOE_KITS_SNAPSHOT")
     return p
 
 
 def main(argv=None) -> int:
     args = build_cli().parse_args(argv)
+    if args.apply and args.source == SOURCE_AVOE:
+        # Recusa ANTES de carregar configuracao e de abrir conexao: o publish
+        # apaga o escopo inteiro, e so' com a BOM da Avoe as linhas do
+        # Protheus sumiriam.
+        print("--apply com --source avoe e' recusado: use --source ambas para "
+              "publicar; avoe sozinho apagaria as linhas do Protheus no escopo.",
+              file=sys.stderr)
+        return 2
     try:
         from dotenv import load_dotenv
         load_dotenv(Path(__file__).resolve().parents[1] / ".env")
     except ImportError:  # pragma: no cover
         pass
+
+    avoe_kits = None
+    if args.source != SOURCE_PROTHEUS:
+        from pipelines.avoe_kits_source import (
+            ENV_SNAPSHOT,
+            AvoeSourceError,
+            load_snapshot,
+        )
+        caminho = args.avoe_snapshot or os.environ.get(ENV_SNAPSHOT, "")
+        if not caminho:
+            print(f"--source {args.source} exige --avoe-snapshot ou "
+                  f"{ENV_SNAPSHOT}.", file=sys.stderr)
+            return 2
+        try:
+            avoe_kits = load_snapshot(caminho)["kits"]
+        except AvoeSourceError as exc:
+            print(f"FALHA: {exc}", file=sys.stderr)
+            return 2
 
     alvo_url = os.environ.get(ENV_TARGET, "")
     fonte_url = os.environ.get(ENV_SOURCE, "")
@@ -551,12 +758,13 @@ def main(argv=None) -> int:
                 resultados.append(publish(
                     target_conn=target_conn, audit_conn=audit_conn,
                     source_conn=source_conn, marketplace=canal,
-                    observed_date=args.observed_date, today=hoje))
+                    observed_date=args.observed_date, today=hoje,
+                    source=args.source, avoe_kits=avoe_kits))
             else:
                 resultados.append(diagnose(
                     target_conn=target_conn, source_conn=source_conn,
                     marketplace=canal, observed_date=args.observed_date,
-                    today=hoje))
+                    today=hoje, source=args.source, avoe_kits=avoe_kits))
     except (KitPublisherError, kb.BomContractError) as exc:
         print(f"FALHA: {exc}", file=sys.stderr)
         return 1
