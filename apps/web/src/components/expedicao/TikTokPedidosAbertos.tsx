@@ -3,17 +3,18 @@
 /**
  * EXPEDICAO-TIKTOK-ABERTOS — "quais pedidos do TikTok estao em aberto agora?"
  *
- * O mesmo modelo do "Risco atual" da Shopee e do Mercado Livre: cartoes
- * clicaveis (vencidos, vence hoje, vence no proximo dia util, acima de 48 h)
- * que abrem a lista dos pedidos, com quebra por marca e etapa e "Exportar CSV".
- * A tabela por marca diz onde agir.
+ * O mesmo modelo do "Risco atual" da Shopee e do Mercado Livre: vencidos em
+ * destaque e, ao lado, vence hoje, vence no proximo dia util e acima de 48 h,
+ * todos clicaveis (lista dos pedidos, quebra por marca e etapa, CSV). A tabela
+ * por marca vira o "Backlog por marca", como nos outros canais
+ * (EXPEDICAO-TIKTOK-PADRAO).
  *
  * Fonte: `/api/v1/expedicao/tiktok/abertos` (Data Mart ao vivo). O prazo e'
  * RECONSTRUIDO da politica (despacho 1 dia util, coleta 2 dias uteis), como
  * na LDR do TikTok — dito na descricao da secao e no rodape do popup.
  */
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
 import DrilldownSecao from "@/components/drilldown/DrilldownSecao";
@@ -21,8 +22,11 @@ import EvidenceRow from "@/components/drilldown/EvidenceRow";
 import CartaoDeRisco from "@/components/expedicao/CartaoDeRisco";
 import TikTokColetaPerdida, { BotaoCsvCompleto, baixarCsv } from "@/components/expedicao/TikTokColetaPerdida";
 import { CLASSE_CABECALHO, CLASSE_TABELA, EstadoSecao } from "@/components/expedicao/LayoutExpedicao";
-import { FaixaKpis, SecaoGerencial, SeloLeitura } from "@/components/expedicao/SecoesExpedicao";
-import { formatarHoras } from "@/lib/expedicao-contract";
+import RiscoEmDestaque from "@/components/expedicao/RiscoEmDestaque";
+import { SecaoGerencial, SeloLeitura } from "@/components/expedicao/SecoesExpedicao";
+import InfoDica from "@/components/ui/InfoDica";
+import Panel from "@/components/ui/Panel";
+import { formatarHoras, type Kpi } from "@/lib/expedicao-contract";
 import { buscarExpedicao } from "@/lib/expedicao-demo";
 import { formatarInteiro } from "@/lib/expedicao-formato";
 import {
@@ -36,6 +40,7 @@ import {
   faixaDaPagina,
   instanteCurto,
   nomeDoCsvAbertos,
+  ondeAgirNosAbertos,
   queryAbertos,
   type ListaAbertos,
   type RespostaAbertos,
@@ -241,9 +246,22 @@ function PopupAbertos({
 }
 
 // ---------------------------------------------------------------------------
-// Secao
+// Dados (uma busca, duas secoes)
 // ---------------------------------------------------------------------------
-export default function TikTokPedidosAbertos({ api, marca }: { api: string; marca: string | null }) {
+export type AbertosTikTok = {
+  carga: Carga;
+  carregar: () => void;
+  abrir: (lista: ListaAbertos, total: number, marca?: string | null) => void;
+  /** O popup da lista, montado UMA vez pelo painel. */
+  popup: ReactNode;
+};
+
+/**
+ * EXPEDICAO-TIKTOK-PADRAO — os pedidos em aberto alimentam DUAS secoes do
+ * esqueleto comum: o "Risco atual" (cartoes) e o "Backlog por marca"
+ * (tabela). Uma busca so', um popup so'.
+ */
+export function useTikTokAbertos(api: string, marca: string | null): AbertosTikTok {
   const [carga, setCarga] = useState<Carga>({ tipo: "carregando" });
   const [aberta, setAberta] = useState<{ lista: ListaAbertos; total: number; marca: string | null } | null>(null);
 
@@ -262,131 +280,11 @@ export default function TikTokPedidosAbertos({ api, marca }: { api: string; marc
     void carregar();
   }, [carregar]);
 
-  const titulo = "Pedidos em aberto agora";
-  if (carga.tipo !== "ok" || carga.dados.availability !== "available") {
-    return (
-      <SecaoGerencial titulo={titulo} selo={<SeloLeitura>agora</SeloLeitura>}>
-        <EstadoSecao
-          tipo={carga.tipo === "carregando" ? "carregando" : "erro"}
-          titulo={carga.tipo === "carregando" ? "Carregando os pedidos em aberto…" : "Não foi possível carregar os pedidos em aberto do TikTok."}
-          aoTentarDeNovo={carga.tipo === "carregando" ? undefined : () => void carregar()}
-        />
-      </SecaoGerencial>
-    );
-  }
-
-  const d = carga.dados;
-  const t = d.totals;
-  const abrir = (lista: ListaAbertos, total: number, m: string | null = marca) => setAberta({ lista, total, marca: m });
-  const proximo = diaCurto(d.next_business_day);
-
-  return (
-    <SecaoGerencial
-      titulo={titulo}
-      selo={<SeloLeitura>agora</SeloLeitura>}
-      dica="Pedidos pagos nos últimos 30 dias que ainda não saíram: aguardando envio (sem NF-e, na mesa de embalo) ou aguardando coleta (embalado, com NF-e). Prazo reconstruído pela política do TikTok: envio até 1 dia útil e coleta até 2 dias úteis após o pagamento."
-      descricao={
-        <>
-          {formatarInteiro(t.open)} em aberto · {formatarInteiro(t.awaiting_shipment)} aguardando envio ·{" "}
-          {formatarInteiro(t.awaiting_collection)} aguardando coleta
-          {t.on_hold > 0 ? ` · ${formatarInteiro(t.on_hold)} retidos pelo TikTok` : ""}
-        </>
-      }
-    >
-      <div data-testid="exp-tiktok-abertos" className="flex flex-col gap-3">
-        <FaixaKpis rotulo="Pedidos do TikTok em aberto">
-          <CartaoDeRisco
-            chave="overdue"
-            rotulo="Vencidos"
-            valor={formatarInteiro(t.overdue)}
-            detalhe={`${formatarInteiro(t.overdue_collection)} na coleta`}
-            tom={t.overdue > 0 ? "critico" : "neutro"}
-            aoAbrir={t.overdue > 0 ? () => abrir("overdue", t.overdue) : undefined}
-            rotuloAbrir={`Ver os ${formatarInteiro(t.overdue)} pedidos vencidos do TikTok`}
-          />
-          <CartaoDeRisco
-            chave="due24h"
-            rotulo="Vence hoje"
-            valor={formatarInteiro(t.due_today)}
-            detalhe={`${pct(t.due_today, t.open)} do total`}
-            tom={t.due_today > 0 ? "atencao" : "neutro"}
-            aoAbrir={t.due_today > 0 ? () => abrir("due_today", t.due_today) : undefined}
-            rotuloAbrir={`Ver os ${formatarInteiro(t.due_today)} pedidos do TikTok que vencem hoje`}
-          />
-          <CartaoDeRisco
-            chave="due_next_day"
-            rotulo={`Vence ${proximo}`}
-            valor={formatarInteiro(t.due_next_day)}
-            detalhe="próximo dia útil"
-            aoAbrir={t.due_next_day > 0 ? () => abrir("due_next_day", t.due_next_day) : undefined}
-            rotuloAbrir={`Ver os ${formatarInteiro(t.due_next_day)} pedidos do TikTok que vencem ${proximo}`}
-          />
-          <CartaoDeRisco
-            chave="over48h"
-            rotulo="Acima de 48 h"
-            valor={formatarInteiro(t.over_48h)}
-            detalhe={`${pct(t.over_48h, t.open)} do total`}
-            tom={t.over_48h > 0 ? "atencao" : "neutro"}
-            aoAbrir={t.over_48h > 0 ? () => abrir("over_48h", t.over_48h) : undefined}
-            rotuloAbrir={`Ver os ${formatarInteiro(t.over_48h)} pedidos do TikTok abertos há mais de 48 h`}
-          />
-        </FaixaKpis>
-
-        {d.brands.length ? (
-          <div className="overflow-x-auto rounded-xl border border-line bg-surface">
-            <table className={CLASSE_TABELA}>
-              <caption className="sr-only">Pedidos do TikTok em aberto por marca</caption>
-              <thead className={CLASSE_CABECALHO}>
-                <tr>
-                  <th scope="col">Marca</th>
-                  <th scope="col" className="text-right">Em aberto</th>
-                  <th scope="col" className="text-right">Ag. envio</th>
-                  <th scope="col" className="text-right">Ag. coleta</th>
-                  <th scope="col" className="text-right">Vencidos</th>
-                  <th scope="col" className="text-right">Vence hoje</th>
-                  <th scope="col" className="text-right">Vence {proximo}</th>
-                  <th scope="col" className="text-right">&gt; 48 h</th>
-                </tr>
-              </thead>
-              <tbody>
-                {d.brands.map((b) => {
-                  const celula = (lista: ListaAbertos, n: number, cor = "text-ink") =>
-                    n > 0 ? (
-                      <button
-                        type="button"
-                        onClick={() => abrir(lista, n, b.brand)}
-                        className={`tabular-nums underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${cor}`}
-                        aria-label={`Ver ${formatarInteiro(n)} pedidos (${CONFIG_LISTA[lista].titulo}) de ${brandLabel(b.brand)}`}
-                      >
-                        {formatarInteiro(n)}
-                      </button>
-                    ) : (
-                      <span className="tabular-nums text-ink-faint">0</span>
-                    );
-                  return (
-                    <tr key={b.brand} className="border-t border-line">
-                      <th scope="row" className="text-left font-medium text-ink">{brandLabel(b.brand)}</th>
-                      <td className="text-right">{celula("all", b.open)}</td>
-                      <td className="text-right">{celula("awaiting_shipment", b.awaiting_shipment)}</td>
-                      <td className="text-right">{celula("awaiting_collection", b.awaiting_collection)}</td>
-                      <td className="text-right font-semibold">{celula("overdue", b.overdue, "text-crit-ink")}</td>
-                      <td className="text-right">{celula("due_today", b.due_today, "text-warn-ink")}</td>
-                      <td className="text-right">{celula("due_next_day", b.due_next_day)}</td>
-                      <td className="text-right">{celula("over_48h", b.over_48h)}</td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <p className="text-sm text-ink-muted">Nenhum pedido do TikTok em aberto neste recorte.</p>
-        )}
-
-        {/* EXPEDICAO-TIKTOK-COLETA-PERDIDA: por dia de prazo, inclusive os ja' coletados depois. */}
-        <TikTokColetaPerdida api={api} marca={marca} />
-      </div>
-
+  return {
+    carga,
+    carregar: () => void carregar(),
+    abrir: (lista, total, m = marca) => setAberta({ lista, total, marca: m }),
+    popup: (
       <PopupAbertos
         api={api}
         marca={aberta?.marca ?? null}
@@ -394,6 +292,188 @@ export default function TikTokPedidosAbertos({ api, marca }: { api: string; marc
         total={aberta?.total ?? 0}
         aoFechar={() => setAberta(null)}
       />
+    ),
+  };
+}
+
+const DICA_ABERTOS =
+  "Pedidos pagos nos últimos 30 dias que ainda não saíram: aguardando envio (sem NF-e, na mesa de embalo) ou " +
+  "aguardando coleta (embalado, com NF-e). Prazo reconstruído pela política do TikTok: envio até 1 dia útil e " +
+  "coleta até 2 dias úteis após o pagamento.";
+
+function EstadoAbertos({ abertos }: { abertos: AbertosTikTok }) {
+  const carregando = abertos.carga.tipo === "carregando";
+  return (
+    <EstadoSecao
+      tipo={carregando ? "carregando" : "erro"}
+      titulo={carregando ? "Carregando os pedidos em aberto…" : "Não foi possível carregar os pedidos em aberto do TikTok."}
+      aoTentarDeNovo={carregando ? undefined : abertos.carregar}
+    />
+  );
+}
+
+function prontos(abertos: AbertosTikTok): RespostaAbertos | null {
+  return abertos.carga.tipo === "ok" && abertos.carga.dados.availability === "available" ? abertos.carga.dados : null;
+}
+
+// ---------------------------------------------------------------------------
+// Risco atual — o MESMO desenho da Shopee e do ML
+// ---------------------------------------------------------------------------
+export function RiscoAtualTikTok({ abertos, children }: { abertos: AbertosTikTok; children?: ReactNode }) {
+  const d = prontos(abertos);
+  if (!d) {
+    return (
+      <SecaoGerencial titulo="Risco atual" dica={DICA_ABERTOS} selo={<SeloLeitura>agora</SeloLeitura>}>
+        <EstadoAbertos abertos={abertos} />
+        {children}
+      </SecaoGerencial>
+    );
+  }
+  const t = d.totals;
+  const proximo = diaCurto(d.next_business_day);
+  const principal: Kpi = { chave: "overdue", rotulo: "Vencidos", valor: t.overdue, alerta: t.overdue > 0 };
+  const backlog: Kpi = { chave: "backlog", rotulo: "Em aberto", valor: t.open, alerta: false };
+  const etapas =
+    t.overdue > 0 ? (
+      <p className="text-sm text-ink-muted">
+        {formatarInteiro(t.overdue_collection)} aguardando coleta · {formatarInteiro(t.overdue_shipment)} aguardando envio
+      </p>
+    ) : undefined;
+  return (
+    <SecaoGerencial titulo="Risco atual" dica={DICA_ABERTOS} selo={<SeloLeitura>agora</SeloLeitura>}>
+      <div data-testid="exp-tiktok-abertos">
+        <RiscoEmDestaque
+          principal={principal}
+          backlog={backlog}
+          prazo={etapas}
+          ondeAgir={ondeAgirNosAbertos(t, d.brands, brandLabel)}
+          aoAbrir={t.overdue > 0 ? () => abertos.abrir("overdue", t.overdue) : undefined}
+          secundarios={
+            <>
+              <CartaoDeRisco
+                chave="due24h"
+                rotulo="Vence hoje"
+                valor={formatarInteiro(t.due_today)}
+                detalhe={`${pct(t.due_today, t.open)} do total`}
+                tom={t.due_today > 0 ? "atencao" : "neutro"}
+                aoAbrir={t.due_today > 0 ? () => abertos.abrir("due_today", t.due_today) : undefined}
+                rotuloAbrir={`Ver os ${formatarInteiro(t.due_today)} pedidos do TikTok que vencem hoje`}
+              />
+              <CartaoDeRisco
+                chave="due_next_day"
+                rotulo={`Vence ${proximo}`}
+                valor={formatarInteiro(t.due_next_day)}
+                detalhe="próximo dia útil"
+                aoAbrir={t.due_next_day > 0 ? () => abertos.abrir("due_next_day", t.due_next_day) : undefined}
+                rotuloAbrir={`Ver os ${formatarInteiro(t.due_next_day)} pedidos do TikTok que vencem ${proximo}`}
+              />
+              <CartaoDeRisco
+                chave="over48h"
+                rotulo="Acima de 48 h"
+                valor={formatarInteiro(t.over_48h)}
+                detalhe={`${pct(t.over_48h, t.open)} do total`}
+                tom={t.over_48h > 0 ? "atencao" : "neutro"}
+                aoAbrir={t.over_48h > 0 ? () => abertos.abrir("over_48h", t.over_48h) : undefined}
+                rotuloAbrir={`Ver os ${formatarInteiro(t.over_48h)} pedidos do TikTok abertos há mais de 48 h`}
+              />
+            </>
+          }
+        />
+      </div>
+      {children}
     </SecaoGerencial>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Backlog por marca — o MESMO titulo e o mesmo painel da Shopee e do ML
+// ---------------------------------------------------------------------------
+export function BacklogPorMarcaTikTok({
+  abertos,
+  api,
+  marca,
+}: {
+  abertos: AbertosTikTok;
+  api: string;
+  marca: string | null;
+}) {
+  const d = prontos(abertos);
+  if (!d) {
+    return (
+      <Panel titulo="Backlog por marca">
+        <EstadoAbertos abertos={abertos} />
+      </Panel>
+    );
+  }
+  const t = d.totals;
+  const proximo = diaCurto(d.next_business_day);
+  return (
+    <Panel
+      semPadding
+      titulo="Backlog por marca"
+      acao={<InfoDica texto={DICA_ABERTOS} />}
+      descricao={
+        <>
+          {formatarInteiro(t.open)} em aberto · {formatarInteiro(t.awaiting_shipment)} aguardando envio ·{" "}
+          {formatarInteiro(t.awaiting_collection)} aguardando coleta
+          {t.on_hold > 0 ? ` · ${formatarInteiro(t.on_hold)} retidos pelo TikTok` : ""}
+        </>
+      }
+      // EXPEDICAO-TIKTOK-COLETA-PERDIDA: por dia de prazo, inclusive os ja' coletados depois.
+      rodape={<TikTokColetaPerdida api={api} marca={marca} embutida />}
+    >
+      {d.brands.length ? (
+        <div className="overflow-x-auto">
+          <table className={CLASSE_TABELA}>
+            <caption className="sr-only">Pedidos do TikTok em aberto por marca</caption>
+            <thead className={CLASSE_CABECALHO}>
+              <tr>
+                <th scope="col">Marca</th>
+                <th scope="col" className="text-right">Em aberto</th>
+                <th scope="col" className="text-right">Ag. envio</th>
+                <th scope="col" className="text-right">Ag. coleta</th>
+                <th scope="col" className="text-right">Vencidos</th>
+                <th scope="col" className="text-right">Vence hoje</th>
+                <th scope="col" className="text-right">Vence {proximo}</th>
+                <th scope="col" className="text-right">Acima de 48 h</th>
+              </tr>
+            </thead>
+            <tbody>
+              {d.brands.map((b) => {
+                const celula = (lista: ListaAbertos, n: number, cor = "text-ink") =>
+                  n > 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => abertos.abrir(lista, n, b.brand)}
+                      className={`tabular-nums underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${cor}`}
+                      aria-label={`Ver ${formatarInteiro(n)} pedidos (${CONFIG_LISTA[lista].titulo}) de ${brandLabel(b.brand)}`}
+                    >
+                      {formatarInteiro(n)}
+                    </button>
+                  ) : (
+                    <span className="tabular-nums text-ink-faint">0</span>
+                  );
+                return (
+                  <tr key={b.brand} className="border-t border-line hover:bg-raised/60">
+                    <th scope="row" className="text-left font-semibold text-ink">{brandLabel(b.brand)}</th>
+                    <td className="text-right">{celula("all", b.open)}</td>
+                    <td className="text-right">{celula("awaiting_shipment", b.awaiting_shipment)}</td>
+                    <td className="text-right">{celula("awaiting_collection", b.awaiting_collection)}</td>
+                    <td className="text-right font-semibold">{celula("overdue", b.overdue, "text-crit-ink")}</td>
+                    <td className="text-right">{celula("due_today", b.due_today, "text-warn-ink")}</td>
+                    <td className="text-right">{celula("due_next_day", b.due_next_day)}</td>
+                    <td className="text-right">{celula("over_48h", b.over_48h)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p role="status" className="px-4 py-3 text-sm text-ink-muted">
+          Nenhum pedido do TikTok em aberto neste recorte.
+        </p>
+      )}
+    </Panel>
   );
 }

@@ -327,3 +327,41 @@ export function diaDentroDaJanelaDaLista(dia: string, agora: Date = new Date()):
   const limite = new Date(brt - JANELA_LISTA_DIAS * 86400000).toISOString().slice(0, 10);
   return dia >= limite && dia <= hoje;
 }
+
+/**
+ * EXPEDICAO-TIKTOK-PADRAO — "Onde agir" do TikTok, na MESMA frase da fila da
+ * Shopee e do ML: a marca que concentra a medida mais grave acesa (vencidos;
+ * sem vencido, acima de 48 h). Selecao sobre o que a API publicou por marca,
+ * nunca soma. Com uma marca so' no recorte, a frase nao acrescenta nada.
+ */
+export function ondeAgirNosAbertos(
+  t: ContagemAbertos | null,
+  marcas: readonly MarcaAbertos[],
+  nome: (marca: string) => string = (m) => m.toUpperCase(),
+): { chave: string; tom: "critico" | "atencao"; texto: string } | null {
+  if (!t || marcas.length < 2) return null;
+  const medidas = [
+    { campo: "overdue", plural: "vencidos", singular: "vencido", tom: "critico" },
+    { campo: "over_48h", plural: "acima de 48 h", singular: "acima de 48 h", tom: "atencao" },
+  ] as const;
+  for (const m of medidas) {
+    const total = t[m.campo];
+    if (total <= 0) continue;
+    const maior = marcas.reduce<MarcaAbertos | null>((a, b) => (a === null || b[m.campo] > a[m.campo] ? b : a), null);
+    if (!maior || maior[m.campo] <= 0) return null;
+    const parte = maior[m.campo];
+    const quem = nome(maior.brand);
+    const n = (x: number) => x.toLocaleString("pt-BR");
+    return {
+      chave: m.campo,
+      tom: m.tom,
+      texto:
+        total === 1
+          ? `${quem} tem o único pedido ${m.singular}.`
+          : parte >= total
+            ? `${quem} concentra todos os ${n(total)} ${m.plural}.`
+            : `${quem} concentra ${n(parte)} dos ${n(total)} ${m.plural}.`,
+    };
+  }
+  return null;
+}

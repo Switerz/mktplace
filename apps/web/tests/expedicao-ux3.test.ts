@@ -262,11 +262,20 @@ test("os tres canais tem uma definicao curta da medicao", () => {
 });
 
 test("as secoes tem o mesmo titulo nos tres canais", () => {
-  for (const f of [CLIENTE, TIKTOK]) {
+  // EXPEDICAO-TIKTOK-PADRAO: o "Risco atual" e o "Backlog por marca" do
+  // TikTok moram no componente dos pedidos em aberto.
+  const ABERTOS = fonte("src/components/expedicao/TikTokPedidosAbertos.tsx");
+  for (const f of [CLIENTE, ABERTOS]) {
     assert.match(f, /<SecaoGerencial titulo="Risco atual"/);
-    assert.match(f, /titulo="Prazo"/);
-    assert.match(f, /Concentração por marca/);
+    assert.match(f, /titulo="Backlog por marca"/);
   }
+  assert.match(TIKTOK, /<RiscoAtualTikTok abertos=\{abertos\}>/);
+  assert.match(TIKTOK, /<BacklogPorMarcaTikTok /);
+  for (const f of [CLIENTE, TIKTOK]) {
+    assert.match(f, /titulo="Prazo"/);
+  }
+  assert.match(TIKTOK, /Concentração por marca/);
+  assert.match(CLIENTE, /Concentração por marca/);
 });
 
 test("'Fonte avançou' virou linguagem de gestor", () => {
