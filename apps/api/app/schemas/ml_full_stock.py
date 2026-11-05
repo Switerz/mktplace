@@ -88,6 +88,18 @@ class InventarioEstoque(BaseModel):
     vinculo_vendas: str
     ref_date: date
 
+    #: IDENTIFICACAO do anuncio-ancora (T-0018). Atributo da linha: nunca
+    #: multiplica nem soma estoque. `None` = sem ancora, sem match na 014 ou
+    #: 038 nao aplicada -- "sem identificacao", nunca string vazia.
+    sku: Optional[str] = None
+    titulo: Optional[str] = None
+    #: Anuncios distintos do inventario alem do ancora. `None` = linha
+    #: publicada antes da 038 (ou 038 nao aplicada).
+    anuncios_extras: Optional[int] = Field(default=None, ge=0)
+    #: TRUE = o ancora e' uma variacao e o SKU/titulo vem do ITEM (a 014 nao
+    #: tem variacao): ambiguo. `None` = sem ancora.
+    ancora_e_variacao: Optional[bool] = None
+
 
 class StatusNaoDisponivel(BaseModel):
     """Detalhe do nao disponivel por status cru do ML, somado POR INVENTARIO

@@ -64,6 +64,8 @@ PUBLICACAO
   bater com o calculado e, POR MARCA pedida, `inventarios` da fato de marca e
   as linhas de inventario e de status tambem (marca zero: 0, 0, 0 e a linha
   da fato de marca presente); qualquer diferenca aborta.
+- Cada inventario leva o seu anuncio-ancora (migration 038,
+  `transforms.ml_full_stock.ancora`): coluna da MESMA linha, nunca linha nova.
 - Auditoria em `audit.source_sync_run` numa conexao PROPRIA: o rollback das
   fatos nao apaga o registro de que a execucao existiu e falhou. As DUAS
   conexoes da auditoria conferem a mesma identidade ANTES do INSERT/UPDATE:
@@ -152,7 +154,12 @@ EXIT_OK, EXIT_ERRO, EXIT_RECUSA, EXIT_COMMIT_COM_PENDENCIA = 0, 1, 2, 5
 COLS_INV = ("ref_date", "brand", "seller_id", "inventory_id", "read_status", "disponivel",
             "nao_disponivel", "transfer", "total_coerente", "detalhe_coerente", "eh_full", "anuncios",
             "anuncios_ativos", "anuncios_full", "unidades_28d", "media_diaria_28d",
-            "cobertura_torre_dias", "classificacao_torre", "vinculo_vendas", "source_run_id")
+            "cobertura_torre_dias", "classificacao_torre", "vinculo_vendas", "source_run_id",
+            # Migration 038 (T-0018): anuncio-ancora so' para IDENTIFICAR o
+            # inventario na tela. Nao muda o numero de linhas nem a soma do
+            # disponivel. Sem a 038 aplicada o INSERT falha dentro da transacao
+            # (revertida_comprovada): aplicar a 038 ANTES de usar esta versao.
+            "anuncio_ancora_item_id", "anuncio_ancora_variation_id", "anuncios_extras")
 COLS_STATUS = ("ref_date", "brand", "seller_id", "inventory_id", "status_raw", "quantidade",
                "source_run_id")
 COLS_MARCA = ("ref_date", "brand", "inventarios", "inventarios_full_lidos",

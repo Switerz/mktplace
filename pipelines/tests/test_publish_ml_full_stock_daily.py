@@ -31,6 +31,7 @@ REF = date(2026, 10, 20)
 RAW = "run-raw-barbours-1"
 PUB = "0123456789abcdef0123456789abcdef"
 MIG = Path(__file__).resolve().parents[2] / "apps" / "api" / "alembic" / "versions" / "029_create_fact_ml_full_stock_daily.py"
+MIG_038 = MIG.parent / "038_ml_full_inventario_anuncio_ancora.py"
 #: arquivo aprovado do `-Identificar`, relativo ao cwd (o fixture `ambiente` faz chdir para tmp_path)
 ARQ_DESTINO = "identidade_aprovada.json"
 #: impressao digital do Neon como o helper grava (tipos do JSON: str, bool, null)
@@ -768,8 +769,113 @@ def test_migration_029_cadeia_e_travas():
     assert "ck_fmlfsi_leitura_quantidade" in sql and "ck_fmlfsi_cobertura_exige_demanda" in sql
     assert sql.count("<> 'NaN'") >= 3
     assert "INSERT" not in sql.upper()
+    sql_038 = MIG_038.read_text(encoding="utf-8")
     for c in pub.COLS_INV + pub.COLS_MARCA:
-        assert c in sql, c
+        assert c in sql or f"ADD COLUMN {c} " in sql_038, c
+
+
+# ---------------------------------------------------------------------------
+# T-0018: anuncio-ancora por inventario (migration 038)
+# ---------------------------------------------------------------------------
+class _OpGravador:
+    def __init__(self):
+        self.sqls = []
+
+    def execute(self, sql):
+        self.sqls.append(sql)
+
+
+def _mig_038():
+    import types
+    op = _OpGravador()
+    spec = importlib.util.spec_from_file_location("m038", MIG_038)
+    m = importlib.util.module_from_spec(spec)
+    antigo = sys.modules.get("alembic")
+    sys.modules["alembic"] = types.SimpleNamespace(op=op)
+    try:
+        spec.loader.exec_module(m)
+    finally:
+        if antigo is None:
+            sys.modules.pop("alembic", None)
+        else:
+            sys.modules["alembic"] = antigo
+    return m, op
+
+
+def test_migration_038_tres_colunas_nulas_sem_default_e_downgrade_inverso():
+    m, op = _mig_038()
+    assert (m.revision, m.down_revision) == ("038", "037")
+    m.upgrade()
+    up = op.sqls[:]
+    assert len(up) == 3 and all(s.startswith(f"ALTER TABLE {pub.FACT_INVENTARIO} ADD COLUMN ") for s in up)
+    for col, sql in zip(m.COLUNAS, up):
+        assert f"ADD COLUMN {col} " in sql and " NULL " in sql
+        assert "DEFAULT" not in sql.upper() and "NOT NULL" not in sql.upper()
+    assert m.COLUNAS == pub.COLS_INV[-3:]
+    op.sqls.clear()
+    m.downgrade()
+    assert op.sqls == [f"ALTER TABLE {pub.FACT_INVENTARIO} DROP COLUMN IF EXISTS {c}"
+                       for c in reversed(m.COLUNAS)]
+    for sql in up + op.sqls:                       # so' DDL: nenhum dado e' escrito
+        assert not ESCRITA.match(sql), sql
+
+
+def _anuncio(item, var="0", lt="fulfillment", st="active"):
+    return {"item_id": item, "variation_id": var, "logistic_type": lt, "listing_status": st}
+
+
+def test_ancora_full_ativo_vence_full_inativo_que_vence_nao_full():
+    from pipelines.transforms import ml_full_stock as T
+    nao_full = _anuncio("A1", lt="cross_docking")
+    full_inativo = _anuncio("B2", st="paused")
+    full_ativo = _anuncio("C3")
+    assert T.ancora([nao_full, full_inativo, full_ativo])["anuncio_ancora_item_id"] == "C3"
+    assert T.ancora([nao_full, full_inativo])["anuncio_ancora_item_id"] == "B2"
+    assert T.ancora([nao_full])["anuncio_ancora_item_id"] == "A1"
+    # nao-Full ATIVO nao vence Full inativo
+    assert T.ancora([_anuncio("A0", lt="cross_docking"), full_inativo])["anuncio_ancora_item_id"] == "B2"
+    # a ordem de entrada nao muda o ancora
+    assert T.ancora([full_ativo, full_inativo, nao_full]) == T.ancora([nao_full, full_ativo, full_inativo])
+
+
+def test_ancora_empate_por_item_e_depois_variacao_como_texto():
+    from pipelines.transforms import ml_full_stock as T
+    r = T.ancora([_anuncio("MLB20"), _anuncio("MLB100")])
+    assert r["anuncio_ancora_item_id"] == "MLB100"            # texto: "MLB100" < "MLB20"
+    r = T.ancora([_anuncio("MLB1", var=9), _anuncio("MLB1", var=10)])
+    assert (r["anuncio_ancora_item_id"], r["anuncio_ancora_variation_id"]) == ("MLB1", "10")
+    assert r["anuncios_extras"] == 1
+    sem_var = T.ancora([_anuncio("MLB1", var=0)])
+    assert sem_var["anuncio_ancora_variation_id"] is None and sem_var["anuncios_extras"] == 0
+
+
+def test_ancora_sem_ponte_e_nula_com_zero_extras_e_extras_contam_distintos():
+    from pipelines.transforms import ml_full_stock as T
+    from pipelines.tests.test_sync_ml_full_stock_daily import snap
+    assert T.ancora([]) == {"anuncio_ancora_item_id": None, "anuncio_ancora_variation_id": None,
+                            "anuncios_extras": 0}
+    # linha duplicada na ponte nao vira anuncio extra
+    assert T.ancora([_anuncio("X"), _anuncio("X")])["anuncios_extras"] == 0
+    # inventario do snapshot sem ponte: so' aparece no transform puro (a coerencia recusa no apply)
+    linhas, _ = T.indicadores([snap("b", "SEM-PONTE", 3)], [], [], {})
+    assert (linhas[0]["anuncio_ancora_item_id"], linhas[0]["anuncios_extras"]) == (None, 0)
+
+
+def test_montar_uma_linha_por_inventario_e_soma_igual_com_ancora():
+    f = fonte_barbours()
+    pac = pub.montar(f, REF, "r")
+    invs = {(r["seller_id"], r["inventory_id"]) for r in f["snapshot"]}
+    assert len(pac["inventario"]) == len(invs) == pac["esperado"]["inventarios"]
+    assert all(len(r) == len(pub.COLS_INV) for r in pac["inventario"])
+    i = {c: n for n, c in enumerate(pub.COLS_INV)}
+    soma = sum(r[i["disponivel"]] or 0 for r in pac["inventario"] if r[i["read_status"]] == "OK")
+    # mesma soma de antes da T-0018 (test_montar_status_so_de_inventario_lido_e_estoque_uma_vez)
+    assert soma == pac["esperado"]["soma_disponivel"] == 56 + 0 + 30 + 500
+    linha = {r[i["inventory_id"]]: r for r in pac["inventario"]}
+    # IA: M1/M2 Full ativos e M3 fechado/nao-Full -> M1; 3 anuncios -> 2 extras
+    assert (linha["IA"][i["anuncio_ancora_item_id"]], linha["IA"][i["anuncios_extras"]]) == ("M1", 2)
+    assert linha["IV1"][i["anuncio_ancora_variation_id"]] == "11"
+    assert linha["ID"][i["anuncio_ancora_item_id"]] == "M6"      # so' nao-Full: "qualquer"
 
 
 def test_auditoria_marca_o_ml_como_2():
@@ -1541,6 +1647,14 @@ def pg(monkeypatch, tmp_path):
         c.execute(sql(DDL_RAW))
         c.execute(sql(DDL_APOIO))
         for ddl in _mig()._upgrade_sql():
+            c.execute(sql(ddl))
+        # T-0018: o publicador grava as colunas do anuncio-ancora, entao o destino
+        # deste teste e' 029 + 038, como o Neon depois do `alembic upgrade 038`.
+        # A 037 (T-0059, CHECK da marts.fact_dre_insumo_mensal) nao toca estas
+        # tabelas e fica de fora: o teste so' aplica o que o publicador le.
+        m038, op038 = _mig_038()
+        m038.upgrade()
+        for ddl in op038.sqls:
             c.execute(sql(ddl))
         # publicacao anterior de OUTRO dia, para provar que nada fora do pedido muda
         for m in QUATRO.split(","):
