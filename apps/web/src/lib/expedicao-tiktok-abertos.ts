@@ -95,7 +95,9 @@ export function instanteCurto(iso: string | null | undefined): string {
 }
 
 export const ROTULO_ETAPA: Record<PedidoAberto["stage"], string> = {
-  despacho: "Aguardando despacho",
+  // Nomes do painel do TikTok: "Aguardando envio" (sem NF-e, na mesa de embalo)
+  // e "Aguardando coleta" (embalado, com NF-e e etiqueta).
+  despacho: "Aguardando envio",
   coleta: "Aguardando coleta",
   retido: "Retido pelo TikTok",
 };
@@ -109,8 +111,8 @@ export const CONFIG_LISTA: Record<ListaAbertos, { titulo: string; vazio: string 
   },
   over_48h: { titulo: "Pedidos abertos há mais de 48 h (TikTok)", vazio: "Nenhum pedido acima de 48 h." },
   awaiting_shipment: {
-    titulo: "Pedidos aguardando despacho (TikTok)",
-    vazio: "Nenhum pedido aguardando despacho.",
+    titulo: "Pedidos aguardando envio (TikTok)",
+    vazio: "Nenhum pedido aguardando envio.",
   },
   awaiting_collection: {
     titulo: "Pedidos aguardando coleta (TikTok)",
@@ -237,7 +239,7 @@ export type EscopoColeta = "etiqueta_pronta" | "todos";
 /** Status atual do TikTok, na ordem do fluxo, com o nome em portugues. */
 export const ROTULO_STATUS_TIKTOK: Record<string, string> = {
   ON_HOLD: "Retido pelo TikTok",
-  AWAITING_SHIPMENT: "Aguardando despacho",
+  AWAITING_SHIPMENT: "Aguardando envio",
   AWAITING_COLLECTION: "Aguardando coleta",
   IN_TRANSIT: "Em trânsito",
   DELIVERED: "Entregue",
@@ -269,7 +271,7 @@ export function queryColetaPerdida(
 }
 
 export function csvDaColetaPerdida(pedidos: PedidoColetaPerdida[], vencimento: string): string {
-  const cab = ["pedido", "marca", "loja", "status_no_dia_do_prazo", "status_tiktok_hoje", "prazo_coleta", "pago_em", "etiqueta_pronta_em", "coletado_em", "situacao", "horas_de_atraso"];
+  const cab = ["pedido", "marca", "loja", "status_no_dia_do_prazo", "status_tiktok_hoje", "prazo_coleta", "aguardando_envio_desde", "aguardando_coleta_desde", "coletado_em", "situacao", "horas_de_atraso"];
   const linhas = pedidos.map((p) =>
     [
       p.order_id,

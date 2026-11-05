@@ -231,7 +231,7 @@ function PopupAbertos({
             </>
           )}
           <p className="text-xs text-ink-faint">
-            Prazo reconstruído pela política do TikTok (despacho até 1 dia útil e coleta até 2 dias úteis após o
+            Prazo reconstruído pela política do TikTok (envio até 1 dia útil e coleta até 2 dias úteis após o
             pagamento, com feriados nacionais); não é o SLA por pedido da plataforma.
           </p>
         </div>
@@ -284,10 +284,10 @@ export default function TikTokPedidosAbertos({ api, marca }: { api: string; marc
     <SecaoGerencial
       titulo={titulo}
       selo={<SeloLeitura>agora</SeloLeitura>}
-      dica="Pedidos pagos nos últimos 30 dias que ainda não saíram: aguardando despacho (etiqueta) ou aguardando coleta. Prazo reconstruído pela política do TikTok: despacho até 1 dia útil e coleta até 2 dias úteis após o pagamento."
+      dica="Pedidos pagos nos últimos 30 dias que ainda não saíram: aguardando envio (sem NF-e, na mesa de embalo) ou aguardando coleta (embalado, com NF-e). Prazo reconstruído pela política do TikTok: envio até 1 dia útil e coleta até 2 dias úteis após o pagamento."
       descricao={
         <>
-          {formatarInteiro(t.open)} em aberto · {formatarInteiro(t.awaiting_shipment)} aguardando despacho ·{" "}
+          {formatarInteiro(t.open)} em aberto · {formatarInteiro(t.awaiting_shipment)} aguardando envio ·{" "}
           {formatarInteiro(t.awaiting_collection)} aguardando coleta
           {t.on_hold > 0 ? ` · ${formatarInteiro(t.on_hold)} retidos pelo TikTok` : ""}
         </>
@@ -340,7 +340,7 @@ export default function TikTokPedidosAbertos({ api, marca }: { api: string; marc
                 <tr>
                   <th scope="col">Marca</th>
                   <th scope="col" className="text-right">Em aberto</th>
-                  <th scope="col" className="text-right">Ag. despacho</th>
+                  <th scope="col" className="text-right">Ag. envio</th>
                   <th scope="col" className="text-right">Ag. coleta</th>
                   <th scope="col" className="text-right">Vencidos</th>
                   <th scope="col" className="text-right">Vence hoje</th>
