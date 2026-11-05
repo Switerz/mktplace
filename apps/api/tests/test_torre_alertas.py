@@ -116,3 +116,71 @@ def test_mensagem_criticos_agrupa_ldr_e_saude():
     texto = ta.montar_mensagem_criticos([Item("ldr:a", "L1"), Item("saude:b", "S1")])
     assert texto.index("LDR acima do teto") < texto.index("L1") < texto.index("Performance oficial")
     assert "S1" in texto and "Abrir a Expedição" in texto
+
+
+# --- A4: vencidos parados no TikTok -----------------------------------------
+def _linha(marca, deadline, madura, venc, no_prazo):
+    return {"brand": marca, "coleta_deadline": deadline, "coleta_is_mature": madura,
+            "coleta_pendente_vencida": venc, "coleta_pendente_no_prazo": no_prazo,
+            "effective_at": AGORA}
+
+
+class _DbTiktok:
+    def __init__(self, linhas):
+        self.linhas = linhas
+
+    def execute(self, sql, params=None):
+        linhas = self.linhas
+
+        class R:
+            def scalar(self):
+                return True
+
+            def mappings(self):
+                class M:
+                    def all(self):
+                        return linhas
+                return M()
+        return R()
+
+
+def test_vencidos_tiktok_usa_os_recortes_da_tela(monkeypatch):
+    monkeypatch.setattr(ta.expedicao_service, "_tiktok_fotografia_velha", lambda p, a: False)
+    db = _DbTiktok([
+        _linha("apice", date(2026, 11, 4), True, 40, 0),
+        _linha("apice", date(2026, 10, 20), True, 99, 0),   # vencimento fora da janela
+        _linha("apice", date(2026, 11, 6), False, 0, 60),   # coorte aberta: so' no prazo
+        _linha("denavita", date(2026, 11, 4), True, 5, 0),  # sem conta no TikTok
+    ])
+    leitura = ta.ler_vencidos_tiktok(db, AGORA)
+    (m,) = leitura.marcas
+    assert (m.marca, m.vencidos, m.fila) == ("apice", 40, 100)
+
+
+def _leitura(*marcas, velha=False):
+    return ta.LeituraVencidos("tiktokshop", AGORA, [ta.VencidosMarca(*m) for m in marcas], velha)
+
+
+def test_vencidos_acima_de_3_porcento_vira_item_por_turno():
+    (item,) = ta.itens_vencidos(_leitura(("apice", 1624, 3777), ("rituaria", 1, 400)), AGORA)
+    assert item.chave == "vencidos:tiktokshop:2026-11-05:09"  # 14h UTC = 11h BRT
+    assert item.texto.startswith("TikTok Shop: 1.625 de 4.177 pedidos parados")
+    assert "ÁPICE 1.624 (43,0%)" in item.texto and "RITUÁRIA" not in item.texto
+
+
+def test_vencidos_nao_avisa_dentro_do_limite_velha_ou_base_pequena():
+    assert ta.itens_vencidos(_leitura(("apice", 3, 100)), AGORA) == []
+    assert ta.itens_vencidos(_leitura(("apice", 50, 100), velha=True), AGORA) == []
+    assert ta.itens_vencidos(_leitura(("apice", 10, 20)), AGORA) == []
+    assert ta.itens_vencidos(None, AGORA) == []
+
+
+def test_turno_de_brasilia():
+    assert ta.turno(datetime(2026, 11, 5, 11, 59, tzinfo=timezone.utc)) == "00"  # 8h59
+    assert ta.turno(datetime(2026, 11, 5, 16, 0, tzinfo=timezone.utc)) == "13"
+    assert ta.turno(datetime(2026, 11, 5, 23, 0, tzinfo=timezone.utc)) == "17"
+
+
+def test_mensagem_criticos_tem_secao_de_vencidos():
+    texto = ta.montar_mensagem_criticos([Item("vencidos:tiktokshop:d:09", "V1"), Item("saude:b", "S1")])
+    assert texto.index("Pedidos vencidos parados") < texto.index("V1") < texto.index("Performance oficial")
