@@ -49,6 +49,9 @@ def tiktok_coleta_perdida(
     status: Optional[str] = Query(
         None, description="Status ATUAL do pedido no TikTok, separados por virgula: "
                           + ", ".join(svc.STATUS_COLETA_PERDIDA) + ". Omitido = todos."),
+    status_dia: Optional[str] = Query(
+        None, description="Status RECONSTRUIDO no fim do dia do prazo, separados por virgula: "
+                          + ", ".join(svc.STATUS_NO_DIA) + ". Omitido = todos."),
     escopo: str = Query(
         "etiqueta_pronta",
         description="etiqueta_pronta = so' com etiqueta pronta ate' o fim do prazo; "
@@ -85,5 +88,10 @@ def tiktok_coleta_perdida(
             raise HTTPException(422, "Status invalido. Valores aceitos: " + ", ".join(svc.STATUS_COLETA_PERDIDA))
     if escopo not in svc.ESCOPOS_COLETA:
         raise HTTPException(422, "Escopo invalido. Valores aceitos: " + ", ".join(svc.ESCOPOS_COLETA))
+    lista_status_dia = None
+    if status_dia is not None:
+        lista_status_dia = [x.strip().upper() for x in status_dia.split(",") if x.strip()]
+        if not lista_status_dia or any(x not in svc.STATUS_NO_DIA for x in lista_status_dia):
+            raise HTTPException(422, "Status do dia invalido. Valores aceitos: " + ", ".join(svc.STATUS_NO_DIA))
     return svc.obter_coleta_perdida(vencimento=dia, brands=marcas, status=lista_status,
-                                    escopo=escopo, pagina=page)
+                                    status_dia=lista_status_dia, escopo=escopo, pagina=page)

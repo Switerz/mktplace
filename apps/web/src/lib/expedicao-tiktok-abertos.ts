@@ -192,7 +192,10 @@ export type PedidoColetaPerdida = {
   brand: string;
   order_id: string;
   shop_name: string | null;
+  /** Status ATUAL no TikTok. */
   status: string | null;
+  /** Status RECONSTRUIDO no fim do dia do prazo (etiqueta pronta ou nao). */
+  status_on_day?: string | null;
   paid_at: string | null;
   /** Etiqueta pronta (todos os itens com RTS), Brasilia sem fuso. */
   ready_at: string | null;
@@ -214,6 +217,8 @@ export type RespostaColetaPerdida = {
   all_brands?: string[];
   /** Pedidos por status ATUAL, no recorte de marca (opcoes do filtro de status). */
   status_counts?: Record<string, number>;
+  /** Pedidos por status NO DIA do prazo (opcoes do filtro "status no dia"). */
+  status_on_day_counts?: Record<string, number>;
   list_total: number;
   still_waiting: number;
   orders: PedidoColetaPerdida[];
@@ -250,11 +255,13 @@ export function queryColetaPerdida(
   pagina = 1,
   status: string | null = null,
   escopo: EscopoColeta = "etiqueta_pronta",
+  statusDia: string | null = null,
 ): string {
   const p = new URLSearchParams();
   if (vencimento) p.set("vencimento", vencimento);
   if (marca) p.set("brands", marca);
   if (status) p.set("status", status);
+  if (statusDia) p.set("status_dia", statusDia);
   if (escopo !== "etiqueta_pronta") p.set("escopo", escopo);
   if (pagina > 1) p.set("page", String(pagina));
   const q = p.toString();
@@ -262,12 +269,13 @@ export function queryColetaPerdida(
 }
 
 export function csvDaColetaPerdida(pedidos: PedidoColetaPerdida[], vencimento: string): string {
-  const cab = ["pedido", "marca", "loja", "status_tiktok", "prazo_coleta", "pago_em", "etiqueta_pronta_em", "coletado_em", "situacao", "horas_de_atraso"];
+  const cab = ["pedido", "marca", "loja", "status_no_dia_do_prazo", "status_tiktok_hoje", "prazo_coleta", "pago_em", "etiqueta_pronta_em", "coletado_em", "situacao", "horas_de_atraso"];
   const linhas = pedidos.map((p) =>
     [
       p.order_id,
       p.brand,
       p.shop_name ?? "",
+      rotuloStatusTikTok(p.status_on_day),
       rotuloStatusTikTok(p.status),
       vencimento,
       (p.paid_at ?? "").replace("T", " "),

@@ -101,8 +101,9 @@ async function buscarPagina(
   pagina: number,
   status: string | null = null,
   escopo: EscopoColeta = "etiqueta_pronta",
+  statusDia: string | null = null,
 ) {
-  const r = await buscarExpedicao(`${api}${queryColetaPerdida(vencimento, marca, pagina, status, escopo)}`, {
+  const r = await buscarExpedicao(`${api}${queryColetaPerdida(vencimento, marca, pagina, status, escopo, statusDia)}`, {
     cache: "no-store",
   });
   if (!r.ok) throw new Error(String(r.status));
@@ -134,36 +135,47 @@ export function PopupColetaPerdida({
   // Filtros do popup. A marca comeca na da tela; o CSV baixa SO' o filtrado.
   const [marcaSel, setMarcaSel] = useState<string | null>(marca);
   const [statusSel, setStatusSel] = useState<string | null>(null);
+  // Status NO DIA do prazo (reconstruido): como o pedido estava naquele dia.
+  const [statusDiaSel, setStatusDiaSel] = useState<string | null>(null);
   // Opcoes dos filtros: ficam da ultima resposta enquanto a proxima carrega.
-  const [opcoes, setOpcoes] = useState<{ marcas: string[]; status: Record<string, number> }>({
-    marcas: [],
-    status: {},
-  });
+  const [opcoes, setOpcoes] = useState<{
+    marcas: string[];
+    status: Record<string, number>;
+    statusDia: Record<string, number>;
+  }>({ marcas: [], status: {}, statusDia: {} });
 
   useEffect(() => setMarcaSel(marca), [marca]);
-  useEffect(() => setPagina(1), [vencimento, marcaSel, statusSel]);
+  // Outro dia: os status daquele dia nao valem para o novo.
+  useEffect(() => setStatusDiaSel(null), [vencimento]);
+  useEffect(() => setPagina(1), [vencimento, marcaSel, statusSel, statusDiaSel]);
   useEffect(() => {
     if (!aberto) return;
     let vivo = true;
     setCarga({ tipo: "carregando" });
-    buscarPagina(api, vencimento, marcaSel, pagina, statusSel, escopo)
+    buscarPagina(api, vencimento, marcaSel, pagina, statusSel, escopo, statusDiaSel)
       .then((dados) => {
         if (!vivo) return;
         setCarga({ tipo: "ok", dados });
-        setOpcoes({ marcas: dados.all_brands ?? [], status: dados.status_counts ?? {} });
+        setOpcoes({
+          marcas: dados.all_brands ?? [],
+          status: dados.status_counts ?? {},
+          statusDia: dados.status_on_day_counts ?? {},
+        });
       })
       .catch(() => vivo && setCarga({ tipo: "erro" }));
     return () => {
       vivo = false;
     };
-  }, [api, vencimento, marcaSel, statusSel, pagina, aberto, tentativa, escopo]);
+  }, [api, vencimento, marcaSel, statusSel, statusDiaSel, pagina, aberto, tentativa, escopo]);
 
   const dados = carga.tipo === "ok" ? carga.dados : null;
   const pedidos: PedidoColetaPerdida[] = dados?.orders ?? [];
   const total = dados?.list_total ?? 0;
   const variasMarcas = !marcaSel && (dados?.brands.length ?? 0) > 1;
   const totalStatus = Object.values(opcoes.status).reduce((a, b) => a + b, 0);
-  const filtrado = marcaSel !== marca || Boolean(statusSel);
+  const totalStatusDia = Object.values(opcoes.statusDia).reduce((a, b) => a + b, 0);
+  const filtrado = marcaSel !== marca || Boolean(statusSel) || Boolean(statusDiaSel);
+  const dia = diaCurto(vencimento);
   const filtros = (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-2" data-testid="exp-tiktok-coleta-perdida-filtros">
       <label className="flex items-center gap-2 text-xs text-ink-muted">
@@ -182,7 +194,24 @@ export function PopupColetaPerdida({
         </select>
       </label>
       <label className="flex items-center gap-2 text-xs text-ink-muted">
-        Status no TikTok
+        Status em {dia}
+        <select
+          value={statusDiaSel ?? ""}
+          onChange={(e) => setStatusDiaSel(e.target.value || null)}
+          className="min-h-9 rounded-md border border-line bg-raised px-2 text-sm text-ink"
+        >
+          <option value="">Todos ({formatarInteiro(totalStatusDia)})</option>
+          {Object.keys(ROTULO_STATUS_TIKTOK)
+            .filter((st) => (opcoes.statusDia[st] ?? 0) > 0 || st === statusDiaSel)
+            .map((st) => (
+              <option key={st} value={st}>
+                {rotuloStatusTikTok(st)} ({formatarInteiro(opcoes.statusDia[st] ?? 0)})
+              </option>
+            ))}
+        </select>
+      </label>
+      <label className="flex items-center gap-2 text-xs text-ink-muted">
+        Status hoje
         <select
           value={statusSel ?? ""}
           onChange={(e) => setStatusSel(e.target.value || null)}
@@ -204,6 +233,7 @@ export function PopupColetaPerdida({
           onClick={() => {
             setMarcaSel(marca);
             setStatusSel(null);
+            setStatusDiaSel(null);
           }}
           className="min-h-9 text-xs font-semibold text-accent-ink underline-offset-4 hover:underline"
         >
@@ -245,7 +275,8 @@ export function PopupColetaPerdida({
               <span className="pb-0.5 text-xs text-ink-faint">
                 {formatarInteiro(total - dados.still_waiting)} coletados depois · {formatarInteiro(dados.still_waiting)} ainda
                 sem coleta · {marcaSel ? brandLabel(marcaSel) : "todas as marcas"}
-                {statusSel ? ` · ${rotuloStatusTikTok(statusSel)}` : ""}
+                {statusDiaSel ? ` · em ${dia}: ${rotuloStatusTikTok(statusDiaSel)}` : ""}
+                {statusSel ? ` · hoje: ${rotuloStatusTikTok(statusSel)}` : ""}
               </span>
             </div>
             {variasMarcas ? (
@@ -273,12 +304,12 @@ export function PopupColetaPerdida({
                     testId="exp-tiktok-coleta-perdida-csv"
                     baixar={async (aoAvancar) => {
                       const todos = await buscarTodasAsPaginas(
-                        (p) => buscarPagina(api, vencimento, marcaSel, p, statusSel, escopo),
+                        (p) => buscarPagina(api, vencimento, marcaSel, p, statusSel, escopo, statusDiaSel),
                         aoAvancar,
                       );
                       baixarCsv(
                         csvDaColetaPerdida(todos, vencimento),
-                        `tiktok-${escopo === "todos" ? "vencidos-sem-coleta" : "nao-coletados-prazo"}-${vencimento}${marcaSel ? `-${marcaSel}` : ""}${statusSel ? `-${statusSel.toLowerCase()}` : ""}.csv`,
+                        `tiktok-${escopo === "todos" ? "vencidos-sem-coleta" : "nao-coletados-prazo"}-${vencimento}${marcaSel ? `-${marcaSel}` : ""}${statusDiaSel ? `-no-dia-${statusDiaSel.toLowerCase()}` : ""}${statusSel ? `-hoje-${statusSel.toLowerCase()}` : ""}.csv`,
                       );
                     }}
                   />
@@ -292,7 +323,8 @@ export function PopupColetaPerdida({
                     <tr>
                       <th scope="col">Pedido</th>
                       {variasMarcas ? <th scope="col">Marca</th> : null}
-                      <th scope="col">Status</th>
+                      <th scope="col">Em {dia}</th>
+                      <th scope="col">Hoje</th>
                       <th scope="col">Pago em</th>
                       <th scope="col">Etiqueta pronta</th>
                       <th scope="col">Coleta</th>
@@ -303,7 +335,8 @@ export function PopupColetaPerdida({
                       <tr key={p.order_id} className="border-t border-line">
                         <td className="whitespace-nowrap font-mono text-xs text-ink">{p.order_id}</td>
                         {variasMarcas ? <td className="whitespace-nowrap text-ink">{brandLabel(p.brand)}</td> : null}
-                        <td className="whitespace-nowrap text-ink">{rotuloStatusTikTok(p.status)}</td>
+                        <td className="whitespace-nowrap font-medium text-ink">{rotuloStatusTikTok(p.status_on_day)}</td>
+                        <td className="whitespace-nowrap text-ink-muted">{rotuloStatusTikTok(p.status)}</td>
                         <td className="whitespace-nowrap tabular-nums text-ink-muted">{instanteCurto(p.paid_at)}</td>
                         <td className="whitespace-nowrap tabular-nums text-ink-muted">{instanteCurto(p.ready_at)}</td>
                         <td className={`whitespace-nowrap tabular-nums ${p.collected_at ? "text-warn-ink" : "font-semibold text-crit-ink"}`}>
@@ -347,7 +380,9 @@ export function PopupColetaPerdida({
           {diaCurto(dados?.paid_to)}),{" "}
           {escopo === "todos"
             ? "sem coleta (IN_TRANSIT) até o fim desse dia, com ou sem etiqueta pronta — a mesma conta da LDR."
-            : "etiqueta pronta até o fim desse dia e sem coleta (IN_TRANSIT) até o fim dele."}
+            : "etiqueta pronta até o fim desse dia e sem coleta (IN_TRANSIT) até o fim dele."}{" "}
+          &quot;Em {diaCurto(vencimento)}&quot; é como o pedido estava no fim desse dia: aguardando coleta se a etiqueta
+          já estava pronta, senão aguardando despacho (ou retido pelo TikTok).
           Prazo reconstruído pela política do TikTok (coleta até 2 dias úteis após o pagamento).
         </p>
       </div>
