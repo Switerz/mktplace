@@ -40,6 +40,9 @@ Consultar = Callable[[str, dict], list[dict]]
 
 MARCAS_PERMITIDAS: tuple[str, ...] = tuple(BRANDS_IN_SCOPE)
 SHOPEE_MARCAS: tuple[str, ...] = ("apice", "barbours", "lescent", "rituaria")
+#: Lojas Shopee sem app, lidas do que o bot do Seller Centre grava no Neon
+#: (CX-KOKESHI-BOT, migration 036), na MESMA forma do Data Mart.
+SHOPEE_EXPORT: tuple[str, ...] = ("kokeshi",)
 CANAIS: tuple[str, ...] = ("mercadolivre", "shopee", "tiktokshop")
 
 LIMITE_DIAS_FOTO = 2
@@ -48,6 +51,10 @@ MOTIVO_ERRO = "Fonte indisponível nesta carga. Tente novamente em alguns minuto
 TABELA_ML = "raw.ml_seller_reputation_snapshot"
 TABELA_SHOPEE = "raw.shopee_account_health_snapshot"
 TABELA_SHOPEE_METRICAS = "raw.shopee_account_health_metric"
+TABELA_SHOPEE_EXPORT = "marts.shopee_saude_conta_export"
+TABELA_SHOPEE_METRICAS_EXPORT = "marts.shopee_saude_metrica_export"
+AVISO_EXPORT = "Capturada pelo bot no Seller Centre (Saúde da Conta), não pela API."
+MOTIVO_SEM_BOT = "Aguardando a primeira captura do bot no Seller Centre (Saúde da Conta)."
 
 FONTE_ML = "Mercado Livre · reputação do vendedor (API /users), fotografia diária"
 FONTE_SHOPEE = "Shopee · Saúde da Conta (API account_health), fotografia diária"
@@ -99,25 +106,29 @@ SELECT DISTINCT ON (brand)
  ORDER BY brand, captured_date DESC
 """
 
-SQL_SHOPEE = f"""
+_SQL_SHOPEE = """
 SELECT DISTINCT ON (brand)
        brand, captured_date, captured_at, overall_rating, fulfillment_failed,
        listing_failed, custom_service_failed, penalty_points, ongoing_punishments
-  FROM {TABELA_SHOPEE}
+  FROM {tabela}
  WHERE brand = ANY(:marcas)
  ORDER BY brand, captured_date DESC
 """
+SQL_SHOPEE = _SQL_SHOPEE.format(tabela=TABELA_SHOPEE)
+SQL_SHOPEE_EXPORT = _SQL_SHOPEE.format(tabela=TABELA_SHOPEE_EXPORT)
 
-SQL_SHOPEE_METRICAS = f"""
+_SQL_SHOPEE_METRICAS = """
 SELECT brand, captured_date, metric_id, metric_name, metric_type, parent_metric_id,
        unit, current_period, last_period, target_value, target_comparator
-  FROM {TABELA_SHOPEE_METRICAS}
+  FROM {tabela}
  WHERE brand = ANY(:marcas)
    AND (brand, captured_date) IN (SELECT brand, max(captured_date)
-                                    FROM {TABELA_SHOPEE_METRICAS}
+                                    FROM {tabela}
                                    WHERE brand = ANY(:marcas)
                                    GROUP BY brand)
 """
+SQL_SHOPEE_METRICAS = _SQL_SHOPEE_METRICAS.format(tabela=TABELA_SHOPEE_METRICAS)
+SQL_SHOPEE_METRICAS_EXPORT = _SQL_SHOPEE_METRICAS.format(tabela=TABELA_SHOPEE_METRICAS_EXPORT)
 
 # ---------------------------------------------------------------------------
 # Shopee
@@ -163,6 +174,13 @@ def consultar_datamart(sql: str, params: dict) -> list[dict]:
     from app.services import datamart_leitura  # import tardio: testes injetam `consultar`
 
     return datamart_leitura.consultar(sql, params)
+
+
+def consultar_torre(sql: str, params: dict) -> list[dict]:
+    """Neon da Torre (contas do bot, CX-KOKESHI-BOT)."""
+    from app.services import torre_leitura  # import tardio: testes injetam `consultar_torre`
+
+    return torre_leitura.consultar(sql, params)
 
 
 def _int(v: Any) -> Optional[int]:
@@ -329,11 +347,57 @@ def _resposta_base(canal: str, agora: datetime, fonte: str, cobertura: Cobertura
     return PerformanceOficialResponse(gerado_em=agora, canal=canal, fonte=fonte, cobertura=cobertura, **kw)
 
 
+def _contas_shopee(consultar: Consultar, marcas: list[str], sql: str, sql_met: str,
+                   hoje: date, nome: str) -> Optional[list[ContaOficial]]:
+    """Contas Shopee de uma fonte. None = a consulta principal falhou."""
+    params = {"marcas": marcas}
+    linhas = _rodar(consultar, nome, sql, params)
+    met = _rodar(consultar, f"{nome}_metricas", sql_met, params)
+    if linhas is None:
+        return None
+    por_marca: dict[str, list[dict]] = {}
+    for r in met or []:
+        por_marca.setdefault(str(r.get("brand")), []).append(r)
+    contas = []
+    for r in linhas:
+        if r.get("brand") not in marcas:
+            continue
+        conta = conta_shopee(r, por_marca.get(str(r["brand"]), []), hoje)
+        if met is None:
+            conta.avisos.append("Métricas detalhadas indisponíveis nesta carga.")
+        contas.append(conta)
+    return contas
+
+
+def _contas_shopee_export(consultar_torre: Consultar, marcas: list[str],
+                          hoje: date) -> tuple[list[ContaOficial], list[ContaSemFoto]]:
+    """Kokeshi (e futuras contas sem app): o que o bot gravou no Neon."""
+    if not marcas:
+        return [], []
+    try:
+        existe = _tabela_existe(consultar_torre, TABELA_SHOPEE_EXPORT)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("performance_oficial: checagem do export falhou (%s)", type(exc).__name__)
+        return [], [ContaSemFoto(marca=m, motivo=MOTIVO_ERRO) for m in marcas]
+    if not existe:
+        return [], [ContaSemFoto(marca=m, motivo=MOTIVO_SEM_BOT) for m in marcas]
+    contas = _contas_shopee(consultar_torre, marcas, SQL_SHOPEE_EXPORT, SQL_SHOPEE_METRICAS_EXPORT,
+                            hoje, "shopee_export")
+    if contas is None:
+        return [], [ContaSemFoto(marca=m, motivo=MOTIVO_ERRO) for m in marcas]
+    for c in contas:
+        c.avisos.insert(0, AVISO_EXPORT)
+    com = {c.marca for c in contas}
+    return contas, [ContaSemFoto(marca=m, motivo=MOTIVO_SEM_BOT) for m in marcas if m not in com]
+
+
 def montar_performance_oficial(*, canal: str, brands: Optional[list[str]] = None,
                                consultar: Optional[Consultar] = None,
+                               consultar_torre: Optional[Consultar] = None,
                                agora: Optional[datetime] = None) -> PerformanceOficialResponse:
     agora = agora or datetime.now(timezone.utc)
     consultar = consultar or consultar_datamart
+    consultar_torre = consultar_torre or consultar_torre_padrao
     hoje = agora.astimezone(TZ_OPERACIONAL).date()
     marcas = [m for m in MARCAS_PERMITIDAS if brands is None or m in brands]
 
@@ -350,8 +414,9 @@ def montar_performance_oficial(*, canal: str, brands: Optional[list[str]] = None
         cobertura = _cobertura(marcas, tuple(ML_BRANDS), "Sem conta Mercado Livre integrada.")
         tabela, fonte = TABELA_ML, FONTE_ML
     else:
-        cobertura = _cobertura(marcas, SHOPEE_MARCAS, "Sem app Shopee (só export manual).")
+        cobertura = _cobertura(marcas, SHOPEE_MARCAS + SHOPEE_EXPORT, "Sem app Shopee.")
         tabela, fonte = TABELA_SHOPEE, FONTE_SHOPEE
+        return _shopee(consultar, consultar_torre, cobertura, agora, hoje)
 
     if not cobertura.marcas:
         return _resposta_base(canal, agora, fonte, cobertura, estado="dado")
@@ -368,27 +433,10 @@ def montar_performance_oficial(*, canal: str, brands: Optional[list[str]] = None
         )
 
     params = {"marcas": cobertura.marcas}
-    if canal == "mercadolivre":
-        linhas = _rodar(consultar, "ml", SQL_ML, params)
-        if linhas is None:
-            return _resposta_base(canal, agora, fonte, cobertura, estado="erro", motivo=MOTIVO_ERRO)
-        contas = [conta_ml(r, hoje) for r in linhas if r.get("brand") in cobertura.marcas]
-    else:
-        linhas = _rodar(consultar, "shopee", SQL_SHOPEE, params)
-        met = _rodar(consultar, "shopee_metricas", SQL_SHOPEE_METRICAS, params)
-        if linhas is None:
-            return _resposta_base(canal, agora, fonte, cobertura, estado="erro", motivo=MOTIVO_ERRO)
-        por_marca: dict[str, list[dict]] = {}
-        for r in met or []:
-            por_marca.setdefault(str(r.get("brand")), []).append(r)
-        contas = []
-        for r in linhas:
-            if r.get("brand") not in cobertura.marcas:
-                continue
-            conta = conta_shopee(r, por_marca.get(str(r["brand"]), []), hoje)
-            if met is None:
-                conta.avisos.append("Métricas detalhadas indisponíveis nesta carga.")
-            contas.append(conta)
+    linhas = _rodar(consultar, "ml", SQL_ML, params)
+    if linhas is None:
+        return _resposta_base(canal, agora, fonte, cobertura, estado="erro", motivo=MOTIVO_ERRO)
+    contas = [conta_ml(r, hoje) for r in linhas if r.get("brand") in cobertura.marcas]
 
     ordem = {m: i for i, m in enumerate(cobertura.marcas)}
     contas.sort(key=lambda c: ordem.get(c.marca, 99))
@@ -396,3 +444,58 @@ def montar_performance_oficial(*, canal: str, brands: Optional[list[str]] = None
     sem_foto = [ContaSemFoto(marca=m, motivo="Sem fotografia capturada ainda.")
                 for m in cobertura.marcas if m not in com_foto]
     return _resposta_base(canal, agora, fonte, cobertura, estado="dado", contas=contas, sem_foto=sem_foto)
+
+
+def _shopee(consultar: Consultar, consultar_torre: Consultar, cobertura: Cobertura,
+            agora: datetime, hoje: date) -> PerformanceOficialResponse:
+    """Shopee: lojas com app pelo Data Mart + lojas do bot pelo Neon.
+
+    Uma fonte cai, a outra segue: a que caiu vira `sem_foto` com motivo fixo.
+    So' sem nenhuma conta de pe' a resposta inteira e' `erro`/`sem_fonte`.
+    """
+    canal, fonte = "shopee", FONTE_SHOPEE
+    if not cobertura.marcas:
+        return _resposta_base(canal, agora, fonte, cobertura, estado="dado")
+    api = [m for m in cobertura.marcas if m in SHOPEE_MARCAS]
+    exp = [m for m in cobertura.marcas if m in SHOPEE_EXPORT]
+
+    contas: list[ContaOficial] = []
+    sem_foto: list[ContaSemFoto] = []
+    estado_api, motivo_api = "dado", None
+    if api:
+        try:
+            existe = _tabela_existe(consultar, TABELA_SHOPEE)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("performance_oficial: checagem de shopee falhou (%s)", type(exc).__name__)
+            existe = None
+        if existe is None:
+            estado_api, motivo_api = "erro", MOTIVO_ERRO
+        elif not existe:
+            estado_api = "sem_fonte"
+            motivo_api = "Aguardando a primeira captura diária no Airflow (DAG ainda não publicada)."
+        else:
+            achadas = _contas_shopee(consultar, api, SQL_SHOPEE, SQL_SHOPEE_METRICAS, hoje, "shopee")
+            if achadas is None:
+                estado_api, motivo_api = "erro", MOTIVO_ERRO
+            else:
+                contas.extend(achadas)
+                com = {c.marca for c in achadas}
+                sem_foto.extend(ContaSemFoto(marca=m, motivo="Sem fotografia capturada ainda.")
+                                for m in api if m not in com)
+        if estado_api != "dado":
+            sem_foto.extend(ContaSemFoto(marca=m, motivo=motivo_api) for m in api)
+
+    contas_exp, sem_exp = _contas_shopee_export(consultar_torre, exp, hoje)
+    contas.extend(contas_exp)
+    sem_foto.extend(sem_exp)
+
+    if not contas and estado_api != "dado":
+        # nenhuma conta de pe' e a fonte das lojas com app caiu: o estado dela vale
+        return _resposta_base(canal, agora, fonte, cobertura, estado=estado_api, motivo=motivo_api)
+    ordem = {m: i for i, m in enumerate(cobertura.marcas)}
+    contas.sort(key=lambda c: ordem.get(c.marca, 99))
+    sem_foto.sort(key=lambda c: ordem.get(c.marca, 99))
+    return _resposta_base(canal, agora, fonte, cobertura, estado="dado", contas=contas, sem_foto=sem_foto)
+
+
+consultar_torre_padrao = consultar_torre

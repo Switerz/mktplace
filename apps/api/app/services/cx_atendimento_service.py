@@ -65,6 +65,11 @@ MARCAS_PERMITIDAS: tuple[str, ...] = tuple(BRANDS_IN_SCOPE)
 
 #: Lojas Shopee com API (a Kokeshi so' tem export manual).
 SHOPEE_MARCAS: tuple[str, ...] = ("apice", "barbours", "lescent", "rituaria")
+#: Lojas Shopee sem app: na aba CX entram pelo que o bot do Seller Centre grava
+#: no Neon (CX-KOKESHI-BOT, 05/11/2026): pedidos e cancelamentos do export de
+#: pedidos (034), chat e devolucoes da 036.
+SHOPEE_EXPORT: tuple[str, ...] = ("kokeshi",)
+FONTE_SHOPEE_EXPORT = "Neon · export do Seller Centre (bot da Kokeshi)"
 
 JANELA_PADRAO_DIAS = 30
 DIAS_FOTOGRAFIA_DEVOLUCAO = 90
@@ -242,6 +247,71 @@ SELECT shop_account AS marca, COUNT(*) AS em_devolucao
 """
 
 
+#: Pedido nao pago cancelado pela Shopee, no texto em portugues do export
+#: (`Cancelar Motivo`). Sem acento e minusculo antes de comparar.
+_NAO_PAGO_EXPORT = ("translate(lower(coalesce(cancel_reason, '')), 'ãáàâéêíóôõúç', 'aaaaeeiooouc')"
+                    " ~ '(nao pago|nao foi pago|nao pagou|sem pagamento|pagamento nao)'")
+
+#: Mesma regra de `SQL_SHOPEE_MARCAS`, no export de pedidos da Kokeshi (034).
+#: O export nao diz quem cancelou: `cancelados_comprador` fica NULL (nunca 0).
+SQL_SHOPEE_EXPORT_MARCAS = f"""
+SELECT shop_account AS marca,
+       COUNT(*) FILTER (WHERE NOT (order_status = 'UNPAID'
+                                   OR (order_status = 'CANCELLED' AND {_NAO_PAGO_EXPORT}))) AS pedidos,
+       COUNT(*) FILTER (WHERE order_status = 'CANCELLED' AND NOT {_NAO_PAGO_EXPORT}) AS cancelados,
+       NULL::int AS cancelados_comprador,
+       COUNT(*) FILTER (WHERE order_status = 'CANCELLED' AND {_NAO_PAGO_EXPORT}) AS nao_pagos,
+       MAX(ingested_at) AS atualizado_em
+  FROM marts.expedicao_shopee_export_pedido
+ WHERE shop_account = ANY(:marcas)
+   AND (create_time AT TIME ZONE 'America/Sao_Paulo')::date BETWEEN :inicio AND :fim
+ GROUP BY shop_account
+"""
+
+SQL_SHOPEE_EXPORT_MOTIVOS = f"""
+SELECT cancel_reason AS motivo, COUNT(*) AS quantidade
+  FROM marts.expedicao_shopee_export_pedido
+ WHERE shop_account = ANY(:marcas)
+   AND (create_time AT TIME ZONE 'America/Sao_Paulo')::date BETWEEN :inicio AND :fim
+   AND order_status = 'CANCELLED' AND NOT {_NAO_PAGO_EXPORT}
+ GROUP BY 1
+"""
+
+
+def rotular_shopee_pt(motivo: Any) -> tuple[str, str, str, bool]:
+    """Motivo de cancelamento do export (portugues, ja' legivel).
+
+    O texto vira o proprio rotulo (mapeado: nao precisa de traducao); a
+    natureza sai de palavras do texto.
+    """
+    bruto = str(motivo or "").strip()
+    if not bruto or bruto == "-":
+        return "sem_motivo", "Sem motivo informado", "plataforma", True
+    n = _sem_acento(bruto)
+    if "comprador" in n or "cliente" in n:
+        natureza = "comprador"
+    elif "vendedor" in n or "estoque" in n:
+        natureza = "vendedor"
+    elif any(t in n for t in ("entrega", "transport", "logistic", "extravi", "envio")):
+        natureza = "logistica"
+    else:
+        natureza = "plataforma"
+    return "pt_" + _slug(n), bruto[:120], natureza, True
+
+
+def _sem_acento(texto: str) -> str:
+    import unicodedata  # noqa: PLC0415
+
+    return unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode().lower()
+
+
+def consultar_torre(sql: str, params: dict) -> list[dict]:
+    """Neon da Torre (contas do bot, CX-KOKESHI-BOT)."""
+    from app.services import torre_leitura  # import tardio: testes injetam `consultar_torre`
+
+    return torre_leitura.consultar(sql, params)
+
+
 def consultar_datamart(sql: str, params: dict) -> list[dict]:
     """Direto no Data Mart; se o banco recusar por permissao, pelo Metabase
     (ver `datamart_leitura`, a mesma leitura da Performance oficial)."""
@@ -292,6 +362,10 @@ def _aviso_frescor(canal: str, instante: Optional[datetime], agora: datetime) ->
     if horas > limite:
         return f"Fonte sem atualização há {horas:.0f} h (esperado até {limite:.0f} h)."
     return None
+
+
+def _float_ou_none(v: Optional[int]) -> Optional[float]:
+    return None if v is None else float(v)
 
 
 def _rotulo_marca(chave: str) -> str:
@@ -441,19 +515,36 @@ def _canal_ml(consultar: Consultar, marcas: list[str], janela: Janela, agora: da
     )
 
 
-def _canal_shopee(consultar: Consultar, marcas: list[str], janela: Janela, agora: datetime) -> CanalAtendimento:
-    cobertura = _cobertura(marcas, SHOPEE_MARCAS, "Sem app Shopee (só export manual).")
+def _canal_shopee(consultar: Consultar, marcas: list[str], janela: Janela, agora: datetime,
+                  consultar_torre: Optional[Consultar] = None) -> CanalAtendimento:
+    """`consultar_torre` None = so' as lojas com app (a aba antiga de Atendimento)."""
+    do_canal = SHOPEE_MARCAS + (SHOPEE_EXPORT if consultar_torre else ())
+    cobertura = _cobertura(marcas, do_canal, "Sem app Shopee (só export manual).")
     if not cobertura.marcas:
         return CanalAtendimento(canal="shopee", cobertura=cobertura, indicadores=[])
-    params = {"marcas": cobertura.marcas, "inicio": janela.inicio, "fim": janela.fim,
+    api = [m for m in cobertura.marcas if m in SHOPEE_MARCAS]
+    exp = [m for m in cobertura.marcas if m in SHOPEE_EXPORT]
+    params = {"marcas": api, "inicio": janela.inicio, "fim": janela.fim,
               "nao_pago": SHOPEE_NAO_PAGO}
-    linhas = _rodar(consultar, "shopee_marcas", SQL_SHOPEE_MARCAS, params)
-    motivos = _rodar(consultar, "shopee_motivos", SQL_SHOPEE_MOTIVOS, params)
-    devol = _rodar(consultar, "shopee_devolucao", SQL_SHOPEE_DEVOLUCAO,
-                   {"marcas": cobertura.marcas,
-                    "desde": janela.fim - timedelta(days=DIAS_FOTOGRAFIA_DEVOLUCAO - 1)})
+    if api:
+        linhas = _rodar(consultar, "shopee_marcas", SQL_SHOPEE_MARCAS, params)
+        motivos = _rodar(consultar, "shopee_motivos", SQL_SHOPEE_MOTIVOS, params)
+        devol = _rodar(consultar, "shopee_devolucao", SQL_SHOPEE_DEVOLUCAO,
+                       {"marcas": api,
+                        "desde": janela.fim - timedelta(days=DIAS_FOTOGRAFIA_DEVOLUCAO - 1)})
+    else:
+        linhas, motivos, devol = [], [], []
+    linhas_exp, motivos_exp = [], []
+    if exp and consultar_torre:
+        p_exp = {"marcas": exp, "inicio": janela.inicio, "fim": janela.fim}
+        linhas_exp = _rodar(consultar_torre, "shopee_export_marcas", SQL_SHOPEE_EXPORT_MARCAS, p_exp)
+        motivos_exp = _rodar(consultar_torre, "shopee_export_motivos", SQL_SHOPEE_EXPORT_MOTIVOS, p_exp)
     jt = _texto_janela(janela)
-    ok = linhas is not None
+    # a Kokeshi caiu e as outras nao: as linhas dela ficam None (nunca zero)
+    if linhas is not None and linhas_exp is not None:
+        linhas = list(linhas) + list(linhas_exp)
+    # so' a Kokeshi no filtro e o Neon caiu: erro, nunca "sem pedidos"
+    ok = linhas is not None and not (exp and consultar_torre and linhas_exp is None and not api)
     ok_dev = devol is not None
 
     por_marca = {str(r.get("marca")): r for r in (linhas or [])}
@@ -469,8 +560,9 @@ def _canal_shopee(consultar: Consultar, marcas: list[str], janela: Janela, agora
             cancelamentos=cancelados_m,
             taxa_cancelamento_pct=_pct(cancelados_m, pedidos_m),
             cancelamentos_comprador=_int(r.get("cancelados_comprador")) if r else None,
-            # fotografia: sem linha para a marca = nenhum pedido em devolucao (zero medido)
-            em_devolucao=(dev_marca.get(m, 0) if ok_dev else None),
+            # fotografia: sem linha para a marca = nenhum pedido em devolucao (zero medido).
+            # A Kokeshi nao tem essa fotografia no export: ausente, nunca zero.
+            em_devolucao=(None if m in SHOPEE_EXPORT else (dev_marca.get(m, 0) if ok_dev else None)),
         ))
 
     def soma(campo):
@@ -495,7 +587,7 @@ def _canal_shopee(consultar: Consultar, marcas: list[str], janela: Janela, agora
                    atualizado_em=instante, aviso=aviso,
                    ajuda="Cancelamentos ÷ pedidos criados na janela, os dois sem os pedidos não pagos."),
         _indicador("shopee_em_devolucao", "Pedidos em devolução agora",
-                   valor=float(soma("em_devolucao")) if ok_dev else None, unidade="contagem",
+                   valor=_float_ou_none(soma("em_devolucao")) if ok_dev else None, unidade="contagem",
                    janela=f"fotografia atual · pedidos dos últimos {DIAS_FOTOGRAFIA_DEVOLUCAO} dias",
                    fonte=FONTE_SHOPEE, ok=ok_dev,
                    ajuda="Pedidos com status 'to_return' na Shopee neste momento. Sem motivo nem prazo: "
@@ -508,6 +600,9 @@ def _canal_shopee(consultar: Consultar, marcas: list[str], janela: Janela, agora
             (*rotular_shopee(r.get("motivo"), r.get("autor")), _int(r.get("quantidade")) or 0)
             for r in motivos
             if str(r.get("motivo") or "").strip().lower() != SHOPEE_NAO_PAGO
+        ] + [
+            (*rotular_shopee_pt(r.get("motivo")), _int(r.get("quantidade")) or 0)
+            for r in (motivos_exp or [])
         ],
         excluidos=nao_pagos or None,
         rotulo_excluidos="pedidos não pagos cancelados pela Shopee (fora da contagem)",
@@ -559,12 +654,14 @@ def montar_atendimento(*, brands: Optional[list[str]] = None, dias: int = JANELA
 GRUPO_ATENDIMENTO = "Atendimento"
 
 
-def _chat_shopee(brands: Optional[list[str]], consultar: Consultar, agora: datetime) -> ChatShopee:
+def _chat_shopee(brands: Optional[list[str]], consultar: Consultar, agora: datetime,
+                 consultar_torre: Optional[Consultar] = None) -> ChatShopee:
     """Recorte de atendimento da Saude da Conta, a mesma leitura da Performance."""
     from app.services import performance_oficial_service as po  # import tardio: evita ciclo
 
     oficial = po.montar_performance_oficial(canal="shopee", brands=brands,
-                                            consultar=consultar, agora=agora)
+                                            consultar=consultar, consultar_torre=consultar_torre,
+                                            agora=agora)
     contas = []
     for conta in oficial.contas:
         metricas = [m for m in conta.metricas if m.grupo == GRUPO_ATENDIMENTO]
@@ -599,43 +696,59 @@ STATUS_ACEITA = "ACCEPTED"
 STATUS_CANCELADA = "CANCELLED"
 STATUS_EM_ANDAMENTO = ("REQUESTED", "PROCESSING", "JUDGING", "SELLER_DISPUTE")
 
-SQL_DEVOLUCOES_MARCAS = """
+_SQL_DEVOLUCOES_MARCAS = """
 SELECT brand AS marca,
        COUNT(*) AS devolucoes,
        COUNT(*) FILTER (WHERE status = 'ACCEPTED') AS aceitas,
        COUNT(*) FILTER (WHERE status IN ('REQUESTED', 'PROCESSING', 'JUDGING', 'SELLER_DISPUTE')) AS em_andamento,
        COUNT(*) FILTER (WHERE status = 'CANCELLED') AS canceladas,
        SUM(refund_amount) FILTER (WHERE status = 'ACCEPTED') AS reembolsado
-  FROM raw.shopee_returns
+  FROM {tabela}
  WHERE brand = ANY(:marcas)
    AND (create_time AT TIME ZONE 'America/Sao_Paulo')::date BETWEEN :inicio AND :fim
  GROUP BY brand
 """
+SQL_DEVOLUCOES_MARCAS = _SQL_DEVOLUCOES_MARCAS.format(tabela="raw.shopee_returns")
+SQL_DEVOLUCOES_MARCAS_EXPORT = _SQL_DEVOLUCOES_MARCAS.format(tabela="marts.shopee_returns_export")
 
 #: Motivos so' dos pedidos que o comprador NAO cancelou: o desistido nao e'
 #: problema a tratar e aparece a' parte (`excluidos`).
-SQL_DEVOLUCOES_MOTIVOS = """
+_SQL_DEVOLUCOES_MOTIVOS = """
 SELECT COALESCE(reason, '') AS motivo,
        COUNT(*) FILTER (WHERE status IS DISTINCT FROM 'CANCELLED') AS quantidade,
        COUNT(*) FILTER (WHERE status = 'CANCELLED') AS canceladas
-  FROM raw.shopee_returns
+  FROM {tabela}
  WHERE brand = ANY(:marcas)
    AND (create_time AT TIME ZONE 'America/Sao_Paulo')::date BETWEEN :inicio AND :fim
  GROUP BY 1
 """
+SQL_DEVOLUCOES_MOTIVOS = _SQL_DEVOLUCOES_MOTIVOS.format(tabela="raw.shopee_returns")
+SQL_DEVOLUCOES_MOTIVOS_EXPORT = _SQL_DEVOLUCOES_MOTIVOS.format(tabela="marts.shopee_returns_export")
 
 #: `to_jsonb(s)` le as colunas de conversas mesmo antes de a coleta cria-las
 #: (ALTER TABLE ... ADD COLUMN IF NOT EXISTS no primeiro run): coluna que nao
 #: existe vira NULL em vez de quebrar a consulta.
-SQL_NAO_LIDAS = """
+_SQL_NAO_LIDAS = """
 SELECT DISTINCT ON (brand) brand AS marca, unread_count, captured_at,
        (to_jsonb(s) ->> 'conversas_7d')::int        AS conversas_7d,
        (to_jsonb(s) ->> 'conversas_30d')::int       AS conversas_30d,
        (to_jsonb(s) ->> 'aguardando_resposta')::int AS aguardando_resposta,
        (to_jsonb(s) ->> 'conversas_truncado')::boolean AS conversas_truncado
-  FROM raw.shopee_chat_snapshot s
+  FROM {tabela} s
  WHERE brand = ANY(:marcas)
  ORDER BY brand, captured_at DESC
+"""
+SQL_NAO_LIDAS = _SQL_NAO_LIDAS.format(tabela="raw.shopee_chat_snapshot")
+SQL_NAO_LIDAS_EXPORT = _SQL_NAO_LIDAS.format(tabela="marts.shopee_chat_export")
+
+#: O bot manda a lista inteira de devolucoes dos ultimos 30 dias: a Kokeshi so'
+#: tem "zero medido" depois da primeira carga de devolucoes.
+SQL_TABELAS_CX_EXPORT = (
+    "SELECT to_regclass('marts.shopee_returns_export') IS NOT NULL AS returns, "
+    "to_regclass('marts.shopee_chat_export') IS NOT NULL AS chat"
+)
+SQL_DEVOLUCOES_COM_CARGA_EXPORT = """
+SELECT DISTINCT brand AS marca FROM marts.shopee_returns_export WHERE brand = ANY(:marcas)
 """
 
 #: Motivos de devolucao da Shopee (campo `reason`) -> (rotulo, natureza).
@@ -685,7 +798,19 @@ def _tabelas_cx(consultar: Consultar) -> Optional[dict]:
 
 
 def _devolucoes_shopee(consultar: Consultar, marcas: list[str], janela: Janela,
-                       existe: Optional[bool]) -> DevolucoesShopee:
+                       existe: Optional[bool], *, consultar_torre: Optional[Consultar] = None,
+                       exp: tuple[list[str], Optional[bool]] = ([], None)) -> DevolucoesShopee:
+    """Lojas com app (Data Mart) + lojas do bot (`exp` = marcas, tabela existe)."""
+    marcas_exp, existe_exp = exp
+    if marcas_exp and consultar_torre is not None:
+        return _devolucoes_juntas(consultar, marcas, janela, existe, consultar_torre, marcas_exp, existe_exp)
+    return _devolucoes_uma_fonte(consultar, marcas, janela, existe)
+
+
+def _devolucoes_uma_fonte(consultar: Consultar, marcas: list[str], janela: Janela,
+                          existe: Optional[bool], *, sql_marcas: str = SQL_DEVOLUCOES_MARCAS,
+                          sql_motivos: str = SQL_DEVOLUCOES_MOTIVOS,
+                          com_carga: Optional[set] = None) -> DevolucoesShopee:
     ajuda = "Motivo registrado pela Shopee na devolução ou reembolso (campo reason)."
     if existe is None:
         return DevolucoesShopee(estado="erro", fonte=FONTE_CX_SHOPEE, motivo_indisponivel=MOTIVO_ERRO)
@@ -696,14 +821,19 @@ def _devolucoes_shopee(consultar: Consultar, marcas: list[str], janela: Janela,
         return DevolucoesShopee(estado="vazio_legitimo", fonte=FONTE_CX_SHOPEE,
                                 motivo_indisponivel="Nenhuma loja Shopee no filtro.")
     params = {"marcas": marcas, "inicio": janela.inicio, "fim": janela.fim}
-    por_marca = _rodar(consultar, "devolucoes_marcas", SQL_DEVOLUCOES_MARCAS, params)
-    motivos = _rodar(consultar, "devolucoes_motivos", SQL_DEVOLUCOES_MOTIVOS, params)
+    por_marca = _rodar(consultar, "devolucoes_marcas", sql_marcas, params)
+    motivos = _rodar(consultar, "devolucoes_motivos", sql_motivos, params)
     if por_marca is None:
         return DevolucoesShopee(estado="erro", fonte=FONTE_CX_SHOPEE, motivo_indisponivel=MOTIVO_ERRO)
     linhas = {str(r.get("marca")): r for r in por_marca}
     marcas_linhas = []
     for m in marcas:
         r = linhas.get(m)
+        if r is None and com_carga is not None and m not in com_carga:
+            # conta do bot que nunca mandou devolucoes: ausente, nunca zero
+            marcas_linhas.append(LinhaDevolucao(marca=m, devolucoes=None, aceitas=None, em_andamento=None,
+                                                canceladas=None, reembolsado=None))
+            continue
         # tabela existe e a marca nao tem linha = zero medido na janela
         if r is None:
             marcas_linhas.append(LinhaDevolucao(marca=m, devolucoes=0, aceitas=0, em_andamento=0,
@@ -745,14 +875,14 @@ def _devolucoes_shopee(consultar: Consultar, marcas: list[str], janela: Janela,
 
 
 def _nao_lidas(consultar: Consultar, marcas: list[str],
-               existe: Optional[bool]) -> tuple[str, list[NaoLidas]]:
+               existe: Optional[bool], sql: str = SQL_NAO_LIDAS) -> tuple[str, list[NaoLidas]]:
     if existe is None:
         return "erro", []
     if not existe:
         return "sem_fonte", []
     if not marcas:
         return "vazio_legitimo", []
-    linhas = _rodar(consultar, "nao_lidas", SQL_NAO_LIDAS, {"marcas": marcas})
+    linhas = _rodar(consultar, "nao_lidas", sql, {"marcas": marcas})
     if linhas is None:
         return "erro", []
     return "dado", [
@@ -767,25 +897,122 @@ def _nao_lidas(consultar: Consultar, marcas: list[str],
     ]
 
 
+def _juntar_estados(a: str, b: str) -> str:
+    """Estado do bloco com duas fontes: basta uma com dado."""
+    for estado in ("dado", "erro", "sem_fonte", "vazio_legitimo"):
+        if estado in (a, b):
+            return estado
+    return a
+
+
+def _devolucoes_juntas(consultar, marcas, janela, existe, consultar_torre, marcas_exp,
+                       existe_exp) -> DevolucoesShopee:
+    """Data Mart + Neon. Junta por marca e por motivo (o mesmo `_bloco_motivos`)."""
+    com_carga = None
+    if existe_exp:
+        achadas = _rodar(consultar_torre, "devolucoes_carga_export", SQL_DEVOLUCOES_COM_CARGA_EXPORT,
+                         {"marcas": marcas_exp})
+        com_carga = None if achadas is None else {str(r.get("marca")) for r in achadas}
+    if existe_exp is None or (existe_exp and com_carga is None):
+        d_exp = DevolucoesShopee(estado="erro", fonte=FONTE_SHOPEE_EXPORT, motivo_indisponivel=MOTIVO_ERRO)
+    elif not existe_exp or not com_carga:
+        d_exp = DevolucoesShopee(estado="sem_fonte", fonte=FONTE_SHOPEE_EXPORT,
+                                 motivo_indisponivel="Aguardando a primeira carga do bot (devoluções da Kokeshi).")
+    else:
+        d_exp = _devolucoes_uma_fonte(consultar_torre, marcas_exp, janela, True,
+                                      sql_marcas=SQL_DEVOLUCOES_MARCAS_EXPORT,
+                                      sql_motivos=SQL_DEVOLUCOES_MOTIVOS_EXPORT, com_carga=com_carga)
+    d_api = (_devolucoes_uma_fonte(consultar, marcas, janela, existe) if marcas
+             else DevolucoesShopee(estado="vazio_legitimo", fonte=FONTE_CX_SHOPEE))
+    if d_exp.estado != "dado":
+        if d_api.estado != "dado":
+            return d_api if marcas else d_exp
+        # a Kokeshi aparece na tabela como ausente, com o motivo no bloco
+        linhas = d_api.marcas + [LinhaDevolucao(marca=m, devolucoes=None, reembolsado=None) for m in marcas_exp]
+        return d_api.model_copy(update={"marcas": linhas})
+    if d_api.estado != "dado":
+        if marcas and d_api.estado == "erro":
+            linhas = [LinhaDevolucao(marca=m, devolucoes=None, reembolsado=None) for m in marcas] + d_exp.marcas
+            return d_exp.model_copy(update={"marcas": linhas, "fonte": f"{FONTE_CX_SHOPEE} + {FONTE_SHOPEE_EXPORT}"})
+        return d_exp
+
+    def soma(*vals):
+        ok = [v for v in vals if v is not None]
+        return sum(ok) if ok else None
+
+    itens: list[tuple] = []
+    for bloco in (d_api.motivos, d_exp.motivos):
+        if bloco is not None and bloco.estado == "dado":
+            itens += [(i.codigo, i.rotulo, i.natureza, i.mapeado, i.quantidade) for i in bloco.itens]
+    excluidos = soma(*(b.excluidos for b in (d_api.motivos, d_exp.motivos) if b is not None))
+    erro_motivos = any(b is not None and b.estado == "erro" for b in (d_api.motivos, d_exp.motivos))
+    motivos = _bloco_motivos(
+        "Motivos de devolução", "Motivo registrado pela Shopee na devolução ou reembolso (campo reason).",
+        None if erro_motivos and not itens else itens,
+        excluidos=excluidos or None,
+        rotulo_excluidos="pedidos de devolução cancelados pelo próprio comprador (fora dos motivos)",
+        texto_vazio="Nenhuma devolução no recorte.",
+    )
+    reemb = soma(d_api.reembolsado, d_exp.reembolsado)
+    return DevolucoesShopee(
+        estado="dado", fonte=f"{FONTE_CX_SHOPEE} + {FONTE_SHOPEE_EXPORT}",
+        total=soma(d_api.total, d_exp.total), aceitas=soma(d_api.aceitas, d_exp.aceitas),
+        em_andamento=soma(d_api.em_andamento, d_exp.em_andamento),
+        canceladas=soma(d_api.canceladas, d_exp.canceladas),
+        reembolsado=None if reemb is None else round(reemb, 2),
+        motivos=motivos, marcas=d_api.marcas + d_exp.marcas,
+    )
+
+
+def _tabelas_cx_export(consultar_torre: Optional[Consultar], marcas_exp: list[str]) -> Optional[dict]:
+    if not marcas_exp or consultar_torre is None:
+        return {"returns": False, "chat": False}
+    linhas = _rodar(consultar_torre, "tabelas_cx_export", SQL_TABELAS_CX_EXPORT, {})
+    if linhas is None:
+        return None
+    r = linhas[0] if linhas else {}
+    return {"returns": bool(r.get("returns")), "chat": bool(r.get("chat"))}
+
+
 def montar_cx_shopee(*, brands: Optional[list[str]] = None, dias: int = JANELA_PADRAO_DIAS,
                      consultar: Optional[Consultar] = None,
+                     consultar_torre: Optional[Consultar] = None,
                      agora: Optional[datetime] = None) -> CxShopeeResponse:
-    """Aba CX: chat (Saude da Conta) + cancelamentos e devolucoes (pedidos)."""
+    """Aba CX: chat (Saude da Conta) + cancelamentos e devolucoes (pedidos).
+
+    Lojas com app pelo Data Mart; Kokeshi pelo que o bot grava no Neon.
+    """
     agora = agora or datetime.now(timezone.utc)
     consultar = consultar or consultar_datamart
+    consultar_torre = consultar_torre or consultar_torre_padrao
     marcas = [m for m in MARCAS_PERMITIDAS if brands is None or m in brands]
     janela = calcular_janela(dias, agora)
     marcas_shopee = [m for m in marcas if m in SHOPEE_MARCAS]
-    tabelas = _tabelas_cx(consultar)
-    chat = _chat_shopee(brands, consultar, agora)
+    marcas_exp = [m for m in marcas if m in SHOPEE_EXPORT]
+    # sem loja com app no filtro: nada a checar no Data Mart (bloco vazio legitimo)
+    tabelas = _tabelas_cx(consultar) if marcas_shopee else {"returns": True, "chat": True}
+    tab_exp = _tabelas_cx_export(consultar_torre, marcas_exp)
+    chat = _chat_shopee(brands, consultar, agora, consultar_torre)
+
     estado_nl, nao_lidas = _nao_lidas(consultar, marcas_shopee,
                                       None if tabelas is None else tabelas["chat"])
+    if marcas_exp:
+        estado_exp, nl_exp = _nao_lidas(consultar_torre, marcas_exp,
+                                        None if tab_exp is None else tab_exp["chat"],
+                                        sql=SQL_NAO_LIDAS_EXPORT)
+        estado_nl = estado_exp if not marcas_shopee else _juntar_estados(estado_nl, estado_exp)
+        nao_lidas = nao_lidas + nl_exp
     chat = chat.model_copy(update={"nao_lidas_estado": estado_nl, "nao_lidas": nao_lidas})
     return CxShopeeResponse(
         gerado_em=agora,
         janela=janela,
         chat=chat,
-        atendimento=_canal_shopee(consultar, marcas, janela, agora),
-        devolucoes=_devolucoes_shopee(consultar, marcas_shopee, janela,
-                                      None if tabelas is None else tabelas["returns"]),
+        atendimento=_canal_shopee(consultar, marcas, janela, agora, consultar_torre),
+        devolucoes=_devolucoes_shopee(
+            consultar, marcas_shopee, janela, None if tabelas is None else tabelas["returns"],
+            consultar_torre=consultar_torre,
+            exp=(marcas_exp, None if tab_exp is None else tab_exp["returns"])),
     )
+
+
+consultar_torre_padrao = consultar_torre

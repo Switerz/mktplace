@@ -90,9 +90,31 @@ class Fonte:
         return {"ml": self.ml, "shopee": self.shopee, "shopee_metricas": self.metricas}[nome]
 
 
+class FonteTorre:
+    """Neon da Torre (contas do bot). Padrao: migration 036 ainda nao aplicada."""
+
+    def __init__(self, existe=False, falhas=(), shopee=None, metricas=None):
+        self.existe, self.falhas = existe, set(falhas)
+        self.shopee = shopee or []
+        self.metricas = metricas or []
+        self.chamadas = []
+
+    def __call__(self, sql, params):
+        nome = {svc.SQL_EXISTE: "existe", svc.SQL_SHOPEE_EXPORT: "shopee",
+                svc.SQL_SHOPEE_METRICAS_EXPORT: "shopee_metricas"}[sql]
+        self.chamadas.append((nome, params))
+        if nome in self.falhas:
+            raise RuntimeError(f"falhou em {SEGREDO}")
+        if nome == "existe":
+            return [{"existe": self.existe}]
+        return {"shopee": self.shopee, "shopee_metricas": self.metricas}[nome]
+
+
 def _montar(canal, **kw):
     fonte = kw.pop("fonte", None) or Fonte()
-    return svc.montar_performance_oficial(canal=canal, consultar=fonte, agora=AGORA, **kw), fonte
+    torre = kw.pop("torre", None) or FonteTorre()
+    return svc.montar_performance_oficial(canal=canal, consultar=fonte, consultar_torre=torre,
+                                          agora=AGORA, **kw), fonte
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +198,9 @@ def test_shopee_nota_metricas_e_meta_oficial():
         "Taxa de envio atrasado", "ok", "Envio")
     assert m["shopee_11"].situacao == "fora" and m["shopee_11"].rotulo_meta == "Meta >= 80"
     assert {d.rotulo: d.valor for d in k.destaques}["Pontos de penalidade no trimestre"] == "2"
-    assert [f.marca for f in resp.cobertura.fora] == ["kokeshi"]
+    # 05/11/2026: a Kokeshi entra pelo bot (CX-KOKESHI-BOT); sem a 036 ainda, sem foto com motivo
+    assert resp.cobertura.fora == []
+    assert {f.marca: f.motivo for f in resp.sem_foto}["kokeshi"] == svc.MOTIVO_SEM_BOT
 
 
 def test_shopee_metricas_novas_saem_em_portugues():
@@ -209,10 +233,50 @@ def test_tiktok_sem_fonte_explicado_sem_consulta():
     assert fonte.chamadas == []
 
 
-def test_filtro_sem_conta_no_canal_nao_consulta():
+def test_filtro_so_kokeshi_nao_consulta_o_data_mart():
     resp, fonte = _montar("shopee", brands=["kokeshi"])
     assert resp.estado == "dado" and resp.contas == [] and fonte.chamadas == []
-    assert [f.marca for f in resp.cobertura.fora] == ["kokeshi"]
+    assert resp.cobertura.marcas == ["kokeshi"] and resp.cobertura.fora == []
+    assert [f.marca for f in resp.sem_foto] == ["kokeshi"]
+
+
+# ---------------------------------------------------------------------------
+# Kokeshi pelo bot do Seller Centre (CX-KOKESHI-BOT, 05/11/2026)
+# ---------------------------------------------------------------------------
+def _kokeshi_neon():
+    linha = dict(_shopee()[0], brand="kokeshi", overall_rating=3, custom_service_failed=1, penalty_points=0)
+    met = [dict(m, brand="kokeshi") for m in _shopee_metricas()[:2]]
+    return FonteTorre(existe=True, shopee=[linha], metricas=met)
+
+
+def test_kokeshi_vem_do_neon_com_a_mesma_regra_e_aviso_de_origem():
+    torre = _kokeshi_neon()
+    resp, _ = _montar("shopee", torre=torre)
+    assert [c.marca for c in resp.contas] == ["apice", "kokeshi"]
+    k = resp.contas[1]
+    assert (k.nivel, k.termometro) == ("Bom", 3)
+    assert {m.codigo for m in k.metricas} == {"shopee_1", "shopee_11"}
+    assert k.avisos[0] == svc.AVISO_EXPORT
+    assert "kokeshi" not in {f.marca for f in resp.sem_foto}
+    assert all(p == {"marcas": ["kokeshi"]} for _, p in torre.chamadas if _ != "existe")
+
+
+def test_neon_caido_nao_derruba_as_lojas_com_app():
+    resp, _ = _montar("shopee", torre=FonteTorre(existe=True, falhas={"shopee"}))
+    assert resp.estado == "dado" and [c.marca for c in resp.contas] == ["apice"]
+    assert {f.marca: f.motivo for f in resp.sem_foto}["kokeshi"] == svc.MOTIVO_ERRO
+    assert SEGREDO not in resp.model_dump_json()
+
+
+def test_data_mart_caido_com_kokeshi_de_pe():
+    resp, _ = _montar("shopee", fonte=Fonte(falhas={"shopee"}), torre=_kokeshi_neon())
+    assert resp.estado == "dado" and [c.marca for c in resp.contas] == ["kokeshi"]
+    assert {f.marca for f in resp.sem_foto} == {"apice", "barbours", "lescent", "rituaria"}
+
+
+def test_bot_ainda_sem_foto_da_kokeshi():
+    resp, _ = _montar("shopee", torre=FonteTorre(existe=True))
+    assert {f.marca: f.motivo for f in resp.sem_foto}["kokeshi"] == svc.MOTIVO_SEM_BOT
 
 
 @pytest.mark.parametrize("valor,meta,comp,esperado", [
