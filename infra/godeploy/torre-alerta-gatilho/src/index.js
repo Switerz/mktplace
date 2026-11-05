@@ -1,11 +1,9 @@
-// torre-alerta-gatilho: o cron do GoDeploy (*/15 * * * *) chama
-// POST /cron/alerta-vencidos, que so' confere a assinatura e repassa para a API
-// do Render. Contrato em docs/expedicao_contrato.md ("Alerta de vencidos da
+// torre-alerta-gatilho: os crons do GoDeploy chamam POST /cron/<alerta>, que
+// so' confere a assinatura e repassa para a rota da API do Render (ROTAS em
+// repasse.js; mapa em docs/torre_bot_alertas.md). Contrato em docs/expedicao_contrato.md ("Alerta de vencidos da
 // Shopee no Slack"). Segredo: env.ALERTA_WEBHOOK_SECRET (setAppSecret), nunca
 // em codigo nem em log.
-import { URL_DA_API, statusParaGoDeploy } from "./repasse.js";
-
-const ROTA = "/cron/alerta-vencidos";
+import { ROTAS, statusParaGoDeploy } from "./repasse.js";
 
 /**
  * Confere o X-Godeploy-Cron contra env.GODEPLOY_CRON_KEY (copiado sem mudanca
@@ -61,7 +59,8 @@ async function verifyCron(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname !== ROTA || request.method !== "POST") {
+    const destino = Object.hasOwn(ROTAS, url.pathname) ? ROTAS[url.pathname] : null;
+    if (!destino || request.method !== "POST") {
       return new Response("not found", { status: 404 });
     }
     if (!(await verifyCron(request, env))) {
@@ -71,20 +70,20 @@ export default {
     let status = null;
     let resumo = "";
     try {
-      const resp = await fetch(URL_DA_API, {
+      const resp = await fetch(destino, {
         method: "POST",
         headers: { "X-Alerta-Token": env.ALERTA_WEBHOOK_SECRET ?? "" },
       });
       status = resp.status;
       if (resp.ok) {
         const corpo = await resp.json();
-        resumo = ` situacao=${corpo.situacao} evento=${corpo.evento} enviados=${corpo.enviados} ja_tinham=${corpo.ja_tinham}`;
+        resumo = ` enviados=${corpo.enviados} ja_tinham=${corpo.ja_tinham}`;
       }
     } catch (erro) {
       resumo = ` falha de rede (${erro?.name ?? "erro"})`;
     }
     const devolve = statusParaGoDeploy(status);
-    console.log(`[torre-alerta-gatilho] api=${status}${resumo} -> ${devolve}`);
+    console.log(`[torre-alerta-gatilho] ${url.pathname} api=${status}${resumo} -> ${devolve}`);
     return new Response(devolve === 200 ? "ok" : "falhou", { status: devolve });
   },
 };

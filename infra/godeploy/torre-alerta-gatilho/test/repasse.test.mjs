@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { URL_DA_API, statusParaGoDeploy } from "../src/repasse.js";
+import { ROTAS, URL_DA_API, statusParaGoDeploy } from "../src/repasse.js";
 
 const casos = [
   [200, 200], // ok
@@ -25,4 +25,13 @@ test("aponta para a rota do alerta na API do Render", () => {
     URL_DA_API,
     "https://mktplace-api.onrender.com/api/v1/alertas/expedicao-vencidos",
   );
+});
+
+test("cada cron do gatilho aponta para a sua rota na API", () => {
+  const base = "https://mktplace-api.onrender.com/api/v1/alertas";
+  assert.deepEqual(ROTAS, {
+    "/cron/alerta-vencidos": `${base}/expedicao-vencidos`,
+    "/cron/alertas-criticos": `${base}/criticos`,
+    "/cron/report-diario": `${base}/report-diario`,
+  });
 });
