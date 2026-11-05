@@ -31,7 +31,7 @@ import json
 import logging
 import re
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy import text
 
@@ -137,10 +137,12 @@ def _ler_direto(sql: str, params: dict) -> list[dict]:
         return [dict(r) for r in conn.execute(text(sql), params).mappings()]
 
 
-def _ler_metabase(sql: str) -> list[dict]:
+def _ler_metabase(sql: str, timeout: Optional[float] = None) -> list[dict]:
     from app import metabase_client  # import tardio: testes substituem
 
-    return metabase_client.query(sql)
+    if timeout is None:
+        return metabase_client.query(sql)
+    return metabase_client.query(sql, timeout=timeout)
 
 
 #: Depois de uma falha de CONEXAO, por quanto tempo ir direto ao Metabase. A
@@ -166,22 +168,31 @@ def limpar_cache() -> None:
     _cache.clear()
 
 
-def consultar(sql: str, params: dict) -> list[dict]:
+def consultar(sql: str, params: dict, timeout_metabase: Optional[float] = None) -> list[dict]:
+    """`timeout_metabase`: espera maior para UMA consulta sabidamente pesada,
+    so' na reserva pelo Metabase. `None` = o padrao do cliente."""
     chave = sql + "" + repr(sorted(params.items(), key=lambda kv: kv[0]))
     guardado = _cache.get(chave)
     if guardado and _agora() - guardado[0] < CACHE_TTL_S:
         return [dict(linha) for linha in guardado[1]]
-    linhas = _consultar_sem_cache(sql, params)
+    linhas = _consultar_sem_cache(sql, params, timeout_metabase)
     _cache[chave] = (_agora(), linhas)
     return [dict(linha) for linha in linhas]
 
 
-def _consultar_sem_cache(sql: str, params: dict) -> list[dict]:
+def _consultar_sem_cache(sql: str, params: dict, timeout_metabase: Optional[float] = None) -> list[dict]:
     """Direto no Data Mart; pelo Metabase so' se o banco recusar por permissao,
     a conexao falhar (ou nao houver engine) E houver `METABASE_API_KEY`."""
     global _direto_suspenso_ate
+
+    def _metabase() -> list[dict]:
+        consulta = renderizar(sql, params)
+        if timeout_metabase is None:
+            return normalizar(_ler_metabase(consulta))
+        return normalizar(_ler_metabase(consulta, timeout_metabase))
+
     if settings.metabase_api_key and _agora() < _direto_suspenso_ate:
-        return normalizar(_ler_metabase(renderizar(sql, params)))
+        return _metabase()
     try:
         return _ler_direto(sql, params)
     except Exception as exc:  # noqa: BLE001 — decide abaixo; o texto nunca sai
@@ -192,4 +203,4 @@ def _consultar_sem_cache(sql: str, params: dict) -> list[dict]:
         if _falha_de_conexao(exc) or sem_engine:
             _direto_suspenso_ate = _agora() + PAUSA_DIRETO_S
         logger.info("datamart_leitura: leitura direta recusada (%s); usando o Metabase", type(exc).__name__)
-    return normalizar(_ler_metabase(renderizar(sql, params)))
+    return _metabase()
