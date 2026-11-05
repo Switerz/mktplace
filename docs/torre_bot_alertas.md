@@ -15,7 +15,7 @@ e o envio pula quem já recebeu aquela chave (ver `app/services/slack_dm.py`).
 |---|---|---|---|---|
 | A1 | Vencidos da Shopee acima de 3% da fila | na hora; lembra às 9h, 13h e 17h; avisa quando volta | `POST /api/v1/alertas/expedicao-vencidos` | `*/15 * * * *` |
 | A2 | LDR acima do teto (qualquer marca × canal) | na hora, no máximo 1 vez por dia por conta | `POST /api/v1/alertas/criticos` | `*/15 * * * *` |
-| A3 | Kokeshi: reputação oficial do Mercado Livre crítica | na hora, 1 vez por fotografia diária | `POST /api/v1/alertas/criticos` | `*/15 * * * *` |
+| A3 | Performance oficial crítica (todas as marcas; Mercado Livre e Shopee) | na hora, 1 vez por fotografia diária | `POST /api/v1/alertas/criticos` | `*/15 * * * *` |
 | A4 | TikTok: pedidos vencidos parados acima de 3% dos pendentes | na hora; de novo às 9h, 13h e 17h enquanto continuar acima | `POST /api/v1/alertas/criticos` | `*/15 * * * *` |
 | A5 | Vencem hoje: quantos pedidos têm prazo hoje, por canal, etapa e marca | todo dia às 9h | `POST /api/v1/alertas/expedicao-dia?momento=manha` | `0 12 * * *` |
 | A6 | Corte da coleta: o que vence hoje e ainda não saiu | todo dia às 15h30 | `POST /api/v1/alertas/expedicao-dia?momento=corte` | `30 18 * * *` |
@@ -47,23 +47,26 @@ e a mesma meta/teto (confirmados em 04/11/2026):
   conta enquanto ela continuar acima do teto.
 * Fonte fora do ar = o canal fica de fora, nunca vira 0%.
 
-## A3 — Kokeshi: performance oficial
+## A3 — Performance oficial (todas as marcas, os 3 canais)
 
-Marcas observadas: `MARCAS_SAUDE = ("kokeshi",)` em
-`app/services/torre_alertas.py` (para incluir outra marca, basta acrescentar).
-Fonte: a fotografia diária da reputação do Mercado Livre
-(`performance_oficial_service`, a mesma da seção "Performance").
+A mesma seção "Performance · nota oficial de cada conta" da Expedição
+(`performance_oficial_service.montar_performance_oficial`), lida para **todas as
+marcas** de cada canal em `CANAIS_SAUDE` (`app/services/torre_alertas.py`).
 
-* **Crítico (DM na hora):**
-  * uma métrica oficial passou do limite MercadoLíder (reclamações 1%,
-    mediações 0,5%, canceladas 0,5%, envios com atraso 6%);
-  * o termômetro saiu do verde (amarelo, laranja ou vermelho);
-  * a conta perdeu o MercadoLíder.
-* **Atenção (só no report):** métrica em 80% do limite ou mais.
-* Chave: `saude:<canal>:<marca>:<sinal>:<dia da fotografia>`.
+| Canal | Fonte | Crítico (DM na hora) | Atenção (só no report) |
+|---|---|---|---|
+| Mercado Livre | reputação do vendedor (API /users), fotografia diária | métrica acima do limite MercadoLíder (reclamações 1%, mediações 0,5%, canceladas 0,5%, envios com atraso 6%); termômetro fora do verde; perda do MercadoLíder | métrica em 80% do limite ou mais |
+| Shopee | Saúde da Conta (API ou bot do Seller Centre), fotografia diária | nota da loja "Ruim"; punição em andamento; métrica fora da meta | nota "Precisa melhorar"; pontos de penalidade; métrica com limite máximo em 80% dele ou mais |
+| TikTok Shop | ainda sem fonte oficial (Shop Performance Score só tem API para lojas dos EUA) | — | o report avisa "Ainda sem nota oficial: TikTok Shop" |
 
-A LDR da Kokeshi (ML e TikTok) já entra pela A2. A queda de GMV da Kokeshi
-entra no report (R1), porque o dia de ontem só fecha de manhã.
+* Chave: `saude:<canal>:<marca>:<sinal>:<dia da fotografia>`, uma DM por sinal
+  por fotografia.
+* O botão da DM abre `/performance-contas?canal=<canal>&brands=<marca>`.
+* Fonte fora do ar tira só aquele canal, e o report diz qual ficou de fora.
+* No report, as contas sem nenhum sinal entram em "Avanços" ("Performance
+  oficial em ordem no Mercado Livre: ...").
+
+A LDR de todas as marcas nos 3 canais já entra pela A2.
 
 ## A4 — Vencidos parados no TikTok
 

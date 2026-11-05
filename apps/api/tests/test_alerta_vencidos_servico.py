@@ -229,7 +229,7 @@ def test_mensagem_de_entrada_traz_numeros_marcas_e_link():
     assert "29/10 às 14:12" in texto
     assert "Marcas acima de 3%: ÁPICE 6,1% (44 de 727) · BARBOURS 3,5% (11 de 316)" in texto
     assert "LESCENT" not in texto
-    assert "<https://mktplace-gobeaute.vercel.app/expedicao|" in texto
+    assert "<https://mktplace-ten.vercel.app/expedicao|" in texto
 
 
 def test_mensagem_de_lembrete_diz_que_continua():

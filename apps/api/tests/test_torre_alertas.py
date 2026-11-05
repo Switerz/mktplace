@@ -95,7 +95,7 @@ def test_kokeshi_metrica_fora_e_critica_e_perto_e_atencao():
                              _metrica("ml_delayed_handling_time", 5.0, 6.0, "ok")])
     s1, s2 = ta.sinais_da_conta(conta)
     assert (s1.nivel, s1.chave) == (ta.CRITICO, "saude:mercadolivre:kokeshi:ml_claims:2026-11-04")
-    assert "1,2%, acima do limite de 1%" in s1.texto
+    assert "1,2%, fora da meta (<= 1% para MercadoLíder)" in s1.texto
     assert s2.nivel == ta.ATENCAO and "5%, perto do limite de 6%" in s2.texto
 
 
@@ -218,3 +218,61 @@ def test_mensagem_criticos_vencidos_com_marcas_e_fila_detalhada():
     assert ":red_circle: *RITUÁRIA*  4,2%" in sec["text"]["text"]
     assert sec["accessory"]["url"].endswith("/expedicao?channel=tiktokshop&visao=detalhe")
     assert "vencidos no TikTok Shop" in m.texto
+
+
+
+# --- A3 nos tres canais ---------------------------------------------------------
+def _metrica_shopee(mid, valor, meta, comp, unidade, situacao, rotulo):
+    return MetricaOficial(codigo=f"shopee_{mid}", rotulo=rotulo, valor=valor, unidade=unidade,
+                          meta=meta, comparador=comp, situacao=situacao)
+
+
+def test_shopee_nota_punicao_pontos_e_metricas():
+    conta = _conta(marca="barbours", nivel="Ruim", tom="critico", destaques=[
+        Destaque(rotulo="Pontos de penalidade no trimestre", valor="2", tom="atencao"),
+        Destaque(rotulo="Punições em andamento", valor="1", tom="critico"),
+    ], metricas=[
+        _metrica_shopee(1, 9.5, 8.0, "<=", "pct", "fora", "Taxa de envio atrasado"),
+        _metrica_shopee(4, 1.8, 2.0, "<=", "dias", "ok", "Tempo de preparação"),
+        _metrica_shopee(11, 95.0, 90.0, ">=", "pct", "ok", "Taxa de resposta do chat"),
+    ])
+    por_codigo = {s.codigo: s for s in ta.sinais_da_conta(conta, "shopee")}
+    assert set(por_codigo) == {"nota", "punicoes", "pontos", "shopee_1", "shopee_4"}
+    assert por_codigo["nota"].nivel == ta.CRITICO and por_codigo["punicoes"].nivel == ta.CRITICO
+    assert por_codigo["pontos"].nivel == ta.ATENCAO
+    assert por_codigo["shopee_1"].texto == (
+        "BARBOURS na Shopee: Taxa de envio atrasado em 9,5%, fora da meta (<= 8% da Shopee).")
+    assert por_codigo["shopee_4"].nivel == ta.ATENCAO and "1,8 dias, perto do limite de 2 dias" in por_codigo["shopee_4"].texto
+    assert por_codigo["shopee_1"].chave == "saude:shopee:barbours:shopee_1:2026-11-04"
+
+
+def test_shopee_em_ordem_nao_gera_sinal():
+    conta = _conta(marca="apice", nivel="Excelente", tom="bom", destaques=[
+        Destaque(rotulo="Pontos de penalidade no trimestre", valor="0", tom="bom"),
+        Destaque(rotulo="Punições em andamento", valor="0", tom="bom"),
+    ])
+    assert ta.sinais_da_conta(conta, "shopee") == []
+
+
+def test_ler_saude_le_os_tres_canais_e_separa_sem_fonte():
+    class Resp:
+        def __init__(self, estado, contas=()):
+            self.estado, self.contas = estado, list(contas)
+
+    respostas = {
+        "mercadolivre": Resp("dado", [_conta(), _conta(marca="rituaria", metricas=[
+            _metrica("ml_claims", 1.2, 1.0, "fora")])]),
+        "shopee": Resp("erro"),
+        "tiktokshop": Resp("sem_fonte"),
+    }
+    chamadas = []
+
+    def montar(canal, brands, agora):
+        chamadas.append((canal, brands))
+        return respostas[canal]
+
+    leitura = ta.ler_saude(AGORA, montar=montar)
+    assert chamadas == [("mercadolivre", None), ("shopee", None), ("tiktokshop", None)]
+    assert leitura.em_ordem == [("kokeshi", "mercadolivre")]
+    assert [s.marca for s in leitura.sinais] == ["rituaria"]
+    assert (leitura.indisponiveis, leitura.sem_fonte) == (["Shopee"], ["TikTok Shop"])

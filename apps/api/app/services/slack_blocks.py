@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urlencode
 
-URL_TORRE = "https://mktplace-gobeaute.vercel.app"
+URL_TORRE = "https://mktplace-ten.vercel.app"
 
 #: Canal da Expedicao -> canal da tela de Performance (nomes diferentes nas duas).
 CANAL_PERFORMANCE = {"shopee": "shopee", "mercadolivre": "mercado_livre", "tiktokshop": "tiktok"}

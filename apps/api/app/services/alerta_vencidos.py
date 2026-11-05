@@ -60,7 +60,7 @@ CANAL = "shopee"
 #: Teto da busca de hora de lembrete entre duas fotografias (2 dias de vao).
 _MAX_HORAS_NO_VAO = 48
 
-URL_DA_EXPEDICAO = "https://mktplace-gobeaute.vercel.app/expedicao"
+URL_DA_EXPEDICAO = "https://mktplace-ten.vercel.app/expedicao"
 
 ROTULO_CANAL = {"shopee": "Shopee"}
 #: Marca sem entrada aqui sai em maiusculas, como na Torre.
