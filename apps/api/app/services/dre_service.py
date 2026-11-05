@@ -27,6 +27,8 @@ FONTES — SO' O NEON (Gate DRE-DATA-BRIDGE-1)
   frete ML/Shopee.
 - `marts.fact_tiktok_affiliate_cost_order_monthly`: afiliados TikTok.
 - `marts.fact_dre_insumo_mensal`: CMV fiscal e repasse TikTok por coorte,
+  e (T-0059) a taxa da Shopee do escrow (`shopee_taxa_escrow`), que substitui
+  o `total_fees` do mart quando ele nao cobre a celula (ver `_taxa_shopee_escrow`),
   AGREGADOS e publicados pelo `pipelines.dre.insumo_publisher`, que e' o unico
   que le o Data Mart. A requisicao nunca toca o Data Mart: o Render nao o
   alcanca (Gate G4).
@@ -239,6 +241,8 @@ class InsumosCelula:
     afiliado: dict | None = None
     cmv: dict | None = None
     repasse: dict | None = None
+    #: Taxa da Shopee do escrow (T-0059), so' para celula Shopee. `None` = nada publicado.
+    taxa_shopee: dict | None = None
     motivo_sem_insumo: str = "competencia nao publicada em marts.fact_dre_insumo_mensal"
 
 
@@ -363,6 +367,8 @@ def montar_celula_base(ins: InsumosCelula, hoje: date) -> dict:
         if canal == "shopee" and tx["status"] == DISPONIVEL:
             tx["status"] = NAO_CONFIRMADO
             tx["motivo"] = "sem contraprova independente do repasse (pergunta C4)"
+        elif canal == "shopee":
+            tx = _taxa_shopee_escrow(ins.taxa_shopee, tx)
         comps["taxas"] = tx
     else:
         comps["taxas"] = _taxa_tiktok(ins, avisos)
@@ -445,6 +451,52 @@ def montar_celula_base(ins: InsumosCelula, hoje: date) -> dict:
         "motivos_classificacao": motivos, "avisos_qualidade": avisos, "data_maxima": datas,
     }
     return _finalizar(celula)
+
+
+#: T-0059: taxa da Shopee do escrow publicada em `marts.fact_dre_insumo_mensal`.
+FONTE_TAXA_SHOPEE_ESCROW = (f"{TABELA_INSUMOS}.shopee_taxa_escrow "
+                            "(escrow da Shopee: comissao + servico + transacao, por coorte de pedido)")
+
+
+def _taxa_shopee_escrow(esc: dict | None, do_mart: dict) -> dict:
+    """Taxa da Shopee quando o mart NAO cobre todas as linhas da celula (T-0059).
+
+    Desde o `daily_shopee` (22/10/2026) a fato diaria grava `total_fees` NULL
+    nas lojas com API (apice, barbours, lescent, rituaria): a API de pedidos
+    nao tem taxa. A taxa dessas lojas vem do escrow, publicada por mes.
+
+    PRECEDENCIA (uma fonte por celula; nunca soma as duas):
+      1. `total_fees` do mart em TODAS as linhas -> decidido antes de chegar
+         aqui (kokeshi; meses anteriores ao corte);
+      2. escrow publicado com valor -> valor do escrow. Cobertura (pedidos com
+         escrow / pedidos nao cancelados) = 1 -> `nao_confirmado` (mesmo nivel
+         da taxa do mart; C4 segue aberta); < 1 -> `parcial`, com o motivo. A
+         parte sem escrow nunca e' extrapolada;
+      3. escrow publicado mas inutilizavel (lote nao concluido/vencido) ->
+         esse estado, com o motivo: falha fechada, como os demais insumos;
+      4. sem escrow para a chave (nada publicado, ou `ausente_na_origem`) ->
+         o resultado do mart como estava (`parcial`/`indisponivel`).
+    """
+    if esc is None or (esc["_estado"] == "ok" and esc.get("valor") is None):
+        return do_mart
+    fonte = FONTE_TAXA_SHOPEE_ESCROW
+    if esc["_estado"] != "ok":
+        return _comp(status=esc["_estado"], motivo=esc["_motivo"], fonte=fonte,
+                     data_as_of=esc.get("data_as_of"), publicado_em=esc.get("publicado_em"))
+    meta = {"fonte": fonte, "data_as_of": esc.get("data_as_of"), "publicado_em": esc.get("publicado_em")}
+    if esc.get("sinal") != SINAL_FONTE[("taxas", "shopee")]:
+        return _comp(status=SINAL_INESPERADO, motivo="convencao de sinal publicada diferente da esperada", **meta)
+    magnitude, ok = normalizar_custo("taxas", "shopee", _num(esc["valor"]))
+    if not ok:
+        return _comp(status=SINAL_INESPERADO, motivo="soma do escrow com sinal contrario ao da fonte", **meta)
+    cobertura = _num(esc.get("cobertura"))
+    if cobertura is None or cobertura < 1:
+        pct = "desconhecida" if cobertura is None else f"{cobertura * 100:.1f}%"
+        return _comp(valor=magnitude, status=COBERTURA_PARCIAL,
+                     motivo=f"escrow cobre {pct} dos pedidos nao cancelados ({esc.get('motivo')}); "
+                            "a parte sem escrow nao e' estimada", **meta)
+    return _comp(valor=magnitude, status=NAO_CONFIRMADO,
+                 motivo="escrow da Shopee; sem contraprova independente do repasse (pergunta C4)", **meta)
 
 
 def _taxa_tiktok(ins: InsumosCelula, avisos: list[str]) -> dict:
@@ -868,6 +920,26 @@ def indexar_insumos(linhas: list[dict], agora: datetime) -> tuple[dict, dict]:
     return cmv, repasse
 
 
+def indexar_taxa_shopee(linhas: list[dict], agora: datetime) -> dict:
+    """Taxa da Shopee do escrow (`shopee_taxa_escrow`, T-0059) por chave.
+
+    Funcao propria para nao mudar a forma de `indexar_insumos`. O estado do
+    lote e' o da propria linha (mesma regra de `_estado_do_lote`).
+    """
+    out = {}
+    for r in linhas:
+        if r["componente"] != "shopee_taxa_escrow":
+            continue
+        estado, motivo = _estado_do_lote([r], agora)
+        out[(_chave_mes(r["competencia"]), r["canal"], r["marca"])] = {
+            "_estado": estado, "_motivo": motivo,
+            "valor": r["valor"], "sinal": r["sinal_origem"], "cobertura": r.get("cobertura"),
+            "status": r["status_reconciliacao"], "motivo": r["motivo"],
+            "data_as_of": r["data_max_origem"], "publicado_em": r["publicado_em"], "lote_id": r["lote_id"],
+        }
+    return out
+
+
 def resumo_insumos(leitura: LeituraInsumos, agora: datetime) -> dict:
     if not leitura.tabela_existe:
         return {"estado": "tabela_ausente", "publicado_em": None,
@@ -957,6 +1029,7 @@ def montar_dre(
     meses = meses_do_periodo(inicio, fim)
     af_idx = {(_chave_mes(r["mes"]), r["marca"]): r for r in afiliado_rows}
     cmv_idx, rep_idx = indexar_insumos(insumos.linhas, agora)
+    txs_idx = indexar_taxa_shopee(insumos.linhas, agora)
     motivo_sem = ("marts.fact_dre_insumo_mensal nao existe (migration 025 nao aplicada)"
                   if not insumos.tabela_existe else
                   "competencia nao publicada em marts.fact_dre_insumo_mensal")
@@ -972,6 +1045,7 @@ def montar_dre(
             afiliado=af_idx.get((mes, r["marca"])) if canal == "tiktok" else None,
             cmv=cmv_idx.get((mes, canal, r["marca"])),
             repasse=rep_idx.get((mes, canal, r["marca"])) if canal == "tiktok" else None,
+            taxa_shopee=txs_idx.get((mes, canal, r["marca"])) if canal == "shopee" else None,
             motivo_sem_insumo=motivo_sem,
         )
         base.append(montar_celula_base(ins, hoje))

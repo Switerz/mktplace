@@ -9,7 +9,10 @@ Le, no Data Mart e em transacao READ ONLY, somente AGREGADOS MENSAIS por
     (`gold.nf_vendas_unificada_v2`, a base da query de custos do FP&A), com
     contraprova contra o agregado `gold.nf_vendas_plataforma_sku_mensal`;
   * taxa, frete, afiliado, receita e residuo da identidade do repasse TikTok
-    por coorte de pedido (`silver.stg_tiktok_payments_by_order`).
+    por coorte de pedido (`silver.stg_tiktok_payments_by_order`);
+  * taxa da Shopee do escrow (comissao + servico + transacao) por coorte de
+    criacao do pedido, com a cobertura em pedidos (T-0059). So' entra quando o
+    CHECK da tabela no Neon ja aceita o componente — ver `TAXA_SHOPEE`.
 
 e grava em `marts.fact_dre_insumo_mensal` (Neon). Nenhum pedido, nota,
 settlement ou dado pessoal sai do Data Mart.
@@ -105,6 +108,20 @@ CONTRAPROVA_MAX = Decimal("1.00")
 #: ao real); a troca so' muda o mes que o agregado ainda nao alcancou.
 PROC_CMV = "gold.nf_vendas_unificada_v2 (canal=marketplace, sem intercompany) @dre-custos-vivos-1"
 PROC_REPASSE = "silver.stg_tiktok_payments_by_order (transaction_type=ORDER, coorte) @dre-bridge-1"
+
+#: T-0059 — taxa da Shopee do escrow (`payment/get_escrow_detail`), carregada no
+#: Data Mart em `silver.fct_gobeaute_despesas_shopee` (lojas com aplicacao:
+#: apice, barbours, lescent, rituaria; kokeshi nao tem). Desde o `daily_shopee`
+#: (22/10/2026) a fato diaria grava `total_fees` NULL nessas lojas numa janela
+#: de 60 dias, e a DRE ficou sem taxa de set/out.
+#:
+#: INERTE ATE' A MIGRATION: o CHECK `ck_fdim_componente` (025) e' lista fechada.
+#: O publisher so' le' e grava este componente quando o CHECK do Neon ja o
+#: aceita (`SQL_CHECK_COMPONENTE`); antes disso o lote sai identico ao de hoje,
+#: com uma observacao. Nada quebra na publicacao diaria.
+TAXA_SHOPEE = "shopee_taxa_escrow"
+PROC_TAXA_SHOPEE = ("silver.fct_gobeaute_despesas_shopee (comissao+servico+transacao) x silver.stg_shopee_orders "
+                    "(coorte de criacao BRT, nao cancelados) @T-0059")
 
 EXIT_OK = 0
 EXIT_RECONCILIACAO = 65
@@ -286,7 +303,55 @@ SQL_REPASSE = text("""
     GROUP BY 1, 2
 """)
 
+#: Taxa da Shopee por coorte de CRIACAO do pedido (BRT) — o mesmo eixo do GMV
+#: da fato diaria (`daily_shopee`). Base = pedidos nao cancelados da silver de
+#: pedidos (um por `order_sn`, a versao mais recente); o escrow entra por LEFT
+#: JOIN, entao a cobertura e' medida contra o que DEVERIA ter taxa:
+#:   * `taxa` soma SO' pedidos com as tres parcelas preenchidas; parcela NULL
+#:     nao vira zero — o pedido conta como sem escrow;
+#:   * pedido sem escrow (em transito, devolucao) fica fora da soma e reduz a
+#:     cobertura; nada e' extrapolado;
+#:   * PK do escrow e' (canal_origem, pedido): filtrar `canal_origem='shopee'`
+#:     garante uma linha por pedido, logo o JOIN nao multiplica.
+#: Medido (05/11/2026): escrow so' existe para pedido nao cancelado; dia do
+#: escrow = `created_date_brt` em 100% dos casamentos.
+SQL_TAXA_SHOPEE = text("""
+    WITH pedidos AS (
+        SELECT DISTINCT ON (order_sn) order_sn, brand, created_date_brt, lower(order_status) AS status
+        FROM silver.stg_shopee_orders
+        WHERE created_date_brt >= :inicio AND created_date_brt < :fim_exclusivo
+          AND brand = ANY(:marcas)
+        ORDER BY order_sn, update_time DESC NULLS LAST
+    ), escrow AS (
+        SELECT pedido,
+               comissao_plataforma_fee + taxa_servico_fee + taxa_transacao_fee AS taxa,
+               (comissao_plataforma_fee < 0 OR taxa_servico_fee < 0 OR taxa_transacao_fee < 0) AS negativa,
+               data_carga
+        FROM silver.fct_gobeaute_despesas_shopee
+        WHERE canal_origem = 'shopee'
+    )
+    SELECT date_trunc('month', p.created_date_brt)::date AS competencia,
+           p.brand                                        AS marca,
+           COUNT(*)                                       AS pedidos,
+           COUNT(e.taxa)                                  AS pedidos_com_escrow,
+           SUM(e.taxa)                                    AS taxa,
+           COUNT(*) FILTER (WHERE e.negativa)             AS parcelas_negativas,
+           MAX(e.data_carga)                              AS atualizado_em
+    FROM pedidos p
+    LEFT JOIN escrow e ON e.pedido = p.order_sn
+    WHERE p.status <> 'cancelled'
+    GROUP BY 1, 2
+""")
+
 SQL_TABELA_EXISTE = text("SELECT to_regclass('marts.fact_dre_insumo_mensal') IS NOT NULL")
+#: Definicao do CHECK de componentes no Neon. `TAXA_SHOPEE` so' e' publicada
+#: quando aparece nela (migration que estende a 025 aplicada).
+SQL_CHECK_COMPONENTE = text("""
+    SELECT pg_get_constraintdef(c.oid)
+    FROM pg_constraint c
+    WHERE c.conname = 'ck_fdim_componente'
+      AND c.conrelid = to_regclass('marts.fact_dre_insumo_mensal')
+""")
 SQL_LOCK = text(f"SELECT pg_try_advisory_xact_lock({LOCK_KEY})")
 SQL_AUDIT_ABRE = text("""
     INSERT INTO audit.source_sync_run (source_name, status, started_at, source_min_date, source_max_date)
@@ -512,7 +577,7 @@ def contraprova_cmv(cmv_idx: dict, cp_idx: dict) -> tuple[list[str], dict]:
 def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict],
                 repasse: list[dict], canais: list[str], comps: list[date],
                 sem_vendas: frozenset = frozenset(), publicadas: frozenset = frozenset(),
-                remover: frozenset = frozenset()) -> Lote:
+                remover: frozenset = frozenset(), taxa_shopee: Optional[list[dict]] = None) -> Lote:
     """Transforma a leitura em linhas da fato e lista as recusas.
 
     Recusa (a publicacao inteira aborta) quando:
@@ -530,8 +595,12 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
 
     NAO recusa — e grava com status — o CMV cuja receita fiscal nao bate com o
     GMV da Torre: isso e' estado do dado (Shopee hoje), nao defeito de carga.
+
+    `taxa_shopee=None` = o Neon ainda nao aceita `TAXA_SHOPEE`: nenhuma linha do
+    componente e' montada (o lote fica como antes do T-0059). Lista (mesmo
+    vazia) = publicar o componente para toda celula Shopee esperada.
     """
-    lote = Lote(extraidas=len(cmv) + len(repasse))
+    lote = Lote(extraidas=len(cmv) + len(repasse) + len(taxa_shopee or []))
     plat_para_canal = {v: k for k, v in PLATAFORMA_FISCAL.items()}
 
     def indexar(rows, chave_fn, nome):
@@ -547,6 +616,7 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
     cp_idx = indexar(contraprova, lambda r: (_mes_de(r["competencia"]), plat_para_canal.get(r["plataforma"]), r["marca"]),
                      "contraprova")
     rep_idx = indexar(repasse, lambda r: (_mes_de(r["competencia"]), r["marca"]), "repasse")
+    txs_idx = indexar(taxa_shopee or [], lambda r: (_mes_de(r["competencia"]), r["marca"]), "taxa_shopee")
     esp = {}
     for r in esperado:
         canal = {v: k for k, v in MKT_ID.items()}.get(r["marketplace_id"])
@@ -596,6 +666,8 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
             lote.linhas.append(_linha(m, canal, marca, "cmv_receita_fiscal", receita_fiscal, status="nao_avaliado",
                                       procedencia=PROC_CMV, motivo="base da razao com o GMV", data_max=data_max))
 
+        if canal == "shopee" and taxa_shopee is not None:
+            lote.linhas.append(_linha_taxa_shopee(m, marca, txs_idx.get((m, marca)), lote))
         if canal != "tiktok":
             continue
         r = rep_idx.get((m, marca))
@@ -633,6 +705,33 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
     return lote
 
 
+def _linha_taxa_shopee(m: date, marca: str, r: Optional[dict], lote: Lote) -> dict:
+    """Linha de `TAXA_SHOPEE` de uma celula Shopee esperada.
+
+    Sem pedido com escrow na origem -> `valor NULL`, `ausente_na_origem`
+    (nunca zero). Com escrow, `valor` e' a soma medida (custo POSITIVO, como o
+    `total_fees` da Shopee) e `cobertura` = pedidos com escrow / pedidos nao
+    cancelados; a DRE decide `disponivel`/`parcial` por ela. Parcela negativa
+    no escrow recusa o lote: sinal inesperado nao e' corrigido aqui.
+    """
+    if r is None or not int(r["pedidos_com_escrow"] or 0):
+        return _linha(m, "shopee", marca, TAXA_SHOPEE, None, status="ausente_na_origem",
+                      procedencia=PROC_TAXA_SHOPEE, motivo="sem pedido com escrow para a chave na origem")
+    pedidos, com = int(r["pedidos"] or 0), int(r["pedidos_com_escrow"])
+    if int(r["parcelas_negativas"] or 0):
+        lote.recusas.append(f"taxa_shopee: {r['parcelas_negativas']} pedido(s) com parcela negativa no escrow "
+                            f"em {(m, marca)}")
+    cobertura = _razao(Decimal(com), Decimal(pedidos))
+    if cobertura is None or not (Decimal(0) <= cobertura <= Decimal(1)):
+        lote.recusas.append(f"taxa_shopee: cobertura fora de [0,1] em {(m, marca)}: {com}/{pedidos}")
+        cobertura = None
+    return _linha(m, "shopee", marca, TAXA_SHOPEE, _dec(r["taxa"]), status="nao_avaliado",
+                  procedencia=PROC_TAXA_SHOPEE, sinal=1,
+                  cobertura=None if cobertura is None else cobertura.quantize(Decimal("0.000001")),
+                  motivo=f"escrow em {com} de {pedidos} pedidos nao cancelados",
+                  data_max=_ts(r["atualizado_em"]))
+
+
 # ---------------------------------------------------------------------------
 # Leitura
 # ---------------------------------------------------------------------------
@@ -641,8 +740,13 @@ def _rows(conn, sql, params) -> list[dict]:
     return [dict(r) for r in conn.execute(sql, params).mappings().all()]
 
 
-def ler_fonte(fonte_engine, comps: list[date], canais: list[str], marcas: list[str]) -> tuple[list, list, list]:
-    """Leitura do Data Mart em transacao READ ONLY. Falha vira FonteIndisponivel."""
+def ler_fonte(fonte_engine, comps: list[date], canais: list[str], marcas: list[str],
+              com_taxa_shopee: bool = False) -> tuple[list, list, list, Optional[list]]:
+    """Leitura do Data Mart em transacao READ ONLY. Falha vira FonteIndisponivel.
+
+    A taxa da Shopee so' e' lida com `com_taxa_shopee` (CHECK do Neon aceita o
+    componente) e a Shopee no escopo; senao volta `None` e o lote nao a monta.
+    """
     if fonte_engine is None:
         raise FonteIndisponivel("Data Mart nao configurado")
     params = {
@@ -656,10 +760,27 @@ def ler_fonte(fonte_engine, comps: list[date], canais: list[str], marcas: list[s
             cmv = _rows(conn, SQL_CMV, params)
             contraprova = _rows(conn, SQL_CMV_CONTRAPROVA, params)
             repasse = _rows(conn, SQL_REPASSE, params) if "tiktok" in canais else []
+            taxa_shopee = (_rows(conn, SQL_TAXA_SHOPEE, params)
+                           if com_taxa_shopee and "shopee" in canais else None)
             conn.rollback()
     except SQLAlchemyError as exc:
         raise FonteIndisponivel(sanitizar(exc)) from None
-    return cmv, contraprova, repasse
+    return cmv, contraprova, repasse, taxa_shopee
+
+
+def estado_taxa_shopee(taxa_shopee: Optional[list], canais: list[str]) -> str:
+    """Rotulo do resumo: o componente entrou no lote ou ficou inerte, e por que."""
+    if "shopee" not in canais:
+        return "fora do escopo"
+    if taxa_shopee is None:
+        return f"inerte: o CHECK ck_fdim_componente do Neon ainda nao aceita {TAXA_SHOPEE} (migration pendente)"
+    return "publicado"
+
+
+def check_aceita_taxa_shopee(conn) -> bool:
+    """True quando o CHECK de componentes do Neon ja lista `TAXA_SHOPEE`."""
+    definicao = conn.execute(SQL_CHECK_COMPONENTE).scalar()
+    return bool(definicao) and f"'{TAXA_SHOPEE}'" in definicao
 
 
 def _esperado(conn, comps: list[date], canais: list[str]) -> list[dict]:
@@ -728,12 +849,15 @@ def diagnosticar(alvo_engine, fonte_engine, comps: list[date], canais: list[str]
         esperado = _esperado(conn, comps, canais)
         existe = conn.execute(SQL_TABELA_EXISTE).scalar_one()
         atual = _rows(conn, SQL_ATUAL, {"competencias": comps, "canais": canais}) if existe else []
+        aceita_tx = bool(existe) and check_aceita_taxa_shopee(conn)
         conn.rollback()
-    cmv, contraprova, repasse = ler_fonte(fonte_engine, comps, canais, _marcas(esperado))
+    cmv, contraprova, repasse, taxa_shopee = ler_fonte(fonte_engine, comps, canais, _marcas(esperado), aceita_tx)
     publicadas = frozenset((_mes_de(r["competencia"]), r["canal"], r["marca"]) for r in atual)
     lote = montar_lote(esperado=esperado, cmv=cmv, contraprova=contraprova, repasse=repasse, canais=canais,
-                       comps=comps, sem_vendas=sem_vendas, publicadas=publicadas, remover=remover)
+                       comps=comps, sem_vendas=sem_vendas, publicadas=publicadas, remover=remover,
+                       taxa_shopee=taxa_shopee)
     return _resumo(lote, comps, canais, modo="dry-run", aplicado=False, tabela_existe=bool(existe),
+                   taxa_shopee=estado_taxa_shopee(taxa_shopee, canais),
                    sem_vendas=sorted(f"{m.isoformat()[:7]}:{c}" for m, c in sem_vendas),
                    remover_marca=sorted(rotulo_chave(k) for k in remover),
                    diff=_diff(atual, lote.linhas) if existe else None), lote
@@ -764,9 +888,11 @@ def publicar(alvo_engine, fonte_engine, comps: list[date], canais: list[str], *,
             publicadas = frozenset(
                 (_mes_de(r["competencia"]), r["canal"], r["marca"])
                 for r in _rows(conn, SQL_PUBLICADAS, {"competencias": comps, "canais": canais}))
-            cmv, contraprova, repasse = ler_fonte(fonte_engine, comps, canais, _marcas(esperado))
+            cmv, contraprova, repasse, taxa_shopee = ler_fonte(fonte_engine, comps, canais, _marcas(esperado),
+                                                               check_aceita_taxa_shopee(conn))
             lote = montar_lote(esperado=esperado, cmv=cmv, contraprova=contraprova, repasse=repasse, canais=canais,
-                               comps=comps, sem_vendas=sem_vendas, publicadas=publicadas, remover=remover)
+                               comps=comps, sem_vendas=sem_vendas, publicadas=publicadas, remover=remover,
+                               taxa_shopee=taxa_shopee)
             if lote.recusas:  # ANTES do DELETE: recusa nunca apaga a fotografia
                 raise PublicacaoRecusada(lote.recusas)
             apagadas = conn.execute(SQL_APAGA_ESCOPO, {"competencias": comps, "canais": canais}).rowcount
@@ -783,6 +909,7 @@ def publicar(alvo_engine, fonte_engine, comps: list[date], canais: list[str], *,
         _registrar_falha(alvo_engine, comps, exc, agora)
         raise
     return _resumo(lote, comps, canais, modo="apply", aplicado=True, lote_id=lote_id, apagadas=apagadas,
+                   taxa_shopee=estado_taxa_shopee(taxa_shopee, canais),
                    sem_vendas=sorted(f"{m.isoformat()[:7]}:{c}" for m, c in sem_vendas),
                    remover_marca=sorted(rotulo_chave(k) for k in remover))
 
