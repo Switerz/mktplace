@@ -624,9 +624,16 @@ SELECT COALESCE(reason, '') AS motivo,
  GROUP BY 1
 """
 
+#: `to_jsonb(s)` le as colunas de conversas mesmo antes de a coleta cria-las
+#: (ALTER TABLE ... ADD COLUMN IF NOT EXISTS no primeiro run): coluna que nao
+#: existe vira NULL em vez de quebrar a consulta.
 SQL_NAO_LIDAS = """
-SELECT DISTINCT ON (brand) brand AS marca, unread_count, captured_at
-  FROM raw.shopee_chat_snapshot
+SELECT DISTINCT ON (brand) brand AS marca, unread_count, captured_at,
+       (to_jsonb(s) ->> 'conversas_7d')::int        AS conversas_7d,
+       (to_jsonb(s) ->> 'conversas_30d')::int       AS conversas_30d,
+       (to_jsonb(s) ->> 'aguardando_resposta')::int AS aguardando_resposta,
+       (to_jsonb(s) ->> 'conversas_truncado')::boolean AS conversas_truncado
+  FROM raw.shopee_chat_snapshot s
  WHERE brand = ANY(:marcas)
  ORDER BY brand, captured_at DESC
 """
@@ -750,7 +757,12 @@ def _nao_lidas(consultar: Consultar, marcas: list[str],
         return "erro", []
     return "dado", [
         NaoLidas(marca=str(r.get("marca")), valor=_int(r.get("unread_count")),
-                 capturado_em=_utc(r.get("captured_at")))
+                 capturado_em=_utc(r.get("captured_at")),
+                 conversas_7d=_int(r.get("conversas_7d")),
+                 conversas_30d=_int(r.get("conversas_30d")),
+                 aguardando_resposta=_int(r.get("aguardando_resposta")),
+                 conversas_truncado=(r.get("conversas_truncado")
+                                     if isinstance(r.get("conversas_truncado"), bool) else None))
         for r in linhas if str(r.get("marca")) in marcas
     ]
 

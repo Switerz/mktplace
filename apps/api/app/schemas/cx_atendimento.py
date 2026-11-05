@@ -113,6 +113,14 @@ class NaoLidas(BaseModel):
     #: None = a Shopee nao devolveu o numero (nunca zero).
     valor: Optional[int] = None
     capturado_em: Optional[datetime] = None
+    #: Volume de conversas (`get_conversation_list`, 04/11/2026): conversas com
+    #: mensagem nos ultimos 7/30 dias e quantas tem a ultima mensagem do
+    #: comprador. None = coleta ainda sem essa leitura (nunca zero).
+    conversas_7d: Optional[int] = None
+    conversas_30d: Optional[int] = None
+    aguardando_resposta: Optional[int] = None
+    #: True = bateu o teto de paginas: o numero e' um piso.
+    conversas_truncado: Optional[bool] = None
 
 
 class LinhaDevolucao(BaseModel):
