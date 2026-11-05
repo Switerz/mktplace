@@ -1648,6 +1648,12 @@ def pg(monkeypatch, tmp_path):
         c.execute(sql(DDL_APOIO))
         for ddl in _mig()._upgrade_sql():
             c.execute(sql(ddl))
+        # T-0018: o publicador grava as colunas do anuncio-ancora, entao o destino
+        # deste teste e' 029 + 037, como o Neon depois do `alembic upgrade 037`.
+        m037, op037 = _mig_037()
+        m037.upgrade()
+        for ddl in op037.sqls:
+            c.execute(sql(ddl))
         # publicacao anterior de OUTRO dia, para provar que nada fora do pedido muda
         for m in QUATRO.split(","):
             c.execute(sql(f"INSERT INTO {pub.FACT_MARCA} (ref_date, brand, inventarios, inventarios_full_lidos, "
