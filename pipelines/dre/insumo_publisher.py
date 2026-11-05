@@ -131,11 +131,13 @@ PROC_TAXA_SHOPEE = ("silver.fct_gobeaute_despesas_shopee (comissao+servico+trans
 BURACO_NF_MARCA = "buraco de numeracao de NF em "
 #: Menor buraco CONTIGUO (numeros faltando entre duas notas vizinhas da mesma
 #: serie) que torna o mes `parcial`. Buraco menor e' tratado como inutilizacao
-#: ou nota fora da base de vendas e so' aparece no resumo. PROVISORIO: a unica
-#: medicao disponivel (raw Apice serie 55, 01/09-04/11) achou no maximo 31
-#: numeros fora dos incidentes, que tiveram 808 a 1.914. Rever com o resumo
-#: `numeracao_nf` do dry-run.
-BURACO_NF_MINIMO = 50
+#: ou nota fora da base de vendas e so' aparece no resumo. Medido na gold
+#: (jun, ago, set, out/26 x 5 marcas; jul estourou o tempo de leitura): a serie
+#: 001 dos emissores principais intercala notas que nao sao de venda e tem buraco
+#: de ate' 474 numeros sem incidente (03/08); com 50, todas as marcas ficavam
+#: `parcial` em set e out. Os incidentes conhecidos (Apice 03/10, Barbours 04-05/10)
+#: tem 810 a 1.640 numeros contiguos. Rever com o resumo `numeracao_nf`.
+BURACO_NF_MINIMO = 500
 #: Quantos dias o `motivo` nomeia; o resto vira "e mais N dia(s)".
 BURACO_NF_DIAS_NO_MOTIVO = 10
 

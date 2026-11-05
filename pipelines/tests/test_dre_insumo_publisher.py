@@ -678,23 +678,23 @@ def test_buraco_de_outro_mes_nao_afeta_este():
 
 def test_series_somam_no_dia_e_dias_sao_listados_em_ordem():
     """Barbours out/26: series 3 e 4 sem 04/10 (914 + 808)."""
-    lt = lote_nf([nf("barbours", date(2026, 10, 11), 60, serie="003"),
+    lt = lote_nf([nf("barbours", date(2026, 10, 11), 600, serie="003"),
                   nf("barbours", date(2026, 10, 4), 914, serie="003"),
                   nf("barbours", date(2026, 10, 4), 808, serie="004")])
     assert linha(lt, "shopee", "barbours", "cmv")["motivo"].endswith(
-        "; buraco de numeracao de NF em 04/10 (1.722 numeros), 11/10 (60 numeros)")
-    assert lt.numeracao_nf["parciais"][0]["numeros"] == 1782
+        "; buraco de numeracao de NF em 04/10 (1.722 numeros), 11/10 (600 numeros)")
+    assert lt.numeracao_nf["parciais"][0]["numeros"] == 2322
 
 
 def test_motivo_limita_os_dias_nomeados():
-    dias = [nf("apice", date(2026, 10, d), 100) for d in range(1, 14)]
+    dias = [nf("apice", date(2026, 10, d), 1000) for d in range(1, 14)]
     m = linha(lote_nf(dias), "tiktok", "apice", "cmv")["motivo"]
-    assert "10/10 (100 numeros), e mais 3 dia(s) (300 numeros)" in m and "11/10" not in m
+    assert "10/10 (1.000 numeros), e mais 3 dia(s) (3.000 numeros)" in m and "11/10" not in m
 
 
 def test_trecho_do_motivo_nao_tem_separador_interno():
     """O serving separa o motivo por '; ' e procura o trecho pelo rotulo."""
-    _, resumo = P.buracos_numeracao_nf([nf("apice", date(2026, 10, d), 100) for d in range(1, 14)])
+    _, resumo = P.buracos_numeracao_nf([nf("apice", date(2026, 10, d), 1000) for d in range(1, 14)])
     assert "; " not in resumo["parciais"][0]["motivo"]
     assert resumo["parciais"][0]["motivo"].startswith(P.BURACO_NF_MARCA)
 

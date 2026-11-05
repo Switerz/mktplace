@@ -283,9 +283,13 @@ Barbours passou em 0,981 sem 04/10. Por isso o publisher de insumos aplica um ga
   plataforma e com ou sem intercompany, porque a numeração é do emissor. Também entra o mês anterior à janela. A
   marca de cada emissor vem da própria gold (CNPJ da chave × `marca`).
 - **Buraco:** dentro de emissor × modelo × série, são os números que faltam entre duas notas vizinhas. Ele é atribuído ao
-  dia da nota seguinte. Conta quando um buraco contíguo tem **≥ 50 números** (`BURACO_NF_MINIMO`). Buracos menores
-  ficam só no resumo `numeracao_nf.abaixo_do_limiar`. O limiar é **provisório**: a única medição até agora (Apice, série
-  55, raw, de 01/09 a 04/11) achou no máximo 31 números fora dos incidentes, que tiveram de 808 a 1.914.
+  dia da nota seguinte. Conta quando um buraco contíguo tem **≥ 500 números** (`BURACO_NF_MINIMO`). Buracos menores
+  ficam só no resumo `numeracao_nf.abaixo_do_limiar`. Medição na gold (jun, ago, set e out/26 × 5 marcas; julho
+  estourou o tempo de leitura): a série 001 dos emissores principais intercala notas que não são de venda e tem buracos
+  de até 474 números sem incidente (03/08). Com limiar 50, todas as marcas ficariam `parcial` em set e out. Os
+  incidentes conhecidos (Apice 03/10, Barbours 04–05/10) têm de 810 a 1.640 números contíguos. Com 500, ficam marcados
+  set/kokeshi (21/09, 617), out/apice e out/barbours. **Limite:** emissor compartilhado entre marcas marca todas elas,
+  porque não há como saber de qual marca é a nota que falta.
 - **Efeito:** em todos os canais da marca no mês, o `motivo` do `cmv` e do `cmv_receita_fiscal` ganha o trecho
   `buraco de numeracao de NF em 03/10 (1.914 numeros), 04/10 (...)`, com os dias em ordem, as séries somadas por dia e
   no máximo 10 dias nomeados. **Valor, status e cobertura não mudam, e o gate nunca recusa a publicação.** Se a leitura
