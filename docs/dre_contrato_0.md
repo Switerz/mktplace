@@ -165,6 +165,30 @@ L12 (=) Margem após impostos                   [só existe com L11 disponível]
 | Responsável | Dados | Dados + Conciliação/Repasse | Dados + Conciliação/Repasse |
 | Decisão pendente | — | C4 | C2 |
 
+#### 4.5.1 Taxa Shopee pelo escrow (T-0059, 05/11/2026)
+
+**Definição de "taxas Shopee" (inalterada):** comissão + taxa de serviço cobradas pela Shopee sobre o pedido. No
+export eram `commission_net + service_fee_net`; no escrow (`payment/get_escrow_detail`, carregado no Data Mart em
+`silver.fct_gobeaute_despesas_shopee`) são `comissao_plataforma_fee + taxa_servico_fee + taxa_transacao_fee`
+(a de transação é 0 em 100% dos pedidos jun–out/26). **Fora** da taxa: comissão de afiliado (`comissao_afiliado`,
+pergunta C3), frete e frete de devolução.
+
+**Por que mudou a fonte:** desde o `daily_shopee` (22/10/2026) a fato diária grava `total_fees` **NULL** nas lojas
+com API (apice, barbours, lescent, rituaria) numa janela de 60 dias — a API de pedidos não tem taxa. Ago ficou com
+22 de 31 linhas; set/out sem nenhuma. Kokeshi segue pelo arquivo, com `total_fees` completo.
+
+| Campo | Regra |
+|---|---|
+| Fonte nova | `marts.fact_dre_insumo_mensal`, componente `shopee_taxa_escrow`, publicado pelo `pipelines.dre.insumo_publisher` |
+| Grão | mês de **criação do pedido (BRT)** × marca — o mesmo eixo do GMV da fato diária; `data_pedido` do escrow = `created_date_brt` em 100% dos casamentos |
+| Base | pedidos **não cancelados** de `silver.stg_shopee_orders` (um por `order_sn`); escrow por LEFT JOIN em `pedido = order_sn`, `canal_origem='shopee'` (PK do escrow) |
+| Valor | soma das três parcelas só dos pedidos com escrow completo; sinal positivo (`sinal_origem = 1`) |
+| Cobertura | pedidos com escrow ÷ pedidos não cancelados. **[FATO]** jun–jul 100%; ago–set 99,9–100% (faltam só pedidos `to_return`); out 81,9–92,0% (maturação: escrow sai após a conclusão) |
+| Precedência na DRE | (1) `total_fees` do mart em **todas** as linhas da célula → mart, como antes; (2) senão, escrow publicado com valor → escrow do mês inteiro, **nunca somado ao mart parcial**; (3) escrow de lote não concluído/vencido → `snapshot_ausente`/`snapshot_vencido`; (4) sem escrow → resultado do mart (`parcial`/`indisponível`) |
+| Status | cobertura = 1 → `nao_confirmado` (C4 segue aberta, mesmo nível da taxa do mart); cobertura < 1 → `parcial` com o percentual no motivo. A parte sem escrow **não é estimada** |
+| Contraprova | **[FATO]** escrow × taxa publicada do export, mesma janela: jun apice/lescent/rituaria **exato**, barbours escrow +9,9% acima do mart (não investigado); jul −0,77% a +0,14%; ago 1–22 −1,66% a −0,25% |
+| Ativação | **inerte** até uma migration estender o CHECK `ck_fdim_componente` (025) com `shopee_taxa_escrow`: antes disso o publisher não lê nem grava o componente e o lote sai idêntico |
+
 ### 4.6 L6 — Ads / mídia
 
 | Campo | ML | Shopee | TikTok |
