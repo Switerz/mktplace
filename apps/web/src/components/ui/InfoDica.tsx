@@ -28,6 +28,10 @@ import { Info } from "lucide-react";
  * card com `translateY` e a entrada `.tc-entrada` deixa `transform` preenchido
  * em cada bloco. Dentro deles o balao abria centenas de px longe do "ⓘ", fora
  * da tela, e criava rolagem horizontal em 390px (medido).
+ *
+ * T-0033 — Tab ate' um "ⓘ" fora da tela: o `onFocus` abre e o navegador rola
+ * ate' o "ⓘ" logo depois. O evento dessa rolagem chega no quadro seguinte e
+ * fechava o balao na hora (22 de 22 em producao). Ver `rolagemAoAbrir`.
  */
 /**
  * EXPEDICAO-DICA-LEGIVEL — o balao era 256 px com letra de 12 px em cinza e
@@ -38,6 +42,41 @@ import { Info } from "lucide-react";
 export const LARGURA_DA_DICA = 320;
 const LARGURA = LARGURA_DA_DICA;
 const MARGEM = 8;
+
+/**
+ * Decide o que a rolagem faz com o balao recem-aberto.
+ *
+ * Aberto pelo FOCO, a rolagem dos dois proximos quadros e' a do proprio foco
+ * (o evento `scroll` sai antes dos `requestAnimationFrame` do quadro): ela
+ * REPOSICIONA em vez de fechar, e ao fim do segundo quadro a posicao e'
+ * recalculada, porque a primeira foi medida antes da rolagem. Depois disso,
+ * ou se abriu pelo mouse, rolar fecha (a posicao ficaria velha).
+ *
+ * Janela por quadros e nao por relogio: nao depende da velocidade da maquina
+ * e nao segura um balao velho por 100 ms. Escolhido em vez de "com foco no ⓘ
+ * reposiciona sempre", que deixaria o balao aberto na rolagem do usuario
+ * depois de um toque (o toque tambem foca o ⓘ).
+ */
+export function rolagemAoAbrir(
+  porFoco: boolean,
+  posicionar: () => void,
+  fechar: () => void,
+  quadro: (cb: () => void) => number = requestAnimationFrame,
+  cancelar: (id: number) => void = cancelAnimationFrame,
+): { aoRolar: () => void; parar: () => void } {
+  if (!porFoco) return { aoRolar: fechar, parar: () => {} };
+  let assentando = true;
+  let id = quadro(() => {
+    id = quadro(() => {
+      assentando = false;
+      posicionar();
+    });
+  });
+  return {
+    aoRolar: () => (assentando ? posicionar() : fechar()),
+    parar: () => cancelar(id),
+  };
+}
 
 /** O miolo do balao. Puro (sem portal nem estado), para teste. */
 export function ConteudoDaDica({ titulo, texto, nota }: { titulo?: string; texto: string; nota?: string }) {
@@ -74,31 +113,38 @@ export default function InfoDica({
   const balao = useRef<HTMLSpanElement>(null);
   const [aberto, setAberto] = useState(false);
   const [pos, setPos] = useState<{ left: number; top: number; acima: boolean } | null>(null);
+  const porFoco = useRef(false);
 
   useEffect(() => {
     if (!aberto || !gatilho.current) return;
-    const r = gatilho.current.getBoundingClientRect();
-    const largura = Math.min(LARGURA, window.innerWidth - 2 * MARGEM);
-    const left = Math.min(
-      Math.max(MARGEM, r.left + r.width / 2 - largura / 2),
-      window.innerWidth - largura - MARGEM,
-    );
-    const altura = balao.current?.offsetHeight ?? 0;
-    const acima = r.bottom + 8 + altura > window.innerHeight - MARGEM && r.top - 8 - altura > MARGEM;
-    setPos({ left, top: acima ? r.top - 8 - altura : r.bottom + 8, acima });
+    const posicionar = () => {
+      if (!gatilho.current) return;
+      const r = gatilho.current.getBoundingClientRect();
+      const largura = Math.min(LARGURA, window.innerWidth - 2 * MARGEM);
+      const left = Math.min(
+        Math.max(MARGEM, r.left + r.width / 2 - largura / 2),
+        window.innerWidth - largura - MARGEM,
+      );
+      const altura = balao.current?.offsetHeight ?? 0;
+      const acima = r.bottom + 8 + altura > window.innerHeight - MARGEM && r.top - 8 - altura > MARGEM;
+      setPos({ left, top: acima ? r.top - 8 - altura : r.bottom + 8, acima });
+    };
+    posicionar();
 
     const fechar = () => {
       setAberto(false);
       setPos(null);
     };
+    const rolagem = rolagemAoAbrir(porFoco.current, posicionar, fechar);
     const tecla = (e: KeyboardEvent) => {
       if (e.key === "Escape") fechar();
     };
-    window.addEventListener("scroll", fechar, true);
+    window.addEventListener("scroll", rolagem.aoRolar, true);
     window.addEventListener("resize", fechar);
     document.addEventListener("keydown", tecla);
     return () => {
-      window.removeEventListener("scroll", fechar, true);
+      rolagem.parar();
+      window.removeEventListener("scroll", rolagem.aoRolar, true);
       window.removeEventListener("resize", fechar);
       document.removeEventListener("keydown", tecla);
     };
@@ -112,7 +158,10 @@ export default function InfoDica({
     );
   }
 
-  const abrir = () => setAberto(true);
+  const abrir = (e: { type: string }) => {
+    porFoco.current = e.type === "focus";
+    setAberto(true);
+  };
   const fechar = () => {
     setAberto(false);
     setPos(null);
