@@ -439,8 +439,8 @@ def test_cli_canais_validos_sao_normalizados_na_ordem_canonica():
 # Contrato com o serving e com a migration
 # ---------------------------------------------------------------------------
 
-def carregar_migration_025():
-    """Constantes da migration 025 SEM importar `alembic`.
+def _carregar_migration(arquivo: str):
+    """Constantes de uma migration SEM importar `alembic`.
 
     Executa o fonte num namespace isolado, com `op = None`. Injetar um
     `alembic` falso em `sys.modules` contaminaria qualquer outro teste da
@@ -448,7 +448,7 @@ def carregar_migration_025():
     """
     import types
 
-    caminho = REPO / "apps" / "api" / "alembic" / "versions" / "025_create_fact_dre_insumo_mensal.py"
+    caminho = REPO / "apps" / "api" / "alembic" / "versions" / arquivo
     fonte = caminho.read_text(encoding="utf-8")
     assert fonte.count("from alembic import op") == 1
     ns: dict = {}
@@ -456,29 +456,62 @@ def carregar_migration_025():
     return types.SimpleNamespace(**{k: v for k, v in ns.items() if not k.startswith("__")})
 
 
+def carregar_migration_025():
+    return _carregar_migration("025_create_fact_dre_insumo_mensal.py")
+
+
+def carregar_migration_037():
+    """T-0059: estende o CHECK de componentes da 025 com `shopee_taxa_escrow`."""
+    return _carregar_migration("037_dre_insumo_taxa_shopee_escrow.py")
+
+
 _migration = carregar_migration_025
 
 
+def _lista_do_check(sql: str, nome: str) -> tuple:
+    import re
+
+    bloco = re.search(nome + r" CHECK \((?:\w+) IN \((.*?)\)\)", sql, re.DOTALL).group(1)
+    return tuple(re.findall(r"'([a-z_]+)'", bloco))
+
+
 def test_componentes_publicados_existem_no_check_da_migration():
-    lt = lote([esperado("tiktok"), esperado("ml")], [cmv("tiktok"), cmv("ml")], reps=[repasse()])
-    m = _migration()
-    assert {r["componente"] for r in lt.linhas} <= set(m.COMPONENTES)
-    assert {r["status_reconciliacao"] for r in lt.linhas} <= set(m.STATUS)
-    assert m.down_revision == "024" and m.revision == "025"
+    """Lista EFETIVA no head: a da 025 estendida pela 037 (T-0059)."""
+    lt = lote([esperado("tiktok"), esperado("ml"), esperado("shopee", "barbours")],
+              [cmv("tiktok"), cmv("ml")], reps=[repasse()])
+    lt_tx = P.montar_lote(
+        esperado=[esperado("shopee", "barbours")], cmv=[], contraprova=[], repasse=[], canais=["shopee"],
+        comps=[JUL], taxa_shopee=[{"competencia": JUL, "marca": "barbours", "pedidos": 10, "pedidos_com_escrow": 9,
+                                   "taxa": Decimal(100), "parcelas_negativas": 0, "atualizado_em": None}])
+    m025, m037 = _migration(), carregar_migration_037()
+    efetiva = set(m037.COMPONENTES)
+    assert {r["componente"] for r in lt.linhas + lt_tx.linhas} <= efetiva
+    assert P.TAXA_SHOPEE in {r["componente"] for r in lt_tx.linhas}
+    # A 037 so' acrescenta: a lista da 025 continua inteira, na mesma ordem.
+    assert m037.COMPONENTES == m025.COMPONENTES + (P.TAXA_SHOPEE,)
+    assert {r["status_reconciliacao"] for r in lt.linhas + lt_tx.linhas} <= set(m025.STATUS)
+    assert m025.down_revision == "024" and m025.revision == "025"
+    assert m037.down_revision == "036" and m037.revision == "037"
+
+
+def test_037_troca_so_o_check_de_componentes_e_o_downgrade_restaura_a_025():
+    m025, m037 = carregar_migration_025(), carregar_migration_037()
+    (up,) = m037.UPGRADE_SQL
+    apaga, restaura = m037.DOWNGRADE_SQL
+    assert _lista_do_check(up, "ck_fdim_componente") == m037.COMPONENTES
+    assert _lista_do_check(restaura, "ck_fdim_componente") == m025.COMPONENTES
+    for sql in (up, restaura):
+        assert sql.count("CONSTRAINT") == 2 and "DROP CONSTRAINT ck_fdim_componente," in sql
+        assert m037.TABELA in sql
+    # Downgrade apaga SO' o componente novo, com WHERE, antes de restaurar o CHECK.
+    assert apaga.strip() == f"DELETE FROM {m037.TABELA} WHERE componente = '{P.TAXA_SHOPEE}'"
 
 
 def test_check_literal_da_migration_lista_exatamente_as_tuplas():
-    import re
-
     m = carregar_migration_025()
     sql = m.UPGRADE_SQL[0]
-
-    def lista(nome):
-        bloco = re.search(nome + r" CHECK \((?:\w+) IN \((.*?)\)\)", sql, re.DOTALL).group(1)
-        return tuple(re.findall(r"'([a-z_]+)'", bloco))
-
-    assert lista("ck_fdim_componente") == m.COMPONENTES
-    assert lista("ck_fdim_status") == m.STATUS
+    assert _lista_do_check(sql, "ck_fdim_componente") == m.COMPONENTES
+    assert _lista_do_check(sql, "ck_fdim_status") == m.STATUS
 
 
 def test_faixa_do_cmv_e_a_mesma_do_serving():
