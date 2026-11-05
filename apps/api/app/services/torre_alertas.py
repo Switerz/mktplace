@@ -437,7 +437,7 @@ def itens_vencidos(leitura: Optional[LeituraVencidos], agora: datetime) -> list[
     if acima:
         texto += ". " + " · ".join(
             f"{rotulo_marca(m.marca)} {inteiro(m.vencidos)} ({pct(m.fracao or 0)})" for m in acima)
-    texto += ". _Prazo reconstruído pela regra de 2 dias úteis._"
+    texto += "."
     dia = agora.astimezone(TZ_OPERACIONAL).date().isoformat()
     return [Item(f"vencidos:{leitura.canal}:{dia}:{turno(agora)}", texto, leitura)]
 
@@ -505,8 +505,7 @@ def _bloco_vencidos(v: "LeituraVencidos") -> list[dict]:
         linhas.append(f"{bola} *{rotulo_marca(m.marca)}*  {pct(m.fracao or 0)}  ·  "
                       f"{inteiro(m.vencidos)} de {inteiro(m.fila)}")
     return [sb.secao("\n".join(linhas), sb.botao(f"Ver fila do {canal}",
-                                                  sb.url_expedicao(v.canal, detalhe=True))),
-            sb.nota("Prazo reconstruído pela regra de 2 dias úteis (não é o SLA oficial do TikTok).")]
+                                                  sb.url_expedicao(v.canal, detalhe=True)))]
 
 
 def _bloco_saude(marca: str, canal: str, sinais: list[str]) -> dict:
