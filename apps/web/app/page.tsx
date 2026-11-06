@@ -60,6 +60,7 @@ import { buildQuery as queryMlFull } from "@/lib/ml-fulfillment";
 import { buildQuery as queryShopeeFbs } from "@/lib/shopee-fbs";
 import { ALL_MARKETPLACES, isMarketplaceSelected } from "@/lib/marketplace-filter";
 import { divisaoFull } from "@/lib/gerencial/divisao-full";
+import { comparacaoDeHoje, type HojePorHora } from "@/lib/gerencial/hoje-por-hora";
 import { KPI_META, type KpiKind } from "@/lib/kpi-drilldown";
 
 import GlobalFilterControls from "@/components/layout/GlobalFilterControls";
@@ -78,7 +79,6 @@ import TopProdutosMarca from "@/components/gerencial/TopProdutosMarca";
 import MovementsPanels from "@/components/gerencial/MovementsPanels";
 import AttentionQueue from "@/components/gerencial/AttentionQueue";
 import MetaHero from "@/components/gerencial/MetaHero";
-import HojeAteAHora from "@/components/gerencial/HojeAteAHora";
 import MarcasMeta, { type MetaDaMarca } from "@/components/gerencial/MarcasMeta";
 import { useMetasDoMes } from "@/hooks/useMetasDoMes";
 import {
@@ -263,7 +263,10 @@ function GerencialInner() {
   );
 
   const brands = sources.brands.data ?? [];
-  const matrix = useMemo(() => buildBrandChannelMatrix(brands, filters.channels), [brands, filters.channels]);
+  const matrix = useMemo(
+    () => buildBrandChannelMatrix(brands, filters.channels, comparar),
+    [brands, filters.channels, comparar],
+  );
   const movements = useMemo(() => buildMovements(brands, filters.channels), [brands, filters.channels]);
   const concentration = useMemo(() => buildConcentration(brands), [brands]);
 
@@ -359,24 +362,39 @@ function GerencialInner() {
       }),
     [filters.channels, setFilters],
   );
-  // Tendencia de fechamento do dia por marca (so' com "Hoje"): mesma fonte do
-  // bloco "Hoje ate' HHh". Sem a tabela por hora publicada, nada aparece.
-  const [tendenciaDoDia, setTendenciaDoDia] = useState<Record<string, { projecao: number; ontemDia: number }> | null>(null);
+  // "Hoje" (VENDAS-POR-HORA-1): a comparacao justa e' com ontem ATE' A MESMA
+  // HORA, nos cards de sempre, e a tendencia de fechamento por marca. Sem a
+  // tabela por hora publicada, os cards seguem sem comparacao, como antes.
+  const [hojePorHora, setHojePorHora] = useState<HojePorHora | null>(null);
   useEffect(() => {
-    setTendenciaDoDia(null);
+    setHojePorHora(null);
     if (!diaEmAndamento || sources.demoMode) return;
     let vivo = true;
     fetchHojePorHora(filters.channels, filters.brands).then((d) => {
-      if (!vivo || !d?.disponivel) return;
-      const mapa: Record<string, { projecao: number; ontemDia: number }> = {};
-      for (const m of d.por_marca ?? []) if (m.projecao != null) mapa[m.brand] = { projecao: m.projecao, ontemDia: m.ontem_dia };
-      setTendenciaDoDia(mapa);
+      if (vivo) setHojePorHora(d);
     });
     return () => {
       vivo = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- filterIdentity cobre os filtros
   }, [filterIdentity, diaEmAndamento, sources.demoMode, sources.retryKey]);
+  const compHoje = filters.compare ? comparacaoDeHoje(hojePorHora) : null;
+  const tendenciaDoDia = useMemo(() => {
+    if (!hojePorHora?.disponivel) return null;
+    const mapa: Record<string, { projecao: number; ontemDia: number }> = {};
+    for (const m of hojePorHora.por_marca ?? []) if (m.projecao != null) mapa[m.brand] = { projecao: m.projecao, ontemDia: m.ontem_dia };
+    return mapa;
+  }, [hojePorHora]);
+  const kpisDaTela = useMemo(() => {
+    if (!compHoje) return kpis;
+    const ref = (pct: number | null) =>
+      pct != null ? { deltaPct: pct, deltaTone: "higher_is_better" as const, reference: compHoje.rotulo } : {};
+    return kpis.map((k) =>
+      k.key === "orders" ? { ...k, ...ref(compHoje.pedidosPct) } : k.key === "avg_ticket" ? { ...k, ...ref(compHoje.ticketPct) } : k,
+    );
+  }, [kpis, compHoje]);
+  const variacaoDoCanal = (atual: number | null | undefined, antes: number | null | undefined) =>
+    atual != null && antes != null && antes > 0 ? ((atual - antes) / antes) * 100 : null;
   const fullNormal =
     shareFull && overview
       ? divisaoFull({ total: overview.gmv, ml: overview.ml_gmv, shopee: overview.shopee_gmv }, shareFull)
@@ -592,20 +610,25 @@ function GerencialInner() {
         loading={overviewStatus.loading}
         error={overviewStatus.error}
         gmv={overview?.gmv ?? null}
-        prevGmv={overview?.prev_gmv ?? null}
-        momPct={overview?.gmv_mom_pct ?? null}
-        compareActive={comparar}
+        prevGmv={compHoje ? null : overview?.prev_gmv ?? null}
+        momPct={compHoje ? compHoje.gmvPct : overview?.gmv_mom_pct ?? null}
+        compareActive={comparar || compHoje != null}
+        rotuloComparacao={compHoje?.rotulo ?? null}
         channels={filters.channels}
         gmvByChannel={{
           tiktok: overview?.tiktok_gmv ?? null,
           ml: overview?.ml_gmv ?? null,
           shopee: overview?.shopee_gmv ?? null,
         }}
-        prevGmvByChannel={{
-          tiktok: overview?.prev_tiktok_gmv ?? null,
-          ml: overview?.prev_ml_gmv ?? null,
-          shopee: overview?.prev_shopee_gmv ?? null,
-        }}
+        varGmvByChannel={
+          compHoje
+            ? compHoje.porCanal
+            : {
+                tiktok: variacaoDoCanal(overview?.tiktok_gmv, overview?.prev_tiktok_gmv),
+                ml: variacaoDoCanal(overview?.ml_gmv, overview?.prev_ml_gmv),
+                shopee: variacaoDoCanal(overview?.shopee_gmv, overview?.prev_shopee_gmv),
+              }
+        }
         mesMeta={mesMeta}
         diaMeta={diaMeta}
         hoje={hoje}
@@ -623,12 +646,8 @@ function GerencialInner() {
         fullNormal={fullNormal}
       />
 
-      {/* VENDAS-POR-HORA-1: com "Hoje", os canais cortados na mesma hora cheia
-          e comparados com ontem e a semana passada ate' a mesma hora. */}
-      {diaEmAndamento && <HojeAteAHora channels={filters.channels} brands={filters.brands} />}
-
       <KpiBand
-        kpis={kpis}
+        kpis={kpisDaTela}
         loading={overviewStatus.loading}
         error={overviewStatus.error}
         onOpen={(key) => setDialog({ kind: "kpi", key })}

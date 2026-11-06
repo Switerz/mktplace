@@ -1,12 +1,12 @@
 /**
  * VENDAS-POR-HORA-1 — o "Hoje" padronizado da Gerencial
- * (`src/lib/gerencial/hoje-por-hora.ts` e a fiacao do bloco na pagina).
+ * (`src/lib/gerencial/hoje-por-hora.ts` e a fiacao nos cards da pagina).
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { canaisQueLimitam, nomeDoCanal, rotuloDoCorte, variacao } from "../src/lib/gerencial/hoje-por-hora.ts";
+import { comparacaoDeHoje, rotuloDoCorte, variacao } from "../src/lib/gerencial/hoje-por-hora.ts";
 
 test("rotulo do corte: 'até 13h'; sem hora fechada, nada", () => {
   assert.equal(rotuloDoCorte(13), "até 13h");
@@ -20,36 +20,40 @@ test("variacao contra a base; sem base nao inventa 100%", () => {
   assert.equal(variacao(10, 0), null);
 });
 
-test("quem limita o corte: o canal parado na hora do corte quando outro ja' passou", () => {
-  const canais = [
-    { channel: "tiktok" as const, fonte_ate: null, horas_fechadas_hoje: 13 },
-    { channel: "ml" as const, fonte_ate: null, horas_fechadas_hoje: 13 },
-    { channel: "shopee" as const, fonte_ate: null, horas_fechadas_hoje: 11 },
-  ];
-  assert.deepEqual(canaisQueLimitam({ canais, corte_hora: 11 }), ["shopee"]);
-  assert.deepEqual(canaisQueLimitam({ canais: canais.slice(0, 2), corte_hora: 13 }), []);
-  assert.deepEqual(canaisQueLimitam({ canais: canais.slice(2), corte_hora: 11 }), []);
-  assert.equal(nomeDoCanal("ml"), "Mercado Livre");
+const bloco = (gmv: number, pedidos: number) => ({ gmv, pedidos, ticket: pedidos ? gmv / pedidos : null });
+const resposta = {
+  disponivel: true, dia: "2026-11-06", corte_hora: 14, canais: [], limitacoes: [],
+  hoje: bloco(1150, 23), ontem: bloco(1000, 25), semana_passada: bloco(900, 20),
+  por_canal: [{ channel: "ml" as const, hoje: bloco(600, 10), ontem: bloco(500, 10), semana_passada: bloco(0, 0) }],
+};
+
+test("comparacao de hoje: ontem ate' a mesma hora, nos numeros dos cards", () => {
+  const c = comparacaoDeHoje(resposta)!;
+  assert.equal(c.rotulo, "vs ontem até 14h");
+  assert.equal(c.gmvPct, 15);
+  assert.equal(c.pedidosPct, -8);
+  assert.equal(Math.round(c.ticketPct! * 10) / 10, 25);
+  assert.equal(c.porCanal.ml, 20);
+});
+
+test("comparacao de hoje: sem tabela ou sem hora fechada, nada; Kokeshi fora vira aviso no rotulo", () => {
+  assert.equal(comparacaoDeHoje(null), null);
+  assert.equal(comparacaoDeHoje({ ...resposta, disponivel: false }), null);
+  assert.equal(comparacaoDeHoje({ ...resposta, corte_hora: 0 }), null);
+  const k = comparacaoDeHoje({ ...resposta, limitacoes: ["Kokeshi na Shopee fica fora do corte por hora: ..."] })!;
+  assert.equal(k.rotulo, "vs ontem até 14h (sem Kokeshi Shopee)");
 });
 
 const pagina = readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8");
-const bloco = readFileSync(new URL("../src/components/gerencial/HojeAteAHora.tsx", import.meta.url), "utf8");
 const cliente = readFileSync(new URL("../src/lib/api-client.ts", import.meta.url), "utf8");
 
-test("o bloco so' aparece com o periodo 'Hoje' e recebe canal e marca do filtro", () => {
-  assert.match(
-    pagina,
-    /\{diaEmAndamento && <HojeAteAHora channels=\{filters\.channels\} brands=\{filters\.brands\} \/>\}/,
-  );
+test("sem card proprio: a pagina usa a comparacao de hoje nos cards de sempre", () => {
+  assert.doesNotMatch(pagina, /HojeAteAHora/);
+  assert.match(pagina, /comparacaoDeHoje\(/);
 });
 
-test("o bloco busca /hoje-por-hora sem o cache de 5 min", () => {
-  assert.match(bloco, /fetchHojePorHora\(channels, brands\)/);
+test("busca /hoje-por-hora sem o cache de 5 min", () => {
   const fn = cliente.slice(cliente.indexOf("export async function fetchHojePorHora"));
   assert.match(fn, /apiFetch<HojePorHora>\(`\/api\/v1\/performance\/hoje-por-hora\?\$\{qs\.toString\(\)\}`\)/);
   assert.doesNotMatch(fn.slice(0, fn.indexOf("\n}\n")), /withCache/);
-});
-
-test("limitacao (Kokeshi na Shopee) aparece no bloco, nao some", () => {
-  assert.match(bloco, /d\.limitacoes\.map/);
 });

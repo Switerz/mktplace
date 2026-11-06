@@ -62,8 +62,10 @@ interface Props {
   compareActive: boolean;
   channels: Marketplace[];
   gmvByChannel: Record<Marketplace, number | null>;
-  /** GMV do periodo anterior por canal; so' com a comparacao ligada. */
-  prevGmvByChannel?: Record<Marketplace, number | null> | null;
+  /** Variacao % de cada canal contra a referencia; so' com a comparacao ligada. */
+  varGmvByChannel?: Partial<Record<Marketplace, number | null>> | null;
+  /** Texto da referencia sem valor "antes" (ex.: "vs ontem até 14h"). */
+  rotuloComparacao?: string | null;
   /** Mes comparavel com a meta; `null` = periodo nao e' um mes. */
   mesMeta: string | null;
   /** Dia comparavel com a meta do dia; `null` = periodo nao e' um dia so'. */
@@ -109,7 +111,7 @@ export default function MetaHero(props: Props) {
           <Divisao
             channels={props.channels}
             gmvByChannel={props.gmvByChannel}
-            prevGmvByChannel={props.compareActive ? props.prevGmvByChannel ?? null : null}
+            varGmvByChannel={props.compareActive ? props.varGmvByChannel ?? null : null}
             total={gmv}
           />
           {!error && props.fullNormal && gmv ? <DivisaoFullNormal d={props.fullNormal} total={gmv} /> : null}
@@ -124,7 +126,7 @@ export default function MetaHero(props: Props) {
   );
 }
 
-function Resultado({ periodLabel, gmv, prevGmv, momPct, compareActive, loading, error, ultimoDia, onOpenGmv, aviso }: Props) {
+function Resultado({ periodLabel, gmv, prevGmv, momPct, compareActive, loading, error, ultimoDia, onOpenGmv, aviso, rotuloComparacao }: Props) {
   const ate = ultimoDia ? ` · até ${ultimoDia.slice(8, 10)}/${ultimoDia.slice(5, 7)}` : "";
   return (
     <div className="min-w-0">
@@ -161,7 +163,7 @@ function Resultado({ periodLabel, gmv, prevGmv, momPct, compareActive, loading, 
                 )}
                 {fmtPctBr(momPct)}
               </span>
-              {prevGmv != null ? `antes ${fmtCompacto(prevGmv)}` : "vs anterior"}
+              {prevGmv != null ? `antes ${fmtCompacto(prevGmv)}` : rotuloComparacao ?? "vs anterior"}
             </p>
           )}
           <button
@@ -400,12 +402,12 @@ function SeloDoDia({ progressoDia, metasHref }: { progressoDia: ProgressoDia | n
 function Divisao({
   channels,
   gmvByChannel,
-  prevGmvByChannel,
+  varGmvByChannel,
   total,
 }: {
   channels: Marketplace[];
   gmvByChannel: Record<Marketplace, number | null>;
-  prevGmvByChannel: Record<Marketplace, number | null> | null;
+  varGmvByChannel: Partial<Record<Marketplace, number | null>> | null;
   total: number | null;
 }) {
   const partes = channels
@@ -424,7 +426,7 @@ function Divisao({
           <li key={c} className="inline-flex items-center gap-1.5">
             <span aria-hidden="true" className={`h-2 w-2 rounded-full ${PONTO[c]}`} />
             {CHANNEL_LABEL[c]} {fmtCompacto(v)} · {Math.round((v / total) * 100)}%
-            <VsAnterior atual={v} anterior={prevGmvByChannel?.[c] ?? null} />
+            <Variacao pct={varGmvByChannel?.[c] ?? null} />
           </li>
         ))}
       </ul>
@@ -432,12 +434,11 @@ function Divisao({
   );
 }
 
-/** "▲ 12%" contra o periodo anterior; sem base, nada. */
-function VsAnterior({ atual, anterior }: { atual: number; anterior: number | null }) {
-  if (anterior == null || anterior <= 0) return null;
-  const pct = ((atual - anterior) / anterior) * 100;
+/** "▲ 12%" contra a referencia; sem base, nada. */
+function Variacao({ pct }: { pct: number | null }) {
+  if (pct == null) return null;
   return (
-    <span className={`font-semibold ${pct >= 0 ? "text-ok-ink" : "text-crit-ink"}`} title={`antes ${fmtCompacto(anterior)}`}>
+    <span className={`font-semibold ${pct >= 0 ? "text-ok-ink" : "text-crit-ink"}`}>
       {pct >= 0 ? "▲" : "▼"} {fmtPctBr(Math.abs(pct)).replace("+", "")}
     </span>
   );

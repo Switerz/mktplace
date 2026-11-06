@@ -142,3 +142,12 @@ def test_tendencia_por_marca_usa_hoje_e_ontem_no_mesmo_corte():
     apice, lescent = res["por_marca"]
     assert apice == {"brand": "apice", "hoje": 500.0, "ontem_mesma_hora": 400.0, "ontem_dia": 1000.0, "projecao": 1250.0}
     assert lescent["projecao"] is None  # ontem sem venda: sem projecao
+
+
+def test_kokeshi_sem_tendencia_quando_a_shopee_esta_no_filtro():
+    marcas = [{"brand": "kokeshi", "dia": HOJE, "gmv_corte": 500, "gmv_dia": 500},
+              {"brand": "kokeshi", "dia": HOJE - timedelta(days=1), "gmv_corte": 400, "gmv_dia": 1000}]
+    com_shopee = S.get_hoje_por_hora(SessaoFalsa({2: brt(13, 10), 3: brt(13, 3)}, [], marcas=marcas), [2, 3], None, agora=AGORA)
+    so_ml = S.get_hoje_por_hora(SessaoFalsa({2: brt(13, 10)}, [], marcas=marcas), [2], None, agora=AGORA)
+    assert com_shopee["por_marca"] == []
+    assert so_ml["por_marca"][0]["projecao"] == 1250.0
