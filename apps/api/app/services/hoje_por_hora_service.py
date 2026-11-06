@@ -138,7 +138,10 @@ def get_hoje_por_hora(db: Session, mkt_ids: list[int], brand_keys: Optional[list
         "brand": b, "hoje": round(m["hoje"], 2), "ontem_mesma_hora": round(m["ontem_ate"], 2),
         "ontem_dia": round(m["ontem_dia"], 2),
         "projecao": projetar_fechamento(m["hoje"], m["ontem_ate"], m["ontem_dia"]),
-    } for b, m in sorted(marcas.items())]
+    } for b, m in sorted(marcas.items())
+        # Kokeshi na Shopee nao tem hora de pedido: a projecao veria so' o resto
+        # dela e ficaria ABAIXO do que ja' vendeu. Sem tendencia, nunca uma errada.
+        if not (b == "kokeshi" and SHOPEE_ID in mkt_ids)]
 
     def total(dia: date, ids: list[int]) -> dict:
         gmv = sum(float(somas.get((dia, m), (0, 0))[0] or 0) for m in ids)
