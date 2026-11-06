@@ -256,10 +256,14 @@ function BarraDaMeta({ progresso: p, mesMeta, comCurva, canaisForaDaMeta }: Prop
       {p.porDiaNecessario != null && (
         <p
           className="mt-1.5 text-xs text-ink-muted tabular-nums"
-          title={`Faltam ${fmtCompacto(p.falta)} em ${p.diasRestantes} ${p.diasRestantes === 1 ? "dia" : "dias"}`}
+          title={
+            comCurva
+              ? `Faltam ${fmtCompacto(p.falta)} em ${p.diasRestantes} ${p.diasRestantes === 1 ? "dia" : "dias"}. Dia normal = o que falta ÷ peso dos dias que restam na curva; dias de evento pedem mais.`
+              : `Faltam ${fmtCompacto(p.falta)} em ${p.diasRestantes} ${p.diasRestantes === 1 ? "dia" : "dias"}`
+          }
         >
           faltam <b className="font-semibold text-ink">{fmtCompacto(p.falta)}</b> · {fmtCompacto(p.porDiaNecessario)}/dia
-          {comCurva ? " em média" : ""}
+          {comCurva ? " normal" : ""}
         </p>
       )}
     </div>

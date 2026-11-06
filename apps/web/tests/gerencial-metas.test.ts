@@ -211,3 +211,20 @@ test("progressoMeta sem curva: plano linear, mesma projecao de antes", () => {
   assert.ok(Math.abs(p.planoAteData - (20_000_000 * 28) / 31) < 1e-6);
   assert.ok(Math.abs(p.projecao! - 21_708_613.6) < 1);
 });
+
+test("porDiaNecessario pela curva = falta / peso dos dias restantes (Nova meta dia normal)", async () => {
+  const { fracaoDoEscopo, metaDiaNormalDoEscopo } = await import("../src/lib/metas-curva.ts");
+  // Meta ficticia, so' Shopee. Pesos da aba Curva: total 39,26; 01–05/11 = 4,99.
+  const celulas = [{ brand: "apice", channel: "shopee", meta_gmv: 1_000_000 }];
+  const p = progressoMeta({
+    meta: 1_000_000,
+    realizado: 100_000,
+    mes: "2026-11",
+    hoje: "2026-11-06",
+    ultimoDia: "2026-11-05",
+    fracaoAte: fracaoDoEscopo(celulas, "2026-11"),
+    metaDiaNormal: metaDiaNormalDoEscopo(celulas, "2026-11"),
+  })!;
+  assert.ok(Math.abs(p.porDiaNecessario! - 900_000 / (39.26 - 4.99)) < 1e-6);
+  assert.ok(Math.abs(metaDiaNormalDoEscopo(celulas, "2026-11") - 1_000_000 / 39.26) < 1e-6);
+});
