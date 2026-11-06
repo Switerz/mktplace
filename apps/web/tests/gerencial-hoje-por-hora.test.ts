@@ -57,3 +57,20 @@ test("busca /hoje-por-hora sem o cache de 5 min", () => {
   assert.match(fn, /apiFetch<HojePorHora>\(`\/api\/v1\/performance\/hoje-por-hora\?\$\{qs\.toString\(\)\}`\)/);
   assert.doesNotMatch(fn.slice(0, fn.indexOf("\n}\n")), /withCache/);
 });
+
+test("tendencia so' com os canais mostrados: com TikTok fora do valor, TikTok fica fora da conta", async () => {
+  const { tendenciaNosCanais } = await import("../src/lib/gerencial/hoje-por-hora.ts");
+  const t = (hoje: number, ate: number, dia: number) => ({ hoje, ontem_mesma_hora: ate, ontem_dia: dia, projecao: null });
+  const m = {
+    brand: "barbours", ...t(160, 100, 340),
+    por_canal: [
+      { channel: "tiktok" as const, ...t(100, 50, 200) },
+      { channel: "ml" as const, ...t(40, 30, 90) },
+      { channel: "shopee" as const, ...t(20, 20, 50) },
+    ],
+  };
+  // ML + Shopee: 60 x 140 / 50 = 168, contra 140 de ontem.
+  assert.deepEqual(tendenciaNosCanais(m, ["ml", "shopee"]), { projecao: 168, ontemDia: 140 });
+  assert.equal(tendenciaNosCanais({ ...m, por_canal: [] }, ["ml"]), null);
+  assert.equal(tendenciaNosCanais(m, ["ml", "shopee", "tiktok"])!.ontemDia, 340);
+});

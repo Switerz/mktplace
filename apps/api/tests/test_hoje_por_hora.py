@@ -133,20 +133,25 @@ def test_projecao_pelo_ritmo_de_ontem():
 def test_tendencia_por_marca_usa_hoje_e_ontem_no_mesmo_corte():
     ontem = HOJE - timedelta(days=1)
     db = SessaoFalsa(
-        fontes={2: brt(13, 10)}, vendas=[],
-        marcas=[{"brand": "apice", "dia": HOJE, "gmv_corte": 500, "gmv_dia": 500},
-                {"brand": "apice", "dia": ontem, "gmv_corte": 400, "gmv_dia": 1000},
-                {"brand": "lescent", "dia": HOJE, "gmv_corte": 80, "gmv_dia": 80}],
+        fontes={1: brt(13, 35), 2: brt(13, 10)}, vendas=[],
+        marcas=[{"brand": "apice", "dia": HOJE, "marketplace_id": 2, "gmv_corte": 500, "gmv_dia": 500},
+                {"brand": "apice", "dia": ontem, "marketplace_id": 2, "gmv_corte": 400, "gmv_dia": 1000},
+                {"brand": "apice", "dia": HOJE, "marketplace_id": 1, "gmv_corte": 300, "gmv_dia": 300},
+                {"brand": "apice", "dia": ontem, "marketplace_id": 1, "gmv_corte": 100, "gmv_dia": 200},
+                {"brand": "lescent", "dia": HOJE, "marketplace_id": 2, "gmv_corte": 80, "gmv_dia": 80}],
     )
-    res = S.get_hoje_por_hora(db, [2], None, agora=AGORA)
+    res = S.get_hoje_por_hora(db, [1, 2], None, agora=AGORA)
     apice, lescent = res["por_marca"]
-    assert apice == {"brand": "apice", "hoje": 500.0, "ontem_mesma_hora": 400.0, "ontem_dia": 1000.0, "projecao": 1250.0}
+    # Total: (500+300) x (1000+200) / (400+100) = 1920; por canal, cada um no proprio ritmo.
+    assert (apice["hoje"], apice["ontem_mesma_hora"], apice["ontem_dia"], apice["projecao"]) == (800.0, 500.0, 1200.0, 1920.0)
+    por_canal = {c["channel"]: c["projecao"] for c in apice["por_canal"]}
+    assert por_canal == {"tiktok": 600.0, "ml": 1250.0}
     assert lescent["projecao"] is None  # ontem sem venda: sem projecao
 
 
 def test_kokeshi_sem_tendencia_quando_a_shopee_esta_no_filtro():
-    marcas = [{"brand": "kokeshi", "dia": HOJE, "gmv_corte": 500, "gmv_dia": 500},
-              {"brand": "kokeshi", "dia": HOJE - timedelta(days=1), "gmv_corte": 400, "gmv_dia": 1000}]
+    marcas = [{"brand": "kokeshi", "dia": HOJE, "marketplace_id": 2, "gmv_corte": 500, "gmv_dia": 500},
+              {"brand": "kokeshi", "dia": HOJE - timedelta(days=1), "marketplace_id": 2, "gmv_corte": 400, "gmv_dia": 1000}]
     com_shopee = S.get_hoje_por_hora(SessaoFalsa({2: brt(13, 10), 3: brt(13, 3)}, [], marcas=marcas), [2, 3], None, agora=AGORA)
     so_ml = S.get_hoje_por_hora(SessaoFalsa({2: brt(13, 10)}, [], marcas=marcas), [2], None, agora=AGORA)
     assert com_shopee["por_marca"] == []

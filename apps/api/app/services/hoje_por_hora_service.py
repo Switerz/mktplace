@@ -116,7 +116,7 @@ def get_hoje_por_hora(db: Session, mkt_ids: list[int], brand_keys: Optional[list
     # Tendencia de fechamento por marca: hoje e ontem ate' o corte, e ontem inteiro.
     por_marca_linhas = db.execute(text(f"""
         -- por_marca
-        SELECT l.brand_key AS brand, h.dia,
+        SELECT l.brand_key AS brand, h.dia, h.marketplace_id,
                SUM(h.gmv) FILTER (WHERE h.hora < :corte) AS gmv_corte,
                SUM(h.gmv) AS gmv_dia
         FROM {TABELA} h
@@ -124,21 +124,29 @@ def get_hoje_por_hora(db: Session, mkt_ids: list[int], brand_keys: Optional[list
         WHERE h.dia = ANY(:dias)
           AND h.marketplace_id = ANY(:mkt_ids)
           AND (CAST(:brands AS text[]) IS NULL OR l.brand_key = ANY(CAST(:brands AS text[])))
-        GROUP BY 1, 2
+        GROUP BY 1, 2, 3
     """), {"dias": [dias["hoje"], dias["ontem"]], "corte": corte, "mkt_ids": mkt_ids,
            "brands": brand_keys}).mappings().all() if corte > 0 else []
-    marcas: dict[str, dict] = {}
+    # Por marca E canal: quem mostra a tendencia soma so' os canais do valor
+    # ao lado dela (ex.: so' os canais com meta), nunca um conjunto diferente.
+    marcas: dict[str, dict[int, dict]] = {}
     for r in por_marca_linhas:
-        m = marcas.setdefault(r["brand"], {"hoje": 0.0, "ontem_ate": 0.0, "ontem_dia": 0.0})
+        m = marcas.setdefault(r["brand"], {}).setdefault(
+            r["marketplace_id"], {"hoje": 0.0, "ontem_ate": 0.0, "ontem_dia": 0.0})
         if r["dia"] == dias["hoje"]:
             m["hoje"] = float(r["gmv_corte"] or 0)
         else:
             m["ontem_ate"], m["ontem_dia"] = float(r["gmv_corte"] or 0), float(r["gmv_dia"] or 0)
+
+    def _tendencia(partes: list[dict]) -> dict:
+        hoje_, ate, dia = (sum(p[k] for p in partes) for k in ("hoje", "ontem_ate", "ontem_dia"))
+        return {"hoje": round(hoje_, 2), "ontem_mesma_hora": round(ate, 2), "ontem_dia": round(dia, 2),
+                "projecao": projetar_fechamento(hoje_, ate, dia)}
+
     por_marca = [{
-        "brand": b, "hoje": round(m["hoje"], 2), "ontem_mesma_hora": round(m["ontem_ate"], 2),
-        "ontem_dia": round(m["ontem_dia"], 2),
-        "projecao": projetar_fechamento(m["hoje"], m["ontem_ate"], m["ontem_dia"]),
-    } for b, m in sorted(marcas.items())
+        "brand": b, **_tendencia(list(canais.values())),
+        "por_canal": [{"channel": CANAL_POR_ID[mk], **_tendencia([p])} for mk, p in sorted(canais.items())],
+    } for b, canais in sorted(marcas.items())
         # Kokeshi na Shopee nao tem hora de pedido: a projecao veria so' o resto
         # dela e ficaria ABAIXO do que ja' vendeu. Sem tendencia, nunca uma errada.
         if not (b == "kokeshi" and SHOPEE_ID in mkt_ids)]

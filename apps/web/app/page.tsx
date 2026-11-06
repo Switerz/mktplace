@@ -371,12 +371,10 @@ function GerencialInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- filterIdentity cobre os filtros
   }, [filterIdentity, diaEmAndamento, sources.demoMode, sources.retryKey]);
   const compHoje = filters.compare ? comparacaoDeHoje(hojePorHora) : null;
-  const tendenciaDoDia = useMemo(() => {
-    if (!hojePorHora?.disponivel) return null;
-    const mapa: Record<string, { projecao: number; ontemDia: number }> = {};
-    for (const m of hojePorHora.por_marca ?? []) if (m.projecao != null) mapa[m.brand] = { projecao: m.projecao, ontemDia: m.ontem_dia };
-    return mapa;
-  }, [hojePorHora]);
+  const tendenciaDoDia = useMemo(
+    () => (hojePorHora?.disponivel ? Object.fromEntries((hojePorHora.por_marca ?? []).map((m) => [m.brand, m])) : null),
+    [hojePorHora],
+  );
   const kpisDaTela = useMemo(() => {
     if (!compHoje) return kpis;
     const ref = (pct: number | null) =>

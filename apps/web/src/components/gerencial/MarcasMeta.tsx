@@ -29,6 +29,7 @@ import type { StatusDia } from "@/lib/metas-curva";
 import { MARCAS, fmtCompacto } from "@/lib/metas";
 import { fmtPctBr } from "@/lib/formatters";
 import { fullDaMarca, type FullDaMarca } from "@/lib/gerencial/divisao-full";
+import { tendenciaNosCanais, type MarcaTendencia } from "@/lib/gerencial/hoje-por-hora";
 import InfoDica from "@/components/ui/InfoDica";
 
 const CHIP: Record<StatusMeta | StatusDia, string> = {
@@ -62,8 +63,8 @@ interface Props {
   loading: boolean;
   error: boolean;
   brandHref: (brand: string) => string;
-  /** Com "Hoje": onde cada marca tende a fechar o dia, e o dia inteiro de ontem. */
-  tendenciaDoDia?: Record<string, { projecao: number; ontemDia: number }> | null;
+  /** Com "Hoje": a tendencia de fechamento de cada marca, aberta por canal. */
+  tendenciaDoDia?: Record<string, MarcaTendencia> | null;
   /** Proporcao Full por marca e canal; ausente = uma barra so', sem divisao. */
   fullPorMarca?: Record<string, { ml?: number | null; shopee?: number | null }> | null;
 }
@@ -244,7 +245,10 @@ export default function MarcasMeta({
                         {fmtPctBr(b.mom_pct)}
                       </span>
                     ) : null}
-                    <TendenciaDoDia t={tendenciaDoDia?.[b.brand] ?? null} />
+                    {/* Mesmos canais do valor ao lado: com meta, so' os que tem meta. */}
+                    <TendenciaDoDia
+                      t={tendenciaDoDia?.[b.brand] ? tendenciaNosCanais(tendenciaDoDia[b.brand], canaisDaBarra(b)) : null}
+                    />
                   </span>
                 </Link>
               </li>
