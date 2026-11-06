@@ -12,6 +12,10 @@
  *
  * Marca com meta (METAS-DIARIAS-1): a barra so' soma os canais que tem meta,
  * para barra e traco medirem a mesma coisa (TikTok sem meta fica fora).
+ *
+ * Com a proporcao Full por marca (`fullPorMarca`), cada marca ganha duas
+ * barras, Full e sem Full (mais "sem dado" quando um canal nao tem a medida),
+ * e o traco sai: a meta continua no chip. A legenda filtra o canal.
  */
 import Link from "next/link";
 
@@ -23,6 +27,8 @@ import { GMV_DO_CANAL, type StatusMeta } from "@/lib/gerencial/meta-progress";
 import type { StatusDia } from "@/lib/metas-curva";
 import { MARCAS, fmtCompacto } from "@/lib/metas";
 import { fmtPctBr } from "@/lib/formatters";
+import { fullDaMarca, type FullDaMarca } from "@/lib/gerencial/divisao-full";
+import { ALL_MARKETPLACES } from "@/lib/marketplace-filter";
 import InfoDica from "@/components/ui/InfoDica";
 
 const CHIP: Record<StatusMeta | StatusDia, string> = {
@@ -58,6 +64,10 @@ interface Props {
   brandHref: (brand: string) => string;
   /** Com "Hoje": onde cada marca tende a fechar o dia, e o dia inteiro de ontem. */
   tendenciaDoDia?: Record<string, { projecao: number; ontemDia: number }> | null;
+  /** Proporcao Full por marca e canal; ausente = uma barra so', sem divisao. */
+  fullPorMarca?: Record<string, { ml?: number | null; shopee?: number | null }> | null;
+  /** Clique num canal da legenda (filtra a pagina por ele). */
+  onCanal?: (c: Marketplace) => void;
 }
 
 export default function MarcasMeta({
@@ -70,6 +80,8 @@ export default function MarcasMeta({
   error,
   brandHref,
   tendenciaDoDia = null,
+  fullPorMarca = null,
+  onCanal,
 }: Props) {
   // Marca com meta e sem linha em `/brands` (nada vendido no recorte) entra
   // com tudo zerado: mostrar 0% da meta e' o ponto, nao esconder a marca.
@@ -85,6 +97,22 @@ export default function MarcasMeta({
   const referencia = (b: BrandRow) =>
     progressoPorMarca[b.brand]?.meta ?? (compareActive && b.total_gmv_prev > 0 ? b.total_gmv_prev : null);
   const escala = Math.max(1, ...linhas.map((b) => Math.max(valor(b), referencia(b) ?? 0)));
+  const canaisDaBarra = (b: BrandRow) => channels.filter((c) => canaisDa(b).includes(c));
+  const divisao = (b: BrandRow): FullDaMarca | null =>
+    fullPorMarca
+      ? fullDaMarca(
+          Object.fromEntries(canaisDaBarra(b).map((c) => [c, b[GMV_DO_CANAL[c]] ?? 0])),
+          fullPorMarca[b.brand] ?? {},
+        )
+      : null;
+  const soma = (p: Partial<Record<Marketplace, number>>) => Object.values(p).reduce((a, v) => a + (v ?? 0), 0);
+  const escalaFull = Math.max(
+    1,
+    ...linhas.map((b) => {
+      const d = divisao(b);
+      return d ? Math.max(soma(d.full), soma(d.semFull), soma(d.semDado)) : 0;
+    }),
+  );
 
   return (
     <section aria-labelledby="marcas-meta-titulo" className="flex h-full flex-col rounded-xl border border-line bg-surface p-5">
@@ -97,19 +125,42 @@ export default function MarcasMeta({
             <InfoDica
               texto={
                 algumaMeta
-                  ? "GMV no período; com meta, só os canais que têm meta. Traço = meta da marca (ou período anterior, sem meta)."
-                  : "GMV no período. Traço = período anterior."
+                  ? fullPorMarca
+                    ? "GMV no período; com meta, só os canais que têm meta. Full = ML Full + Shopee FBS, pela proporção medida até ontem; TikTok entra em sem Full. Clique num canal para ver só ele."
+                    : "GMV no período; com meta, só os canais que têm meta. Traço = meta da marca (ou período anterior, sem meta). Clique num canal para ver só ele."
+                  : fullPorMarca
+                    ? "GMV no período. Full = ML Full + Shopee FBS, pela proporção medida até ontem; TikTok entra em sem Full. Clique num canal para ver só ele."
+                    : "GMV no período. Traço = período anterior. Clique num canal para ver só ele."
               }
             />
           </div>
         </div>
-        <ul className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-ink-muted">
-          {channels.map((c) => (
-            <li key={c} className="inline-flex items-center gap-1.5">
-              <span aria-hidden="true" className={`h-2 w-2 rounded-full ${PONTO[c]}`} />
-              {CHANNEL_LABEL[c]}
-            </li>
-          ))}
+        <ul className="flex flex-wrap gap-1 text-xs" aria-label="Filtrar por canal">
+          {ALL_MARKETPLACES.map((c) => {
+            const ativo = channels.includes(c);
+            const so = ativo && channels.length === 1;
+            return (
+              <li key={c}>
+                <button
+                  type="button"
+                  onClick={() => onCanal?.(c)}
+                  disabled={!onCanal}
+                  aria-pressed={so}
+                  title={so ? "Voltar a todos os canais" : `Ver só ${CHANNEL_LABEL[c]}`}
+                  className={`inline-flex min-h-8 items-center gap-1.5 rounded-full px-2.5 transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                    so
+                      ? "bg-surface font-semibold text-ink ring-1 ring-line-strong"
+                      : ativo
+                        ? "text-ink-muted hover:bg-raised"
+                        : "text-ink-faint hover:bg-raised"
+                  }`}
+                >
+                  <span aria-hidden="true" className={`h-2 w-2 rounded-full ${PONTO[c]} ${ativo ? "" : "opacity-40"}`} />
+                  {CHANNEL_LABEL[c]}
+                </button>
+              </li>
+            );
+          })}
         </ul>
       </div>
 
@@ -128,31 +179,45 @@ export default function MarcasMeta({
           {linhas.map((b) => {
             const p = progressoPorMarca[b.brand] ?? null;
             const ref = referencia(b);
+            const d = divisao(b);
+            const comFull = d ? soma(d.full) + soma(d.semFull) : 0;
+            const pctFull = d && comFull > 0 ? soma(d.full) / comFull : null;
             return (
               <li key={b.brand} className="border-t border-line first:border-t-0">
                 <Link
                   href={brandHref(b.brand)}
-                  className="group grid min-h-11 grid-cols-[88px_1fr_auto] items-center gap-3 rounded-lg px-1.5 py-2.5 transition-colors duration-200 hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                  className={`group grid min-h-11 ${d ? "grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1.5" : "grid-cols-[88px_1fr_auto] gap-3"} items-center rounded-lg px-1.5 py-2.5 transition-colors duration-200 hover:bg-raised focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent`}
                 >
                   <span className="truncate text-sm font-semibold text-ink transition-transform duration-200 ease-out group-hover:translate-x-0.5 motion-reduce:transition-none motion-reduce:group-hover:translate-x-0">
                     {b.label}
                   </span>
-                  <span className="relative h-2.5 rounded-full bg-raised" aria-hidden="true">
-                    <span
-                      className="tc-barra absolute inset-y-0 left-0 flex overflow-hidden rounded-full"
-                      style={{ width: `${(valor(b) / escala) * 100}%` }}
-                    >
-                      {channels.filter((c) => canaisDa(b).includes(c)).map((c) => {
-                        const v = b[GMV_DO_CANAL[c]] ?? 0;
-                        return v > 0 ? <span key={c} className={PONTO[c]} style={{ flex: v }} /> : null;
-                      })}
+                  {d ? (
+                    <span className="col-start-1 row-start-2 flex flex-col gap-1.5">
+                      <BarraFull rotulo="Full" partes={d.full} canais={canaisDaBarra(b)} escala={escalaFull} />
+                      <BarraFull rotulo="Sem Full" partes={d.semFull} canais={canaisDaBarra(b)} escala={escalaFull} />
+                      {soma(d.semDado) > 0 && (
+                        <BarraFull rotulo="Sem dado" partes={d.semDado} canais={canaisDaBarra(b)} escala={escalaFull} />
+                      )}
                     </span>
-                    {ref != null && (
-                      <span className="absolute -inset-y-1 w-0.5 bg-ink" style={{ left: `${(ref / escala) * 100}%` }} />
-                    )}
-                  </span>
-                  <span className="flex flex-col items-end text-right tabular-nums">
+                  ) : (
+                    <span className="relative h-2.5 rounded-full bg-raised" aria-hidden="true">
+                      <span
+                        className="tc-barra absolute inset-y-0 left-0 flex overflow-hidden rounded-full"
+                        style={{ width: `${(valor(b) / escala) * 100}%` }}
+                      >
+                        {canaisDaBarra(b).map((c) => {
+                          const v = b[GMV_DO_CANAL[c]] ?? 0;
+                          return v > 0 ? <span key={c} className={PONTO[c]} style={{ flex: v }} /> : null;
+                        })}
+                      </span>
+                      {ref != null && (
+                        <span className="absolute -inset-y-1 w-0.5 bg-ink" style={{ left: `${(ref / escala) * 100}%` }} />
+                      )}
+                    </span>
+                  )}
+                  <span className={`flex flex-col items-end text-right tabular-nums ${d ? "col-start-2 row-span-2 row-start-1" : ""}`}>
                     <span className="text-sm font-semibold text-ink">{fmtCompacto(valor(b))}</span>
+                    {pctFull != null && <span className="text-xs text-ink-muted">{Math.round(pctFull * 100)}% Full</span>}
                     {p ? (
                       <span className={`rounded px-1.5 text-xs font-semibold ${CHIP[p.status]}`}>
                         {Math.round(p.atingimento * 100)}% {rotuloMeta}
@@ -171,6 +236,38 @@ export default function MarcasMeta({
         </ul>
       )}
     </section>
+  );
+}
+
+/** Uma das barras da marca (Full, sem Full ou sem dado), empilhada por canal. */
+function BarraFull({
+  rotulo,
+  partes,
+  canais,
+  escala,
+}: {
+  rotulo: string;
+  partes: Partial<Record<Marketplace, number>>;
+  canais: Marketplace[];
+  escala: number;
+}) {
+  const total = Object.values(partes).reduce((a, v) => a + (v ?? 0), 0);
+  return (
+    <span className="grid grid-cols-[56px_minmax(48px,1fr)_auto] items-center gap-2 text-xs text-ink-muted">
+      <span className="whitespace-nowrap">{rotulo}</span>
+      <span className="relative h-2 rounded-full bg-raised" aria-hidden="true">
+        <span
+          className="tc-barra absolute inset-y-0 left-0 flex overflow-hidden rounded-full"
+          style={{ width: `${(total / escala) * 100}%` }}
+        >
+          {canais.map((c) => {
+            const v = partes[c] ?? 0;
+            return v > 0 ? <span key={c} className={PONTO[c]} style={{ flex: v }} /> : null;
+          })}
+        </span>
+      </span>
+      <span className="text-right tabular-nums">{fmtCompacto(total)}</span>
+    </span>
   );
 }
 
