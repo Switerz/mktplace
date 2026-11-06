@@ -188,3 +188,17 @@ def test_get_overview_canal_isolado_shopee_nao_soma_outros_canais():
     assert result["current"]["tiktok_gmv"] is None
     assert result["current"]["ml_gmv"] is None
     assert db.captured_params[0]["mkt_ids"] == [3]
+
+
+def test_get_brands_ad_spend_por_marca_soma_ml_e_shopee():
+    def linha(brand, mkt, gmv, spend):
+        return {"brand_key": brand, "marketplace_id": mkt, "gmv": gmv, "orders": 1,
+                "canceled_orders": 0, "ad_spend": spend, "ad_revenue": 0, "total_fees": 0}
+
+    cur_rows = [linha("apice", 2, 500, 50), linha("apice", 3, 200, 20), linha("kokeshi", 1, 300, 0)]
+    db = FakeMappingSession([cur_rows, []])
+
+    por_marca = {b["brand"]: b for b in perf_svc.get_brands(db, "all", 2026, 6)["brands"]}
+
+    assert por_marca["apice"]["ad_spend"] == 70     # ML 50 + Shopee 20, igual ao /overview
+    assert por_marca["kokeshi"]["ad_spend"] is None  # sem Ads: ausencia, nunca R$ 0

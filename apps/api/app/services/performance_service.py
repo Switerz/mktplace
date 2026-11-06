@@ -631,6 +631,7 @@ def get_brands(
         ml_total = ml_orders + ml_canceled
         ml_spend = _f(ml_c.get("ad_spend"))
         ml_revenue = _f(ml_c.get("ad_revenue"))
+        sh_spend = _f(sh_c.get("ad_spend"))
 
         tk_fees = abs(_f(tk_c.get("total_fees")))
 
@@ -652,6 +653,8 @@ def get_brands(
             "gpm": None,  # requer total_views, não disponível no mart
             "ml_roas": round(ml_revenue / ml_spend, 2) if ml_spend > 0 else None,
             "ml_cancel_rate_pct": round(ml_canceled / ml_total * 100, 1) if ml_total > 0 else None,
+            # Mesma soma do `ad_spend` de /overview (ML + Shopee), aberta por marca.
+            "ad_spend": (ml_spend + sh_spend) or None,
         })
 
     result.sort(key=lambda r: -r["total_gmv"])
