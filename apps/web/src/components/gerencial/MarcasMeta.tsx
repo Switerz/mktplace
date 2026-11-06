@@ -18,6 +18,7 @@
  * e o traco sai: a meta continua no chip. A legenda filtra o canal.
  */
 import Link from "next/link";
+import { useState } from "react";
 
 import type { BrandRow } from "@/lib/api-client";
 import type { Marketplace } from "@/lib/mock-data";
@@ -28,7 +29,6 @@ import type { StatusDia } from "@/lib/metas-curva";
 import { MARCAS, fmtCompacto } from "@/lib/metas";
 import { fmtPctBr } from "@/lib/formatters";
 import { fullDaMarca, type FullDaMarca } from "@/lib/gerencial/divisao-full";
-import { ALL_MARKETPLACES } from "@/lib/marketplace-filter";
 import InfoDica from "@/components/ui/InfoDica";
 
 const CHIP: Record<StatusMeta | StatusDia, string> = {
@@ -66,23 +66,29 @@ interface Props {
   tendenciaDoDia?: Record<string, { projecao: number; ontemDia: number }> | null;
   /** Proporcao Full por marca e canal; ausente = uma barra so', sem divisao. */
   fullPorMarca?: Record<string, { ml?: number | null; shopee?: number | null }> | null;
-  /** Clique num canal da legenda (filtra a pagina por ele). */
-  onCanal?: (c: Marketplace) => void;
 }
 
 export default function MarcasMeta({
-  brands,
-  channels,
-  progressoPorMarca,
+  brands: brandsDaPagina,
+  channels: canaisDaPagina,
+  progressoPorMarca: progressoDaPagina,
   rotuloMeta = "da meta",
   compareActive,
   loading,
   error,
   brandHref,
-  tendenciaDoDia = null,
+  tendenciaDoDia: tendenciaDaPagina = null,
   fullPorMarca = null,
-  onCanal,
 }: Props) {
+  // Filtro de canal SO' DESTE CARD: a pagina continua no filtro global.
+  const [soCanal, setSoCanal] = useState<Marketplace | null>(null);
+  const filtrado = soCanal != null && canaisDaPagina.includes(soCanal) && canaisDaPagina.length > 1;
+  const channels = filtrado ? [soCanal] : canaisDaPagina;
+  const brands = filtrado ? brandsDaPagina.map((b) => soDoCanal(b, soCanal)) : brandsDaPagina;
+  // Meta e tendencia valem para o conjunto de canais: com um canal so', saem.
+  const progressoPorMarca = filtrado ? {} : progressoDaPagina;
+  const tendenciaDoDia = filtrado ? null : tendenciaDaPagina;
+
   // Marca com meta e sem linha em `/brands` (nada vendido no recorte) entra
   // com tudo zerado: mostrar 0% da meta e' o ponto, nao esconder a marca.
   const semVenda: BrandRow[] = Object.keys(progressoPorMarca)
@@ -126,27 +132,27 @@ export default function MarcasMeta({
               texto={
                 algumaMeta
                   ? fullPorMarca
-                    ? "GMV no período; com meta, só os canais que têm meta. Full = ML Full + Shopee FBS, pela proporção medida até ontem; TikTok entra em sem Full. Clique num canal para ver só ele."
-                    : "GMV no período; com meta, só os canais que têm meta. Traço = meta da marca (ou período anterior, sem meta). Clique num canal para ver só ele."
+                    ? `GMV no período; com meta, só os canais que têm meta. ${FULL_DICA} Clique num canal para ver só ele neste card.`
+                    : "GMV no período; com meta, só os canais que têm meta. Traço = meta da marca (ou período anterior, sem meta). Clique num canal para ver só ele neste card."
                   : fullPorMarca
-                    ? "GMV no período. Full = ML Full + Shopee FBS, pela proporção medida até ontem; TikTok entra em sem Full. Clique num canal para ver só ele."
-                    : "GMV no período. Traço = período anterior. Clique num canal para ver só ele."
+                    ? `GMV no período. ${FULL_DICA} Clique num canal para ver só ele neste card.`
+                    : "GMV no período. Traço = período anterior. Clique num canal para ver só ele neste card."
               }
             />
           </div>
         </div>
         <ul className="flex flex-wrap gap-1 text-xs" aria-label="Filtrar por canal">
-          {ALL_MARKETPLACES.map((c) => {
+          {canaisDaPagina.map((c) => {
             const ativo = channels.includes(c);
-            const so = ativo && channels.length === 1;
+            const so = filtrado && soCanal === c;
             return (
               <li key={c}>
                 <button
                   type="button"
-                  onClick={() => onCanal?.(c)}
-                  disabled={!onCanal}
+                  onClick={() => setSoCanal(so ? null : c)}
+                  disabled={canaisDaPagina.length < 2}
                   aria-pressed={so}
-                  title={so ? "Voltar a todos os canais" : `Ver só ${CHANNEL_LABEL[c]}`}
+                  title={so ? "Voltar a todos os canais neste card" : `Ver só ${CHANNEL_LABEL[c]} neste card`}
                   className={`inline-flex min-h-8 items-center gap-1.5 rounded-full px-2.5 transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                     so
                       ? "bg-surface font-semibold text-ink ring-1 ring-line-strong"
@@ -193,10 +199,21 @@ export default function MarcasMeta({
                   </span>
                   {d ? (
                     <span className="col-start-1 row-start-2 flex flex-col gap-1.5">
-                      <BarraFull rotulo="Full" partes={d.full} canais={canaisDaBarra(b)} escala={escalaFull} />
-                      <BarraFull rotulo="Sem Full" partes={d.semFull} canais={canaisDaBarra(b)} escala={escalaFull} />
+                      {/* Venda toda sem medida (Kokeshi so' na Shopee): Full e sem Full zerados nao dizem nada. */}
+                      {comFull > 0 && (
+                        <>
+                          <BarraFull rotulo="Full" partes={d.full} canais={canaisDaBarra(b)} escala={escalaFull} />
+                          <BarraFull rotulo="Sem Full" partes={d.semFull} canais={canaisDaBarra(b)} escala={escalaFull} />
+                        </>
+                      )}
                       {soma(d.semDado) > 0 && (
-                        <BarraFull rotulo="Sem dado" partes={d.semDado} canais={canaisDaBarra(b)} escala={escalaFull} />
+                        <BarraFull
+                          rotulo={canaisDaBarra(b).filter((c) => (d.semDado[c] ?? 0) > 0).map((c) => CHANNEL_LABEL[c]).join(" + ")}
+                          dica="Sem medida de Full: a Kokeshi na Shopee chega por arquivo, sem a modalidade de envio de cada pedido."
+                          partes={d.semDado}
+                          canais={canaisDaBarra(b)}
+                          escala={escalaFull}
+                        />
                       )}
                     </span>
                   ) : (
@@ -239,21 +256,41 @@ export default function MarcasMeta({
   );
 }
 
-/** Uma das barras da marca (Full, sem Full ou sem dado), empilhada por canal. */
+const FULL_DICA =
+  "Full = ML Full + Shopee FBS, pela proporção medida até ontem; TikTok entra em sem Full. A barra com o nome do canal é a parte sem medida de Full (Kokeshi na Shopee, que chega por arquivo).";
+
+/** A linha da marca so' com um canal: total, anterior e variacao daquele canal. */
+function soDoCanal(b: BrandRow, c: Marketplace): BrandRow {
+  const atual = b[GMV_DO_CANAL[c]] ?? 0;
+  const antes = b[`${c}_gmv_prev` as const] ?? 0;
+  return {
+    ...b,
+    tiktok_gmv: c === "tiktok" ? b.tiktok_gmv : null,
+    ml_gmv: c === "ml" ? b.ml_gmv : null,
+    shopee_gmv: c === "shopee" ? b.shopee_gmv : null,
+    total_gmv: atual,
+    total_gmv_prev: antes,
+    mom_pct: antes > 0 ? ((atual - antes) / antes) * 100 : null,
+  };
+}
+
+/** Uma das barras da marca (Full, sem Full ou sem medida), empilhada por canal. */
 function BarraFull({
   rotulo,
+  dica,
   partes,
   canais,
   escala,
 }: {
   rotulo: string;
+  dica?: string;
   partes: Partial<Record<Marketplace, number>>;
   canais: Marketplace[];
   escala: number;
 }) {
   const total = Object.values(partes).reduce((a, v) => a + (v ?? 0), 0);
   return (
-    <span className="grid grid-cols-[56px_minmax(48px,1fr)_auto] items-center gap-2 text-xs text-ink-muted">
+    <span className="grid grid-cols-[56px_minmax(48px,1fr)_auto] items-center gap-2 text-xs text-ink-muted" title={dica}>
       <span className="whitespace-nowrap">{rotulo}</span>
       <span className="relative h-2 rounded-full bg-raised" aria-hidden="true">
         <span

@@ -58,7 +58,7 @@ import type { TrendMetric } from "@/lib/gerencial/request-key";
 import { fetchHojePorHora, fetchMLFulfillment, fetchShopeeFbs, type TrendGranularityRequest } from "@/lib/api-client";
 import { buildQuery as queryMlFull } from "@/lib/ml-fulfillment";
 import { buildQuery as queryShopeeFbs } from "@/lib/shopee-fbs";
-import { ALL_MARKETPLACES, isMarketplaceSelected } from "@/lib/marketplace-filter";
+import { isMarketplaceSelected } from "@/lib/marketplace-filter";
 import { divisaoFull } from "@/lib/gerencial/divisao-full";
 import { comparacaoDeHoje, type HojePorHora } from "@/lib/gerencial/hoje-por-hora";
 import { KPI_META, type KpiKind } from "@/lib/kpi-drilldown";
@@ -354,14 +354,6 @@ function GerencialInner() {
     return () => ac.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- filterIdentity cobre os filtros
   }, [filterIdentity, hoje, sources.demoMode, sources.retryKey]);
-  // Clique num canal da legenda de Marcas: so' ele; de novo, todos.
-  const filtrarCanal = useCallback(
-    (c: Marketplace) =>
-      setFilters({
-        channels: filters.channels.length === 1 && filters.channels[0] === c ? [...ALL_MARKETPLACES] : [c],
-      }),
-    [filters.channels, setFilters],
-  );
   // "Hoje" (VENDAS-POR-HORA-1): a comparacao justa e' com ontem ATE' A MESMA
   // HORA, nos cards de sempre, e a tendencia de fechamento por marca. Sem a
   // tabela por hora publicada, os cards seguem sem comparacao, como antes.
@@ -688,7 +680,6 @@ function GerencialInner() {
             brandHref={brandHref}
             tendenciaDoDia={tendenciaDoDia}
             fullPorMarca={fullPorMarca}
-            onCanal={filtrarCanal}
           />
         </div>
       </div>
