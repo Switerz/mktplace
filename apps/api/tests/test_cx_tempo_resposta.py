@@ -16,7 +16,7 @@ def _fonte(respostas=True, tempo=None, falhas=()):
     f.coleta[svc.SQL_TABELAS_CX] = ("tabelas_cx", [{"returns": True, "chat": True, "respostas": respostas}])
     f.coleta[svc.SQL_TEMPO_RESPOSTA] = ("tempo_resposta", tempo if tempo is not None else [
         {"marca": "apice", "respostas": 40, "mediana_s": 754.4, "p90_s": 7200.0, "ate_1h": 30,
-         "desde": AGORA - timedelta(hours=10)},
+         "desde_em": AGORA - timedelta(hours=10)},
     ])
     return f
 
@@ -68,3 +68,11 @@ def test_kokeshi_usa_a_media_que_o_bot_le_no_seller_centre():
     k = resp.chat.nao_lidas[0]
     assert (k.marca, k.tempo_resposta_s, k.tempo_resposta_fonte) == ("kokeshi", 2100, "media_seller_centre")
     assert "tempo_resposta_medio_s" in svc.SQL_NAO_LIDAS_EXPORT
+
+
+def test_inicio_da_medicao_sobrevive_a_leitura_pelo_metabase():
+    """O Metabase devolve data/hora como texto; so' `*_em`/`*_at` voltam a ser datetime."""
+    from app.services import datamart_leitura
+    assert "AS desde_em" in svc.SQL_TEMPO_RESPOSTA
+    linha = datamart_leitura.normalizar([{"desde_em": "2026-11-05T13:00:00Z"}])[0]
+    assert svc._utc(linha["desde_em"]) is not None

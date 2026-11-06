@@ -760,7 +760,7 @@ SELECT brand AS marca,
        percentile_cont(0.5) WITHIN GROUP (ORDER BY espera_s) AS mediana_s,
        percentile_cont(0.9) WITHIN GROUP (ORDER BY espera_s) AS p90_s,
        COUNT(*) FILTER (WHERE espera_s <= 3600) AS ate_1h,
-       MIN(respondido_em) AS desde
+       MIN(respondido_em) AS desde_em
   FROM raw.shopee_chat_respostas
  WHERE brand = ANY(:marcas)
    AND respondido_em >= :desde
@@ -959,7 +959,7 @@ def _com_tempo_resposta(consultar: Consultar, nao_lidas: list[NaoLidas], marcas:
             "tempo_resposta_p90_s": None if p90 is None else int(round(float(p90))),
             "respostas": total,
             "respostas_ate_1h_pct": round(ate_1h * 100 / total, 1),
-            "respostas_desde": _utc(r.get("desde")),
+            "respostas_desde": _utc(r.get("desde_em")),
             "tempo_resposta_fonte": "mediana",
         }))
     return out
