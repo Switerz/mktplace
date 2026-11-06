@@ -12,6 +12,7 @@ from app.deps.filters import (
 from app.deps.period import EffectivePeriod, resolve_period, today_brt
 from app.schemas.avoe_snapshot import AvoeSnapshotResponse
 from app.schemas.executive_summary import ExecutiveSummaryResponse
+from app.schemas.hoje_por_hora import HojePorHoraResponse
 from app.schemas.monitoramento_preco import MonitoramentoPrecoResponse
 from app.schemas.ml_fulfillment import MLFulfillmentResponse
 from app.schemas.shopee_fbs import (
@@ -36,6 +37,7 @@ from app.schemas.performance import (
 from app.services import avoe_snapshot_service as avoe_svc
 from app.services import executive_summary_service
 from app.services import gold_service as svc
+from app.services import hoje_por_hora_service as hph_svc
 from app.services import monitoramento_preco_service as mp_svc
 from app.services import performance_service as perf_svc
 from app.services import pma_match
@@ -415,6 +417,17 @@ def quality(
         _require_db(db), filters.channels, year, month,
         brand_keys=filters.brands, period=filters.period, compare_period=filters.compare_period,
     )
+
+
+@router.get("/hoje-por-hora", response_model=HojePorHoraResponse)
+def hoje_por_hora(
+    filters: ResolvedFilters = Depends(filters_query),
+    db: Session = Depends(get_db),
+):
+    """Hoje ate' a ultima hora cheia fechada em TODOS os canais do filtro, contra
+    ontem e a semana passada ate' a mesma hora. O periodo do filtro e' ignorado:
+    a resposta e' sempre do dia corrente (BRT)."""
+    return hph_svc.get_hoje_por_hora(_require_db(db), filters.mkt_ids, filters.brands)
 
 
 @router.get("/tempo-real", response_model=TempoRealResponse)

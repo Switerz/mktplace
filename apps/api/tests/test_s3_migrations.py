@@ -203,7 +203,9 @@ def test_m02_head_unico_em_todas_as_revisoes():
     # componentes de marts.fact_dre_insumo_mensal (aceita `shopee_taxa_escrow`).
     # T-0018: head avancado de 037 para 038, que acrescenta o anuncio-ancora a
     # marts.fact_ml_full_stock_inventory_daily, sobre a 037 (nasceu 034).
-    assert heads == ["038"], f"head deveria ser unico e igual a 038, veio {heads}"
+    # VENDAS-POR-HORA-1: head avancado de 038 para 039 (tabelas de vendas por
+    # hora, nenhuma tabela existente alterada; nasceu 036).
+    assert heads == ["039"], f"head deveria ser unico e igual a 039, veio {heads}"
 
 
 def test_m03_as_tres_revisoes_novas_existem_uma_vez_cada():
