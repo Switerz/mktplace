@@ -58,7 +58,7 @@ import type { TrendMetric } from "@/lib/gerencial/request-key";
 import { fetchHojePorHora, fetchMLFulfillment, fetchShopeeFbs, type TrendGranularityRequest } from "@/lib/api-client";
 import { buildQuery as queryMlFull } from "@/lib/ml-fulfillment";
 import { buildQuery as queryShopeeFbs } from "@/lib/shopee-fbs";
-import { isMarketplaceSelected } from "@/lib/marketplace-filter";
+import { ALL_MARKETPLACES, isMarketplaceSelected } from "@/lib/marketplace-filter";
 import { divisaoFull } from "@/lib/gerencial/divisao-full";
 import { KPI_META, type KpiKind } from "@/lib/kpi-drilldown";
 
@@ -98,7 +98,7 @@ import {
   progressoDoDia,
   resumoSemDado,
 } from "@/lib/metas-curva";
-import { hojeBrt } from "@/lib/metas";
+import { MARCAS, hojeBrt } from "@/lib/metas";
 import {
   ChannelSeriesDrilldownContent,
   CommercialAttentionDrilldownContent,
@@ -311,6 +311,54 @@ function GerencialInner() {
     return () => ac.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- filterIdentity cobre os filtros
   }, [filterIdentity, hoje, sources.demoMode, sources.retryKey]);
+  // A mesma proporcao Full, POR MARCA, para o card de Marcas. A rota do ML nao
+  // abre por marca: uma consulta por marca. Shopee vem do `by_brand` (Kokeshi
+  // fora da esteira = sem dado). As fatos so' tem dia fechado: periodo so' de
+  // hoje fica sem divisao (uma barra so').
+  const [fullPorMarca, setFullPorMarca] = useState<Record<string, { ml?: number | null; shopee?: number | null }> | null>(
+    null,
+  );
+  useEffect(() => {
+    setFullPorMarca(null);
+    const { dateFrom: from, dateTo, brands: marcas, channels } = filters;
+    const ontem = new Date(Date.parse(`${hoje}T12:00:00Z`) - 864e5).toISOString().slice(0, 10);
+    const ate = dateTo < ontem ? dateTo : ontem;
+    // So' TikTok selecionado: nao ha Full a mostrar, fica a barra unica.
+    const temFull = isMarketplaceSelected(channels, "ml") || isMarketplaceSelected(channels, "shopee");
+    if (sources.demoMode || from > ate || !temFull) return;
+    const ac = new AbortController();
+    const ids = marcas.length > 0 ? marcas : MARCAS.map((m) => m.id);
+    const ml = isMarketplaceSelected(channels, "ml")
+      ? Promise.all(
+          ids.map((b) =>
+            fetchMLFulfillment(queryMlFull({ from, to: ate, brands: [b] }), ac.signal).then(
+              (r) => [b, r.share_full_gmv] as const,
+            ),
+          ),
+        )
+      : Promise.resolve([] as (readonly [string, number | null])[]);
+    const shopee = isMarketplaceSelected(channels, "shopee")
+      ? fetchShopeeFbs(queryShopeeFbs({ from, to: ate }), ac.signal).then((r) => ("by_brand" in r ? r.by_brand : []))
+      : Promise.resolve([]);
+    Promise.all([ml, shopee])
+      .then(([m, sh]) => {
+        const mapa: Record<string, { ml?: number | null; shopee?: number | null }> = {};
+        for (const [b, s] of m) (mapa[b] ??= {}).ml = s;
+        for (const r of sh) (mapa[r.brand] ??= {}).shopee = r.share_fbs_gmv;
+        setFullPorMarca(mapa);
+      })
+      .catch(() => undefined);
+    return () => ac.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- filterIdentity cobre os filtros
+  }, [filterIdentity, hoje, sources.demoMode, sources.retryKey]);
+  // Clique num canal da legenda de Marcas: so' ele; de novo, todos.
+  const filtrarCanal = useCallback(
+    (c: Marketplace) =>
+      setFilters({
+        channels: filters.channels.length === 1 && filters.channels[0] === c ? [...ALL_MARKETPLACES] : [c],
+      }),
+    [filters.channels, setFilters],
+  );
   // Tendencia de fechamento do dia por marca (so' com "Hoje"): mesma fonte do
   // bloco "Hoje ate' HHh". Sem a tabela por hora publicada, nada aparece.
   const [tendenciaDoDia, setTendenciaDoDia] = useState<Record<string, { projecao: number; ontemDia: number }> | null>(null);
@@ -620,6 +668,8 @@ function GerencialInner() {
             error={sources.brands.status.error}
             brandHref={brandHref}
             tendenciaDoDia={tendenciaDoDia}
+            fullPorMarca={fullPorMarca}
+            onCanal={filtrarCanal}
           />
         </div>
       </div>
