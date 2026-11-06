@@ -17,7 +17,7 @@ from datetime import date, timedelta
 from typing import Callable, Optional
 
 from app.schemas.top_produtos import (
-    DetalheProduto, ExtraCanal, MarcaTop, PontoDiario, ProdutoTop, TopProdutosResponse,
+    DetalheProduto, ExtraCanal, MarcaTop, PontoDiario, ProdutoTop, ResumoCanal, TopProdutosResponse,
 )
 from app.services.gold_service import BRANDS_IN_SCOPE
 
@@ -94,6 +94,22 @@ SQL_EXTRAS = {
            AND ref_date BETWEEN :ini AND :fim""",
 }
 
+# Mesmos extras somados por MARCA, para a faixa "por canal" do card.
+SQL_RESUMO = {
+    "tiktok": """
+        SELECT brand AS marca, SUM(gmv_video) AS video, SUM(gmv_live) AS live, SUM(gmv_product_card) AS card
+          FROM gold.fct_tiktok_product_daily
+         WHERE brand = ANY(:marcas) AND date BETWEEN :ini AND :fim
+         GROUP BY brand""",
+    "ml": """
+        SELECT brand AS marca, SUM(ad_spend) AS investimento, SUM(ad_revenue) AS receita_ads,
+               (SELECT MAX(ref_date)::date FROM gold.vw_ml_produto_daily
+                 WHERE ad_spend > 0 AND ref_date BETWEEN :fim_menos_10 AND :fim) AS ads_ate
+          FROM gold.vw_ml_produto_daily
+         WHERE brand = ANY(:marcas) AND ref_date BETWEEN :ini AND :fim
+         GROUP BY brand""",
+}
+
 _KIT = re.compile(r"\b(kit|combo)\b", re.IGNORECASE)
 
 
@@ -117,6 +133,25 @@ def _data(v) -> date:
     return v if isinstance(v, date) else date.fromisoformat(str(v)[:10])
 
 
+def _extras(canal: str, e: dict, inicio: date, fim: date) -> tuple[list[ExtraCanal], Optional[str]]:
+    """O que so' o canal sabe, a partir de uma linha de SQL_EXTRAS/SQL_RESUMO."""
+    if canal == "tiktok":
+        return [ExtraCanal(rotulo=r, valor=_num(e.get(k)), formato="brl")
+                for r, k in (("GMV por vídeo", "video"), ("GMV por live", "live"), ("GMV pelo card", "card"))], None
+    if canal != "ml":
+        return [], None
+    ads_ate = _data(e["ads_ate"]) if e.get("ads_ate") else None
+    if ads_ate is None or ads_ate < inicio:
+        return [], "Os ads do Mercado Livre chegam no dia seguinte: ainda não há ads deste período."
+    aviso = f"Ads até {ads_ate:%d/%m}: os do dia seguinte ainda não chegaram." if ads_ate < fim else None
+    invest, rec_ads = _num(e.get("investimento")), _num(e.get("receita_ads"))
+    extras = [ExtraCanal(rotulo="Investimento em ads", valor=invest, formato="brl"),
+              ExtraCanal(rotulo="Receita via ads", valor=rec_ads, formato="brl")]
+    if invest > 0:
+        extras.append(ExtraCanal(rotulo="ROAS", valor=rec_ads / invest, formato="vezes"))
+    return extras, aviso
+
+
 def get_top_produtos(
     consultar: Consultar,
     inicio: date,
@@ -136,6 +171,7 @@ def get_top_produtos(
 
     produtos: dict[str, list[ProdutoTop]] = {}
     totais: dict[str, list[Optional[float]]] = {}
+    por_canal: dict[str, dict[str, float]] = {}
     for canal in canais if escopo else []:
         for l in consultar(SQL_TOP.format(base=_BASE[canal]), params):
             marca = l["marca"]
@@ -143,6 +179,7 @@ def get_top_produtos(
             # Totais da marca vem repetidos em cada linha do canal: soma uma vez por canal.
             if not any(p.canal == canal for p in produtos.get(marca, [])):
                 t[0] += _num(l["receita_marca"])
+                por_canal.setdefault(marca, {})[canal] = _num(l["receita_marca"])
                 if l.get("receita_marca_ant") is not None:
                     t[1] = (t[1] or 0.0) + _num(l["receita_marca_ant"])
             pecas, receita = _num(l["pecas"]), _num(l["receita"])
@@ -154,6 +191,11 @@ def get_top_produtos(
                 receita_ant=_opt(l.get("receita_ant")) if comparacao else None,
             ))
 
+    resumo: dict[tuple[str, str], dict] = {}
+    for canal in [c for c in canais if c in SQL_RESUMO] if produtos else []:
+        for e in consultar(SQL_RESUMO[canal], {**params, "fim_menos_10": fim - timedelta(days=10)}):
+            resumo[(e["marca"], canal)] = e
+
     blocos = []
     for marca, lista in produtos.items():
         total, total_ant = totais[marca]
@@ -161,8 +203,15 @@ def get_top_produtos(
         for i, p in enumerate(top, start=1):
             p.posicao = i
             p.share_marca = p.receita / total if total > 0 else None
+        canais_marca = []
+        for canal in canais:
+            if canal not in por_canal[marca]:
+                continue
+            extras, aviso = _extras(canal, resumo.get((marca, canal), {}), inicio, fim)
+            canais_marca.append(ResumoCanal(canal=canal, receita=por_canal[marca][canal], extras=extras, aviso_extras=aviso))
         blocos.append(MarcaTop(
             marca=marca, receita_marca=total, receita_marca_ant=total_ant if comparacao else None, produtos=top,
+            canais=canais_marca,
         ))
     blocos.sort(key=lambda b: -b.receita_marca)
     return TopProdutosResponse(
@@ -192,21 +241,7 @@ def get_detalhe(
         [e] = consultar(SQL_EXTRAS[canal], {
             "marca": marca, "sku": sku, "ini": inicio, "fim": fim, "fim_menos_10": fim - timedelta(days=10),
         }) or [{}]
-        if canal == "tiktok":
-            extras = [ExtraCanal(rotulo=r, valor=_num(e.get(k)), formato="brl")
-                      for r, k in (("GMV por vídeo", "video"), ("GMV por live", "live"), ("GMV pelo card", "card"))]
-        else:
-            ads_ate = _data(e["ads_ate"]) if e.get("ads_ate") else None
-            if ads_ate is None or ads_ate < inicio:
-                aviso = "Os ads do Mercado Livre chegam no dia seguinte: ainda não há ads deste período."
-            else:
-                if ads_ate < fim:
-                    aviso = f"Ads até {ads_ate:%d/%m}: os do dia seguinte ainda não chegaram."
-                invest, rec_ads = _num(e.get("investimento")), _num(e.get("receita_ads"))
-                extras = [ExtraCanal(rotulo="Investimento em ads", valor=invest, formato="brl"),
-                          ExtraCanal(rotulo="Receita via ads", valor=rec_ads, formato="brl")]
-                if invest > 0:
-                    extras.append(ExtraCanal(rotulo="ROAS", valor=rec_ads / invest, formato="vezes"))
+        extras, aviso = _extras(canal, e, inicio, fim)
 
     return DetalheProduto(
         canal=canal, marca=marca, sku=sku, produto=str(nome).strip(), kit=eh_kit(nome),

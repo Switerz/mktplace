@@ -33,6 +33,10 @@ def test_ranqueia_entre_canais_e_soma_total_uma_vez_por_canal():
     chamadas = []
 
     def consultar(sql, params):
+        if "GROUP BY brand" in sql:  # resumo por canal da marca
+            if "gmv_video" in sql:
+                return [{"marca": "kokeshi", "video": 600, "live": 100, "card": 100}]
+            return [{"marca": "kokeshi", "investimento": 50, "receita_ads": 200, "ads_ate": "2026-11-04"}]
         chamadas.append(params)
         return next(v for k, v in por_canal.items() if k in sql)
 
@@ -47,6 +51,11 @@ def test_ranqueia_entre_canais_e_soma_total_uma_vez_por_canal():
         (1, "tiktok", "1735"), (2, "ml", "KS03016"), (3, "tiktok", "1736")]
     top1 = k.produtos[0]
     assert top1.kit and top1.preco_medio == 50 and top1.share_marca == 500 / 1600 and top1.receita_ant == 400
+    # Faixa por canal: receita do canal + o que cada um oferece.
+    tt, ml = k.canais
+    assert (tt.canal, tt.receita) == ("tiktok", 1000) and [e.valor for e in tt.extras] == [600, 100, 100]
+    assert (ml.canal, ml.receita) == ("ml", 600) and ml.extras[-1].valor == 4.0
+    assert ml.aviso_extras.startswith("Ads até 04/11")
 
 
 def test_sem_comparacao_nao_devolve_anterior():
