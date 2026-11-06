@@ -59,7 +59,6 @@ import { fetchHojePorHora, fetchMLFulfillment, fetchShopeeFbs, type TrendGranula
 import { buildQuery as queryMlFull } from "@/lib/ml-fulfillment";
 import { buildQuery as queryShopeeFbs } from "@/lib/shopee-fbs";
 import { isMarketplaceSelected } from "@/lib/marketplace-filter";
-import { divisaoFull } from "@/lib/gerencial/divisao-full";
 import { comparacaoDeHoje, type HojePorHora } from "@/lib/gerencial/hoje-por-hora";
 import { KPI_META, type KpiKind } from "@/lib/kpi-drilldown";
 
@@ -289,7 +288,7 @@ function GerencialInner() {
   const hoje = useMemo(() => hojeBrt(), []);
 
   // Receita Full x normal: so' a PROPORCAO vem das fatos de modalidade; o valor
-  // e' o GMV do overview (divisaoFull). Falha em qualquer uma = sem divisao.
+  // e' o GMV do overview (barra unica por canal no MetaHero). Falha em qualquer uma = sem divisao.
   const [shareFull, setShareFull] = useState<{ ml: number | null; shopee: number | null } | null>(null);
   useEffect(() => {
     setShareFull(null);
@@ -385,10 +384,6 @@ function GerencialInner() {
   }, [kpis, compHoje]);
   const variacaoDoCanal = (atual: number | null | undefined, antes: number | null | undefined) =>
     atual != null && antes != null && antes > 0 ? ((atual - antes) / antes) * 100 : null;
-  const fullNormal =
-    shareFull && overview
-      ? divisaoFull({ total: overview.gmv, ml: overview.ml_gmv, shopee: overview.shopee_gmv }, shareFull)
-      : null;
   const diaMeta = diaDaMeta(filters.dateFrom, filters.dateTo, hoje);
   const mesMeta = diaMeta ? null : mesDaMeta(filters.dateFrom, filters.dateTo, hoje);
   const metas = useMetasDoMes(mesMeta ?? diaMeta?.slice(0, 7) ?? null);
@@ -633,7 +628,7 @@ function GerencialInner() {
         aviso={avisoDeDado ? { texto: avisoDeDado.message, onOpen: () => setDialog({ kind: "confidence" }) } : null}
         metasHref={mesDasMetas ? `/metas?mes=${mesDasMetas}` : "/metas"}
         onOpenGmv={() => setDialog({ kind: "kpi", key: "gmv" })}
-        fullNormal={fullNormal}
+        shareFull={shareFull}
       />
 
       <KpiBand

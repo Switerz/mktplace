@@ -216,18 +216,6 @@ test("porDiaNecessario pela curva = falta / peso dos dias restantes (Nova meta d
   assert.ok(Math.abs(metaDiaNormalDoEscopo(celulas, "2026-11") - 1_000_000 / 39.26) < 1e-6);
 });
 
-test("divisaoFull: aplica a proporcao Full de cada canal ao GMV do overview; TikTok fica em normal", async () => {
-  const { divisaoFull } = await import("../src/lib/gerencial/divisao-full.ts");
-  assert.deepEqual(
-    divisaoFull({ total: 1500, ml: 1000, shopee: 400 }, { ml: 0.5, shopee: 0.25 }),
-    { full: 600, normal: 900 },
-  );
-  // canal com venda sem proporcao medida: nao inventa divisao
-  assert.equal(divisaoFull({ total: 1400, ml: 1000, shopee: 400 }, { ml: 0.5, shopee: null }), null);
-  // canal sem venda nao precisa de proporcao
-  assert.deepEqual(divisaoFull({ total: 1000, ml: 1000, shopee: null }, { ml: 0.3, shopee: null }), { full: 300, normal: 700 });
-  assert.equal(divisaoFull({ total: 1000, ml: 1000, shopee: null }, { ml: 0, shopee: null }), null);
-});
 
 test("fullDaMarca: divide cada canal pela proporcao; TikTok e' sem Full; canal sem proporcao e' sem dado", async () => {
   const { fullDaMarca } = await import("../src/lib/gerencial/divisao-full.ts");
