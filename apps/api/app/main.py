@@ -17,6 +17,7 @@ from app.routers import (
     performance_oficial,
     regioes,
     tiktok_abertos,
+    top_produtos,
 )
 
 app = FastAPI(
@@ -56,6 +57,8 @@ app.include_router(account_performance.router)
 app.include_router(cx_atendimento.router)
 app.include_router(metas.router)
 app.include_router(alertas.router)
+# Top 5 produtos por marca na Gerencial (base consolidada por NF).
+app.include_router(top_produtos.router)
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])

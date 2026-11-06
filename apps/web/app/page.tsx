@@ -74,6 +74,7 @@ import EvolutionCard from "@/components/gerencial/EvolutionCard";
 import PulseChannelsColumn from "@/components/gerencial/PulseChannelsColumn";
 import VolumeHealthCard from "@/components/gerencial/VolumeHealthCard";
 import BrandChannelMatrix, { cellKey, type SignalsState } from "@/components/gerencial/BrandChannelMatrix";
+import TopProdutosMarca from "@/components/gerencial/TopProdutosMarca";
 import MovementsPanels from "@/components/gerencial/MovementsPanels";
 import AttentionQueue from "@/components/gerencial/AttentionQueue";
 import MetaHero from "@/components/gerencial/MetaHero";
@@ -635,6 +636,8 @@ function GerencialInner() {
         brandHref={brandHref}
         onRetry={sources.retry}
       />
+
+      <TopProdutosMarca brands={filters.brands} dateFrom={filters.dateFrom} dateTo={filters.dateTo} />
 
       {/* ---- Mais detalhes (GERENCIAL-METAS-1) ----
           Profundidade sob demanda: tudo o que a V2 mostrava continua aqui,
