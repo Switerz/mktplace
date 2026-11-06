@@ -58,6 +58,8 @@ import type {
   ComparisonStatus,
 } from "@/lib/gerencial/trend-series";
 import { decideDemoMode } from "@/lib/gerencial/demo-mode";
+import { mostrarHojeNoGrafico } from "@/lib/gerencial/dia-em-andamento";
+import { hojeBrt } from "@/lib/metas";
 
 interface SourceState<T> {
   data: T | null;
@@ -146,6 +148,12 @@ export interface GerencialSources {
   quality: Source<QualitySlice>;
   /** Uma entrada por canal selecionado — no maximo tres. */
   series: ChannelSeries[];
+  /** GERENCIAL-D0: as mesmas series so' de HOJE, para o grafico desenhar o dia
+   * em andamento. Vazio quando o periodo nao termina ontem. Ver
+   * `lib/gerencial/dia-em-andamento.ts`. */
+  seriesHoje: ChannelSeries[];
+  /** Data de hoje (BRT) usada para `seriesHoje`. */
+  hoje: string;
   /** Modo demonstracao da pagina: TODAS as fontes com fallback esperadas para a
    * requisicao atual concluiram com `live: false`. Ver `lib/gerencial/demo-mode.ts`. */
   demoMode: boolean;
@@ -191,6 +199,14 @@ export function useGerencialSources(input: UseGerencialSourcesInput): GerencialS
   const [canaisState, setCanaisState] = useState<SourceState<CanaisSlice>>(initialSource);
   const [qualityState, setQualityState] = useState<SourceState<QualitySlice>>(initialSource);
   const [seriesState, setSeriesState] = useState<Record<string, SourceState<TrendSlice>>>({});
+
+  // GERENCIAL-D0: o dia de hoje so' entra quando o periodo termina ontem.
+  const hoje = useMemo(() => hojeBrt(), []);
+  const comHoje = mostrarHojeNoGrafico(input.dateFrom, input.dateTo, hoje);
+  const [hojeState, setHojeState] = useState<{
+    key: string;
+    porCanal: Partial<Record<Marketplace, { points: TrendPoint[]; live: boolean; errored: boolean }>>;
+  } | null>(null);
 
   // Serializa os filtros para as chamadas — identico ao contrato ja usado.
   const filterOpts = useMemo(
@@ -383,6 +399,32 @@ export function useGerencialSources(input: UseGerencialSourcesInput): GerencialS
     // `input.granularity` participa: trocar o grao refaz SO' as series.
   }, [requestKey, channelsKey, filterOpts, keyInput, input.granularity]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // GERENCIAL-D0: `/trend` de HOJE por canal, no mesmo escopo de marcas. Sem
+  // comparacao (o dia em andamento nao tem par justo) e sem entrar nos totais.
+  const hojeKey = comHoje ? `${requestKey}|hoje=${hoje}` : null;
+  useEffect(() => {
+    if (!hojeKey) return;
+    let ignore = false;
+    const opts = { brands: input.brands, dateFrom: hoje, dateTo: hoje, compare: false };
+    setHojeState({ key: hojeKey, porCanal: {} });
+    // Uma chamada por canal, independentes (como as series do periodo): cada
+    // resposta entra sozinha, e canal sem resposta ainda nao forma total.
+    for (const channel of input.channels) {
+      const guardar = (r: { points: TrendPoint[]; live: boolean; errored: boolean }) => {
+        if (ignore) return;
+        setHojeState((prev) =>
+          prev?.key === hojeKey ? { key: hojeKey, porCanal: { ...prev.porCanal, [channel]: r } } : prev,
+        );
+      };
+      fetchTrend([channel], opts, "day")
+        .then((res) => guardar({ points: res.data, live: res.live, errored: false }))
+        .catch(() => guardar({ points: [], live: false, errored: true }));
+    }
+    return () => {
+      ignore = true;
+    };
+  }, [hojeKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
   /**
    * Modo demonstracao e' propriedade da PAGINA e exige que TODAS as fontes com
    * fallback esperadas para a requisicao ATUAL tenham concluido com `live: false`
@@ -485,6 +527,22 @@ export function useGerencialSources(input: UseGerencialSourcesInput): GerencialS
     });
   }, [input.channels, seriesState, keyInput, demoMode, demoPending, compareRequested, input.granularity]);
 
+  // Mesma regra do mock das series: so' vale em demonstracao. Chave antiga
+  // nunca vaza (trocar de filtro esvazia o ponto de hoje ate' a nova resposta).
+  const seriesHoje = useMemo<ChannelSeries[]>(() => {
+    if (!hojeKey || hojeState?.key !== hojeKey) return [];
+    return input.channels.map((channel) => {
+      const r = hojeState.porCanal[channel];
+      const ok = r && !r.errored && (r.live || demoMode);
+      return {
+        channel,
+        status: !r ? "loading" : ok ? "fresh" : "error",
+        granularity: "day",
+        points: ok ? r.points : [],
+      };
+    });
+  }, [hojeKey, hojeState, input.channels, demoMode]);
+
   const sourceStatuses = [overview.status, brands.status, executiveSummary.status, canais.status, quality.status];
   const anyLoading =
     sourceStatuses.some((s) => s.loading) || series.some((s) => s.status === "loading");
@@ -499,6 +557,8 @@ export function useGerencialSources(input: UseGerencialSourcesInput): GerencialS
     canais,
     quality,
     series,
+    seriesHoje,
+    hoje,
     demoMode,
     anyLoading,
     allSettled,

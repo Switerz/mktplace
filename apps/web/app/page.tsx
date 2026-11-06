@@ -53,6 +53,7 @@ import {
   type Movement,
 } from "@/lib/gerencial/brand-matrix";
 import { mergeChannelSeries, reconcileSeriesTotal, type MergedBucket } from "@/lib/gerencial/trend-series";
+import { bucketDeHoje } from "@/lib/gerencial/dia-em-andamento";
 import type { TrendMetric } from "@/lib/gerencial/request-key";
 import type { TrendGranularityRequest } from "@/lib/api-client";
 import { KPI_META, type KpiKind } from "@/lib/kpi-drilldown";
@@ -205,6 +206,12 @@ function GerencialInner() {
         mergeChannelSeries(sources.series, filters.channels, "orders", granularity),
       ),
     [sources.series, filters.channels, granularity],
+  );
+  // GERENCIAL-D0 — hoje no grafico, com o numero do filtro "Hoje". Fica FORA de
+  // `merged`: nao entra na soma, na reconciliacao, nas tendencias nem na meta.
+  const hojeNoGrafico = useMemo(
+    () => bucketDeHoje(sources.seriesHoje, filters.channels, metric, sources.hoje),
+    [sources.seriesHoje, filters.channels, metric, sources.hoje],
   );
   const reconciliation = useMemo(
     () =>
@@ -386,6 +393,19 @@ function GerencialInner() {
       : "Dados carregados.";
 
   const openBucket = useCallback((date: string) => setDialog({ kind: "bucket", date }), []);
+  // GERENCIAL-D0: o dia em andamento nao tem detalhe de bucket (esta' fora do
+  // periodo); clicar nele abre a propria visao "Hoje".
+  const selecionarBucket = useCallback(
+    (date: string) => {
+      if (date === sources.hoje) {
+        setDialog(null);
+        setFilters({ dateFrom: date, dateTo: date });
+        return;
+      }
+      openBucket(date);
+    },
+    [openBucket, setFilters, sources.hoje],
+  );
   const pinRange = useCallback(
     (dateFrom: string, dateTo: string) => {
       setDialog(null);
@@ -528,7 +548,8 @@ function GerencialInner() {
             reconciliation={reconciliation}
             compareActive={comparar}
             loading={merged.loadingChannels.length > 0 && merged.availableChannels.length === 0}
-            onSelectBucket={openBucket}
+            onSelectBucket={selecionarBucket}
+            bucketHoje={hojeNoGrafico}
             onOpenChannelSeries={(channel) => setDialog({ kind: "channelSeries", channel })}
             highlightedChannel={highlightedChannel}
           />
