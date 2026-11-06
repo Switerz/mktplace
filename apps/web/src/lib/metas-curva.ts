@@ -127,7 +127,15 @@ export function fracaoDoEscopo(celulasEscopo: CelulaMetaGmv[], mes: string): (di
   return (dia) => soma(celulasEscopo.map((c) => c.meta_gmv * fracaoAte(mes, c.channel, dia))) / total;
 }
 
-export type StatusDia = "em_andamento" | "atingida" | "nao_atingida";
+/**
+ * Meta de um dia NORMAL (peso 1,00) do escopo: soma, por celula, de meta do
+ * mes / soma dos pesos do canal — a "Meta dia normal" da aba Resumo.
+ */
+export function metaDiaNormalDoEscopo(celulasEscopo: CelulaMetaGmv[], mes: string): number {
+  return soma(celulasEscopo.map((c) => c.meta_gmv / soma(pesosDoMes(mes, c.channel))));
+}
+
+export type StatusDia ="em_andamento" | "atingida" | "nao_atingida";
 
 export interface MetaDoDiaDaMarca {
   meta: number;

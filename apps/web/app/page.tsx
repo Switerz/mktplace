@@ -91,7 +91,13 @@ import {
   topComerciais,
   ultimoDiaComDado,
 } from "@/lib/gerencial/meta-progress";
-import { escopoTemCurva, fracaoDoEscopo, progressoDoDia, resumoSemDado } from "@/lib/metas-curva";
+import {
+  escopoTemCurva,
+  fracaoDoEscopo,
+  metaDiaNormalDoEscopo,
+  progressoDoDia,
+  resumoSemDado,
+} from "@/lib/metas-curva";
 import { hojeBrt } from "@/lib/metas";
 import {
   ChannelSeriesDrilldownContent,
@@ -340,6 +346,7 @@ function GerencialInner() {
             hoje,
             ultimoDia,
             fracaoAte: fracaoDoEscopo(celulasEscopo, mesMeta),
+            metaDiaNormal: metaDiaNormalDoEscopo(celulasEscopo, mesMeta),
           })
         : null,
     [metaAplicavel, mesMeta, metaEscopo.total, realizadoEscopo.total, celulasEscopo, hoje, ultimoDia],
@@ -363,6 +370,10 @@ function GerencialInner() {
         hoje,
         ultimoDia,
         fracaoAte: fracaoDoEscopo(
+          celulasEscopo.filter((c) => c.brand === id),
+          mesMeta,
+        ),
+        metaDiaNormal: metaDiaNormalDoEscopo(
           celulasEscopo.filter((c) => c.brand === id),
           mesMeta,
         ),
