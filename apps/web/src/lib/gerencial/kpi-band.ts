@@ -16,7 +16,7 @@
 import type { OverviewData } from "../api-client.ts";
 import { isMarketplaceSelected } from "../marketplace-filter.ts";
 import type { Marketplace } from "../mock-data.ts";
-import { fmtBrlFull, fmtNumber, fmtBrlCurto, fmtNumCurto, fmtVezes } from "../formatters.ts";
+import { fmtBrlFull, fmtNumber, fmtBrlCurto, fmtNumCurto, fmtPctSimples } from "../formatters.ts";
 
 export type KpiKey = "gmv" | "orders" | "avg_ticket" | "ad_spend" | "roas";
 
@@ -75,8 +75,17 @@ export interface ChannelValue {
   direction?: "up" | "down" | "flat" | null;
 }
 
-/** Como colorir a variacao: subir e' bom, ou nao ha' juizo (neutro). */
-export type DeltaTone = "higher_is_better" | "neutral";
+/** Como colorir a variacao: subir e' bom, descer e' bom (ACOS) ou sem juizo (neutro). */
+export type DeltaTone = "higher_is_better" | "lower_is_better" | "neutral";
+
+/**
+ * ACOS (%) = investimento / receita atribuida a anuncios = 100 / ROAS.
+ * shortcut: derivado do ROAS ja' arredondado em 2 casas (erro < 0,01 p.p.);
+ * se precisar exato, expor ad_revenue por canal no /overview.
+ */
+export function acosDoRoas(roas: number | null | undefined): number | null {
+  return roas != null && roas > 0 ? 100 / roas : null;
+}
 
 /** Variacao % quando ha' base: anterior positivo e finito; senao null. */
 export function deltaPct(current: number | null | undefined, previous: number | null | undefined): number | null {
@@ -256,15 +265,15 @@ export function buildKpiBand(
   const roasChannels: ChannelValue[] = [];
   for (const channel of ["ml", "shopee"] as const) {
     if (!isMarketplaceSelected(channels, channel)) continue;
-    const raw = channel === "ml" ? overview?.ml_roas : overview?.shopee_roas;
-    const anterior = channel === "ml" ? overview?.prev_ml_roas : overview?.prev_shopee_roas;
+    const raw = acosDoRoas(channel === "ml" ? overview?.ml_roas : overview?.shopee_roas);
+    const anterior = acosDoRoas(channel === "ml" ? overview?.prev_ml_roas : overview?.prev_shopee_roas);
     const pct = compare && raw != null ? deltaPct(raw, anterior) : null;
     roasChannels.push({
       channel,
       label: CHANNEL_LABEL[channel],
-      value: raw != null ? fmtVezes(raw) : null,
-      unavailableReason: raw != null ? undefined : "Sem ROAS para o período e filtros selecionados.",
-      previous: pct != null ? fmtVezes(anterior!) : null,
+      value: raw != null ? fmtPctSimples(raw) : null,
+      unavailableReason: raw != null ? undefined : "Sem ACOS para o período e filtros selecionados.",
+      previous: pct != null ? fmtPctSimples(anterior!) : null,
       direction: direcao(pct),
     });
   }
@@ -279,18 +288,18 @@ export function buildKpiBand(
   const compatibleWithValue = roasChannels.filter((c) => c.channel !== "tiktok" && c.value != null);
   const roas: KpiDescriptor = {
     key: "roas",
-    label: "ROAS por canal",
+    label: "ACOS por canal",
     // NUNCA um valor unico agregado: o card renderiza a lista por canal.
     value: null,
     exactValue: null,
     unavailableReason: anyAdsChannel
       ? compatibleWithValue.length === 0
-        ? "Sem ROAS disponível nos canais selecionados."
+        ? "Sem ACOS disponível nos canais selecionados."
         : null
-      : "Nenhum canal com ROAS selecionado.",
+      : "Nenhum canal com ACOS selecionado.",
     subvalue: null,
     deltaPct: null,
-    deltaTone: "higher_is_better",
+    deltaTone: "lower_is_better",
     reference: null,
     comparisonNote: null,
     coverageNote: null,

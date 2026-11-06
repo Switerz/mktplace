@@ -34,7 +34,8 @@ interface Props {
   /** Classe de cor da barra; padrao e' o destaque. */
   barra?: string;
   /** Variacao % contra o periodo anterior. `neutro` = sem cor de juizo. */
-  delta?: { pct: number; neutro?: boolean } | null;
+  /** `menorMelhor`: cair e' bom (ACOS) — so' a cor inverte, o numero nao. */
+  delta?: { pct: number; neutro?: boolean; menorMelhor?: boolean } | null;
 }
 
 function fmtDelta(v: number): string {
@@ -55,7 +56,8 @@ export default function EvidenceRow({
 }: Props) {
   const sobe = delta != null && delta.pct >= 0;
   const Seta = sobe ? ArrowUpRight : ArrowDownRight;
-  const peleDelta = delta?.neutro ? "bg-raised text-ink-muted" : sobe ? "bg-ok-soft text-ok-ink" : "bg-crit-soft text-crit-ink";
+  const bom = sobe !== Boolean(delta?.menorMelhor);
+  const peleDelta = delta?.neutro ? "bg-raised text-ink-muted" : bom ? "bg-ok-soft text-ok-ink" : "bg-crit-soft text-crit-ink";
   return (
     <li className="flex flex-col gap-1 py-1">
       <div className="flex items-center justify-between gap-3 text-sm">

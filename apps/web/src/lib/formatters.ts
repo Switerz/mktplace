@@ -73,6 +73,11 @@ export function fmtPctBr(valor: number): string {
   return `${sinal}${fmtDec(1, 1).format(Math.abs(valor))}%`;
 }
 
+/** Percentual sem sinal (ACOS): "9,6%". */
+export function fmtPctSimples(valor: number): string {
+  return `${fmtDec(1, 1).format(valor)}%`;
+}
+
 /** Multiplicador (ROAS): "12,0x". */
 export function fmtVezes(valor: number): string {
   return `${fmtDec(1, 1).format(valor)}x`;
