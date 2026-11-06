@@ -123,6 +123,24 @@ TAXA_SHOPEE = "shopee_taxa_escrow"
 PROC_TAXA_SHOPEE = ("silver.fct_gobeaute_despesas_shopee (comissao+servico+transacao) x silver.stg_shopee_orders "
                     "(coorte de criacao BRT, nao cancelados) @T-0059")
 
+#: T-0064 — completude pela NUMERACAO de NF. Rotulo estavel do trecho do
+#: `motivo` que o serving (`app.services.dre_service.BURACO_NF_MARCA`)
+#: reconhece para pôr o CMV em `parcial`. O CHECK `ck_fdim_status` e' lista
+#: fechada e nao tem `parcial`, entao o estado viaja no texto, sem migration.
+#: Um teste compara as duas constantes.
+BURACO_NF_MARCA = "buraco de numeracao de NF em "
+#: Menor buraco CONTIGUO (numeros faltando entre duas notas vizinhas da mesma
+#: serie) que torna o mes `parcial`. Buraco menor e' tratado como inutilizacao
+#: ou nota fora da base de vendas e so' aparece no resumo. Medido na gold
+#: (jun, ago, set, out/26 x 5 marcas; jul estourou o tempo de leitura): a serie
+#: 001 dos emissores principais intercala notas que nao sao de venda e tem buraco
+#: de ate' 474 numeros sem incidente (03/08); com 50, todas as marcas ficavam
+#: `parcial` em set e out. Os incidentes conhecidos (Apice 03/10, Barbours 04-05/10)
+#: tem 810 a 1.640 numeros contiguos. Rever com o resumo `numeracao_nf`.
+BURACO_NF_MINIMO = 500
+#: Quantos dias o `motivo` nomeia; o resto vira "e mais N dia(s)".
+BURACO_NF_DIAS_NO_MOTIVO = 10
+
 EXIT_OK = 0
 EXIT_RECONCILIACAO = 65
 EXIT_FONTE = 69
@@ -270,6 +288,59 @@ SQL_CMV_CONTRAPROVA = text("""
       AND plataforma = ANY(:plataformas)
       AND marca = ANY(:marcas)
     GROUP BY data_mes, marca, plataforma
+""")
+
+#: Gate de completude pela numeracao de NF (T-0064). A chave de acesso (44
+#: digitos) traz o emissor (CNPJ, pos. 7-20), o modelo (21-22), a serie
+#: (23-25) e o numero (26-34). Por emissor x modelo x serie, ordena os numeros
+#: presentes e mede o buraco entre vizinhos (`faltam`); o buraco e' atribuido
+#: ao DIA da nota seguinte (a primeira que voltou a aparecer).
+#:   * a numeracao e' do EMISSOR, nao do canal: entram todas as notas da gold
+#:     dos emissores das marcas da Torre (qualquer canal, plataforma ou
+#:     intercompany). Filtrar marketplace abriria buraco onde ha' nota de
+#:     e-commerce no meio;
+#:   * le' tambem o mes ANTERIOR a' janela, para medir o buraco no inicio do
+#:     primeiro mes; so' volta buraco datado dentro da janela;
+#:   * emissor -> marca vem da propria gold (CNPJ da chave x `marca`), medido
+#:     1:1 nas cinco marcas; nada fixo no codigo;
+#:   * a gold exclui NF rejeitada/denegada pela SEFAZ, entao o buraco junta "nao
+#:     ingerida" e "rejeitada" -- a gold nao distingue as duas.
+#: Agrega por dia; o limiar (`:minimo`) e' aplicado por buraco contiguo.
+SQL_NUMERACAO_NF = text("""
+    WITH emissores AS (
+        SELECT DISTINCT substr(chave_nfe, 7, 14) AS emissor, marca
+        FROM gold.nf_vendas_unificada_v2
+        WHERE data_mes = ANY(:competencias)
+          AND marca = ANY(:marcas)
+          AND chave_nfe ~ '^[0-9]{44}$'
+    ), notas AS (
+        SELECT substr(chave_nfe, 7, 14) AS emissor, substr(chave_nfe, 21, 2) AS modelo,
+               substr(chave_nfe, 23, 3) AS serie, substr(chave_nfe, 26, 9)::bigint AS numero,
+               MIN(data_emissao)::date AS dia
+        FROM gold.nf_vendas_unificada_v2
+        WHERE data_mes = ANY(:meses_numeracao)
+          AND chave_nfe ~ '^[0-9]{44}$'
+          AND substr(chave_nfe, 7, 14) IN (SELECT emissor FROM emissores)
+        GROUP BY 1, 2, 3, 4
+    ), buracos AS (
+        SELECT emissor, modelo, serie, dia,
+               numero - LAG(numero) OVER (PARTITION BY emissor, modelo, serie ORDER BY numero) - 1 AS faltam
+        FROM notas
+    )
+    SELECT date_trunc('month', b.dia)::date                            AS competencia,
+           e.marca                                                     AS marca,
+           b.modelo                                                    AS modelo,
+           b.serie                                                     AS serie,
+           b.dia                                                       AS dia,
+           COUNT(*)                                                    AS buracos,
+           SUM(b.faltam)                                               AS faltam,
+           MAX(b.faltam)                                               AS maior_buraco,
+           COUNT(*) FILTER (WHERE b.faltam >= :minimo)                 AS buracos_relevantes,
+           COALESCE(SUM(b.faltam) FILTER (WHERE b.faltam >= :minimo), 0) AS faltam_relevantes
+    FROM buracos b
+    JOIN emissores e ON e.emissor = b.emissor
+    WHERE b.faltam > 0 AND b.dia >= :inicio AND b.dia < :fim_exclusivo
+    GROUP BY 1, 2, 3, 4, 5
 """)
 
 SQL_REPASSE = text("""
@@ -433,6 +504,8 @@ class Lote:
     #: Observacoes que NAO recusam (contraprova contra agregado defasado).
     observacoes: list[str] = field(default_factory=list)
     extraidas: int = 0
+    #: Resultado do gate de numeracao de NF (T-0064), para o resumo JSON.
+    numeracao_nf: dict = field(default_factory=dict)
 
 
 def _linha(competencia, canal, marca, componente, valor, *, status, procedencia, sinal=None,
@@ -574,10 +647,66 @@ def contraprova_cmv(cmv_idx: dict, cp_idx: dict) -> tuple[list[str], dict]:
     return recusas, obs
 
 
+def _milhar(n: int) -> str:
+    return f"{n:,}".replace(",", ".")
+
+
+def buracos_numeracao_nf(numeracao: list[dict]) -> tuple[dict, dict]:
+    """Gate de completude pela numeracao de NF (T-0064). PURA.
+
+    Entrada: linhas de `SQL_NUMERACAO_NF` (marca x modelo x serie x dia).
+    Um dia conta quando tem buraco contiguo >= `BURACO_NF_MINIMO`
+    (`faltam_relevantes > 0`); os numeros das series se somam no dia.
+
+    Devolve `({(competencia, marca): trecho_do_motivo}, resumo)`. O trecho e'
+    `buraco de numeracao de NF em 03/10 (1.914 numeros), 04/10 (12 numeros)`,
+    sem `; ` dentro, para o serving separa'-lo do resto do motivo. O resumo
+    lista tambem os buracos ABAIXO do limiar (contagem e maior), que sao a
+    medicao para rever o limiar.
+    """
+    por_dia: dict[tuple, dict[date, int]] = {}
+    abaixo: dict[tuple, dict] = {}
+    for r in numeracao:
+        k = (_mes_de(r["competencia"]), r["marca"])
+        relevantes = int(r["faltam_relevantes"] or 0)
+        if relevantes > 0:
+            dia = _data(r["dia"])
+            por_dia.setdefault(k, {})
+            por_dia[k][dia] = por_dia[k].get(dia, 0) + relevantes
+        n_abaixo = int(r["buracos"] or 0) - int(r["buracos_relevantes"] or 0)
+        if n_abaixo > 0:
+            a = abaixo.setdefault(k, {"buracos": 0, "numeros": 0, "maior": 0})
+            a["buracos"] += n_abaixo
+            a["numeros"] += int(r["faltam"] or 0) - relevantes
+            # `maior_buraco` e' do dia inteiro; so' vale como "abaixo" se o dia nao teve relevante
+            if not int(r["buracos_relevantes"] or 0):
+                a["maior"] = max(a["maior"], int(r["maior_buraco"] or 0))
+
+    motivos: dict[tuple, str] = {}
+    for k, dias in por_dia.items():
+        ordem = sorted(dias)
+        nomeados = [f"{_fmt_dia(d)} ({_milhar(dias[d])} numeros)" for d in ordem[:BURACO_NF_DIAS_NO_MOTIVO]]
+        resto = ordem[BURACO_NF_DIAS_NO_MOTIVO:]
+        if resto:
+            nomeados.append(f"e mais {len(resto)} dia(s) ({_milhar(sum(dias[d] for d in resto))} numeros)")
+        motivos[k] = BURACO_NF_MARCA + ", ".join(nomeados)
+
+    resumo = {
+        "limiar_buraco": BURACO_NF_MINIMO,
+        "parciais": [{"competencia": m.isoformat()[:7], "marca": marca, "motivo": motivos[(m, marca)],
+                      "numeros": sum(por_dia[(m, marca)].values())}
+                     for m, marca in sorted(motivos)],
+        "abaixo_do_limiar": [{"competencia": m.isoformat()[:7], "marca": marca, **abaixo[(m, marca)]}
+                             for m, marca in sorted(abaixo)],
+    }
+    return motivos, resumo
+
+
 def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict],
                 repasse: list[dict], canais: list[str], comps: list[date],
                 sem_vendas: frozenset = frozenset(), publicadas: frozenset = frozenset(),
-                remover: frozenset = frozenset(), taxa_shopee: Optional[list[dict]] = None) -> Lote:
+                remover: frozenset = frozenset(), taxa_shopee: Optional[list[dict]] = None,
+                numeracao_nf: Optional[list[dict]] = None) -> Lote:
     """Transforma a leitura em linhas da fato e lista as recusas.
 
     Recusa (a publicacao inteira aborta) quando:
@@ -599,6 +728,12 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
     `taxa_shopee=None` = o Neon ainda nao aceita `TAXA_SHOPEE`: nenhuma linha do
     componente e' montada (o lote fica como antes do T-0059). Lista (mesmo
     vazia) = publicar o componente para toda celula Shopee esperada.
+
+    `numeracao_nf` (T-0064): linhas de `SQL_NUMERACAO_NF`. Marca x mes com
+    buraco de numeracao ganha o trecho `buraco de numeracao de NF em ...` no
+    `motivo` do `cmv` e do `cmv_receita_fiscal` de TODOS os canais dela (a
+    numeracao e' do emissor). Valor, status e cobertura NAO mudam -- nada e'
+    extrapolado -- e nunca recusa. `None` = gate nao avaliado (lote como antes).
     """
     lote = Lote(extraidas=len(cmv) + len(repasse) + len(taxa_shopee or []))
     plat_para_canal = {v: k for k, v in PLATAFORMA_FISCAL.items()}
@@ -628,6 +763,9 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
     recusas_cp, obs_por_mes = contraprova_cmv(cmv_idx, cp_idx)
     lote.recusas.extend(recusas_cp)
     lote.observacoes.extend(f"{m.isoformat()[:7]}: {o}" for m, o in sorted(obs_por_mes.items()))
+    buraco_nf: dict = {}
+    if numeracao_nf is not None:
+        buraco_nf, lote.numeracao_nf = buracos_numeracao_nf(numeracao_nf)
 
     for k in set(cmv_idx) - set(esp):
         lote.fora_do_escopo.append(("cmv",) + k)
@@ -660,11 +798,15 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
                           else f"receita fiscal / GMV = {razao:.4f}; aceito entre {CMV_RAZAO_MIN} e {CMV_RAZAO_MAX}")
             if m in obs_por_mes:
                 motivo = f"{motivo}; {obs_por_mes[m]}"
+            motivo_rf = "base da razao com o GMV"
+            if (m, marca) in buraco_nf:
+                motivo = f"{motivo}; {buraco_nf[(m, marca)]}"
+                motivo_rf = f"{motivo_rf}; {buraco_nf[(m, marca)]}"
             data_max = _ts(c["ultima_emissao"])
             lote.linhas.append(_linha(m, canal, marca, "cmv", custo, status=status, procedencia=PROC_CMV, sinal=1,
                                       cobertura=cobertura, provisorio=share, motivo=motivo, data_max=data_max))
             lote.linhas.append(_linha(m, canal, marca, "cmv_receita_fiscal", receita_fiscal, status="nao_avaliado",
-                                      procedencia=PROC_CMV, motivo="base da razao com o GMV", data_max=data_max))
+                                      procedencia=PROC_CMV, motivo=motivo_rf, data_max=data_max))
 
         if canal == "shopee" and taxa_shopee is not None:
             lote.linhas.append(_linha_taxa_shopee(m, marca, txs_idx.get((m, marca)), lote))
@@ -768,6 +910,36 @@ def ler_fonte(fonte_engine, comps: list[date], canais: list[str], marcas: list[s
     return cmv, contraprova, repasse, taxa_shopee
 
 
+def ler_numeracao_nf(fonte_engine, comps: list[date], marcas: list[str]) -> tuple[Optional[list], str]:
+    """Gate de numeracao de NF (T-0064): leitura PROPRIA, READ ONLY, com timeout.
+
+    Conexao separada de `ler_fonte` de proposito: o gate so' acrescenta motivo
+    e NUNCA bloqueia a publicacao. Erro de SQL vira `(None, "indisponivel:
+    ...")`, o lote sai como antes e o resumo diz que o gate nao rodou. So'
+    `SQLAlchemyError` e' engolido; qualquer outra excecao sobe.
+    """
+    if fonte_engine is None or not marcas:
+        return None, "nao avaliado: sem Data Mart ou sem marca no escopo"
+    params = {
+        "competencias": comps, "marcas": marcas, "minimo": BURACO_NF_MINIMO,
+        "meses_numeracao": [somar_meses(comps[0], -1)] + list(comps),
+        "inicio": comps[0], "fim_exclusivo": somar_meses(comps[-1], 1),
+    }
+    try:
+        with fonte_engine.connect() as conn:
+            conn.execute(text("SET TRANSACTION READ ONLY"))
+            conn.execute(text("SET LOCAL statement_timeout = '600s'"))
+            linhas = _rows(conn, SQL_NUMERACAO_NF, params)
+            conn.rollback()
+    except SQLAlchemyError as exc:
+        return None, f"indisponivel: {sanitizar(exc)}"
+    return linhas, "avaliado"
+
+
+def _resumo_numeracao(lote: Lote, estado: str) -> dict:
+    return {"estado": estado, **lote.numeracao_nf}
+
+
 def estado_taxa_shopee(taxa_shopee: Optional[list], canais: list[str]) -> str:
     """Rotulo do resumo: o componente entrou no lote ou ficou inerte, e por que."""
     if "shopee" not in canais:
@@ -852,12 +1024,14 @@ def diagnosticar(alvo_engine, fonte_engine, comps: list[date], canais: list[str]
         aceita_tx = bool(existe) and check_aceita_taxa_shopee(conn)
         conn.rollback()
     cmv, contraprova, repasse, taxa_shopee = ler_fonte(fonte_engine, comps, canais, _marcas(esperado), aceita_tx)
+    numeracao, estado_nf = ler_numeracao_nf(fonte_engine, comps, _marcas(esperado))
     publicadas = frozenset((_mes_de(r["competencia"]), r["canal"], r["marca"]) for r in atual)
     lote = montar_lote(esperado=esperado, cmv=cmv, contraprova=contraprova, repasse=repasse, canais=canais,
                        comps=comps, sem_vendas=sem_vendas, publicadas=publicadas, remover=remover,
-                       taxa_shopee=taxa_shopee)
+                       taxa_shopee=taxa_shopee, numeracao_nf=numeracao)
     return _resumo(lote, comps, canais, modo="dry-run", aplicado=False, tabela_existe=bool(existe),
                    taxa_shopee=estado_taxa_shopee(taxa_shopee, canais),
+                   numeracao_nf=_resumo_numeracao(lote, estado_nf),
                    sem_vendas=sorted(f"{m.isoformat()[:7]}:{c}" for m, c in sem_vendas),
                    remover_marca=sorted(rotulo_chave(k) for k in remover),
                    diff=_diff(atual, lote.linhas) if existe else None), lote
@@ -890,9 +1064,10 @@ def publicar(alvo_engine, fonte_engine, comps: list[date], canais: list[str], *,
                 for r in _rows(conn, SQL_PUBLICADAS, {"competencias": comps, "canais": canais}))
             cmv, contraprova, repasse, taxa_shopee = ler_fonte(fonte_engine, comps, canais, _marcas(esperado),
                                                                check_aceita_taxa_shopee(conn))
+            numeracao, estado_nf = ler_numeracao_nf(fonte_engine, comps, _marcas(esperado))
             lote = montar_lote(esperado=esperado, cmv=cmv, contraprova=contraprova, repasse=repasse, canais=canais,
                                comps=comps, sem_vendas=sem_vendas, publicadas=publicadas, remover=remover,
-                               taxa_shopee=taxa_shopee)
+                               taxa_shopee=taxa_shopee, numeracao_nf=numeracao)
             if lote.recusas:  # ANTES do DELETE: recusa nunca apaga a fotografia
                 raise PublicacaoRecusada(lote.recusas)
             apagadas = conn.execute(SQL_APAGA_ESCOPO, {"competencias": comps, "canais": canais}).rowcount
@@ -910,6 +1085,7 @@ def publicar(alvo_engine, fonte_engine, comps: list[date], canais: list[str], *,
         raise
     return _resumo(lote, comps, canais, modo="apply", aplicado=True, lote_id=lote_id, apagadas=apagadas,
                    taxa_shopee=estado_taxa_shopee(taxa_shopee, canais),
+                   numeracao_nf=_resumo_numeracao(lote, estado_nf),
                    sem_vendas=sorted(f"{m.isoformat()[:7]}:{c}" for m, c in sem_vendas),
                    remover_marca=sorted(rotulo_chave(k) for k in remover))
 
