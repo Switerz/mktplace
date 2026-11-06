@@ -311,11 +311,46 @@ Barbours passou em 0,981 sem 04/10. Por isso o publisher de insumos aplica um ga
 | Filtro usado | `circuito='VX'` (venda), `debito_credito='DB'` |
 | Peso medido (ago/2026) | **[FATO]** ICMS+PIS+COFINS sobre a receita fiscal da plataforma: **ML 14,6%**, **TikTok 11,8%**, **Shopee 11,6%** |
 | Limitação | **[FATO]** PIS+COFINS variam muito por plataforma (ML 1,9% vs TikTok 0,2% da receita). **[INFERÊNCIA]** emissores em regimes tributários diferentes. Cobertura (notas de marketplace com imposto ÷ notas de marketplace) **não medida**. 84.278 notas com imposto não casaram com nenhuma NF de venda das 5 marcas |
-| Status | **candidata, não ratificada** — fica fora da margem conhecida |
+| Status | ~~candidata, não ratificada~~ → **ratificada em 06/11/2026** como imposto realizado; ver §4.10.1 |
 | Responsável | **Fiscal/CMV** |
-| Decisão pendente | F8, D6 |
+| Decisão pendente | F8 (respondida em 06/11/2026, §4.10.1); D6 |
 
 **[FATO] Corrige o MARGEM-REAL-1 §7.2:** havia fonte de impostos por marketplace, só não tinha sido avaliada.
+
+#### 4.10.1 Impostos realizados (webgex) — T-0069, 06/11/2026
+
+**Decisão (Mário, 06/11/2026):** o webgex (`raw.webgex_impostos_gobeaute` + `raw.webgex_impostos_ap`, circuito `VX`,
+débito `DB`) fica **ratificado como imposto sobre venda realizado** da DRE, em **valor absoluto** por mês × canal ×
+marca. Valor absoluto, e não %, porque a base fiscal muda de regra (Rituaria out/26) e difere do GMV: aplicar % sobre o
+GMV seria uma decisão de rateio, não fato. Base: `.artefacts/deliveries/dre-custos-vivos/webgex_impostos_validacao.md`.
+
+| Campo | Regra |
+|---|---|
+| Fórmula | `impostos = ICMS + DIFAL + PIS/COFINS` da célula. ICMS = `SUM(valor_imposto)` com `codigo_imposto='ICM'`; DIFAL = `SUM(valor_difal)` das linhas `ICM` (coluna **separada**, fora de `valor_imposto`); PIS/COFINS = `SUM(valor_imposto)` com `codigo_imposto IN ('PIS','COF')`. IPI fica fora (valor zero medido) |
+| Fonte | as **duas** tabelas, `UNION ALL` (emissoras distintas: `_gobeaute` = Kokeshi, BB, Lescent, Maga, Vitalita; `_ap` = AP Cosmetics/Apice). O contrato DRE-0 só citava a primeira; Apice só existe na `_ap` |
+| Filtros | `circuito='VX' AND debito_credito='DB'` (fora: `OX`, `CX`, `TF`, devoluções `DX`/`DV`); `data` do webgex entre **1º dia da primeira competência − 7 dias** e **1º dia do mês seguinte à última + 7 dias**. A folga cobre o lançamento fiscal fora do mês da emissão e serve só para reduzir a varredura: a competência vem da gold |
+| Junção e grão | `chave_nota = gold.nf_vendas_unificada_v2.chave_nfe`, com os **mesmos filtros de célula do CMV** (`canal='marketplace'`; plataformas `tiktokshop`/`mercadolivre`/`shopee` → canais; marcas da Torre; `intercompany IS NOT TRUE`). A gold tem uma linha por item: a chave é colapsada (uma linha por chave × célula) **antes** da junção, e o webgex é agregado por chave. Competência = `data_mes` da NF. Grão publicado: competência × canal × marca |
+| Cobertura | receita fiscal das NFs com imposto casado ÷ receita fiscal da célula (a mesma do CMV, `cmv_receita_fiscal`) |
+| Publicação | `marts.fact_dre_insumo_mensal`, componentes `imposto_icms`, `imposto_difal`, `imposto_pis_cofins`, valor positivo (`sinal_origem = 1`), status `nao_avaliado`, pelo `pipelines.dre.insumo_publisher` |
+| Nulo ≠ 0 | célula sem NF casada → `valor NULL` / `ausente_na_origem` nos três; componente sem nenhuma linha do seu código nas NFs casadas → NULL. Zero só quando medido (ex.: PIS/COFINS CST 04 com NF casada) |
+| Parcial | trecho `imposto parcial: ...` no motivo (o CHECK de status não tem `parcial`, como no `BURACO_NF_MARCA` da T-0064): **(1)** cobertura < 0,98 (Lescent set/26: 13 dias sem carga); **(2)** canal Shopee, sempre: imposto só sobre a receita fiscal faturada, 21–36% do GMV (F1 em aberto); **(3)** Rituaria a partir de out/26: a base do ICMS passou a incluir o desconto (05/10: base 49,4 mil × receita 27,7 mil), pendente do Fiscal. Nunca se extrapola valor |
+| Fail-closed | a validação da leitura reprova os impostos do lote **inteiro** se houver chave de NF em mais de uma célula, receita fiscal diferente da do CMV (recarga da gold entre as leituras), imposto negativo, cobertura fora de [0,1] ou chave repetida. Nesse caso **nenhuma** linha de imposto é publicada e o resumo traz `impostos.estado = "recusado: ..."`; erro de SQL vira `"indisponivel: <classe>"`. Em nenhum dos casos o lote da DRE é recusado: CMV, taxas e repasse saem normalmente |
+| Ativação | **migration 040** (estende o CHECK `ck_fdim_componente` com os três componentes; o downgrade recusa se houver linha de imposto e não apaga dado). Antes dela o publisher é inerte |
+| Na DRE (serving) | precedência por célula: (1) sem imposto publicado, ou os três `ausente_na_origem` → linha como antes (`indisponivel`); (2) lote não concluído/vencido → `snapshot_ausente`/`snapshot_vencido`; (3) realizado → `valor` = soma, `partes` = `{icms, difal, pis_cofins}`, `cobertura` e `fonte` do webgex. `disponivel` (entra na margem conhecida) só com os três presentes, cobertura ≥ 98% e sem trecho parcial; senão `parcial`, fora da margem, com o motivo. Faltando um ou dois componentes, soma-se o que existe e o motivo nomeia o que falta **[SUPOSIÇÃO, T-0069]** |
+| Agregados | soma das células; `partes` somadas; `cobertura` = razão das somas (nula se alguma célula não tem); `parcial` se alguma célula não for `disponivel`; margem = soma das margens das células |
+| Premissas | a premissa de impostos (`marts.fact_dre_premissa_mensal`) **nunca** entra no realizado; segue só no `cenario_premissas` (estimado), que não foi alterado |
+
+**[FATO] Medição de set/26 (Metabase, Mário):** alíquota total (ICMS + DIFAL + PIS/COFINS) sobre a receita fiscal
+casada: Apice TikTok 24,4%, Kokeshi TikTok 24,8%, Barbours ML 21,2%; as 14 células ficam entre **20,6% e 24,8%**.
+Cobertura: Lescent 0,62–0,67 (buraco de carga), Rituaria TikTok 0,86. O "11,6–14,6%" que a API mostrava omitia o
+DIFAL.
+
+**Limitações abertas (perguntas ao Fiscal):**
+- (a) o total mensal bate com a apuração/SPED? Não comparado.
+- (b) o DIFAL é recolhido integralmente, ou há regime especial/benefício por UF?
+- (c) bruto × líquido de devoluções: hoje **bruto** (créditos `DX`/`DV` fora), coerente com a receita bruta, já que a
+  DRE não tem devoluções em valor.
+- (d) ST e FCP não aparecem nesta fonte.
 
 ---
 
