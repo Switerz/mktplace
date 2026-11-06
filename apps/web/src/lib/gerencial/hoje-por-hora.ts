@@ -27,13 +27,35 @@ export interface CanalVendas {
   semana_passada: BlocoVendas;
 }
 
-/** Tendencia de fechamento do dia por marca (ritmo de ontem ate' a mesma hora). */
-export interface MarcaTendencia {
-  brand: string;
+/** Tendencia de fechamento do dia (ritmo de ontem ate' a mesma hora). */
+export interface Tendencia {
   hoje: number;
   ontem_mesma_hora: number;
   ontem_dia: number;
   projecao: number | null;
+}
+
+export interface MarcaTendencia extends Tendencia {
+  brand: string;
+  /** A mesma conta por canal; ausente em respostas antigas da API. */
+  por_canal?: (Tendencia & { channel: Marketplace })[];
+}
+
+/**
+ * Tendencia de fechamento somando SO' os canais que o card mostra ao lado
+ * (ex.: so' os que tem meta): hoje ate' HHh x (ontem inteiro / ontem ate' HHh).
+ * Sem venda ontem ate' o corte nesses canais, `null`: sem ritmo, sem palpite.
+ */
+export function tendenciaNosCanais(
+  m: MarcaTendencia,
+  canais: readonly Marketplace[],
+): { projecao: number; ontemDia: number } | null {
+  const partes = (m.por_canal ?? []).filter((p) => canais.includes(p.channel));
+  const soma = (k: keyof Tendencia) => partes.reduce((a, p) => a + (p[k] ?? 0), 0);
+  const ate = soma("ontem_mesma_hora");
+  const dia = soma("ontem_dia");
+  if (ate <= 0 || dia <= 0) return null;
+  return { projecao: (soma("hoje") * dia) / ate, ontemDia: dia };
 }
 
 export interface HojePorHora {
