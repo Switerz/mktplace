@@ -118,7 +118,7 @@ PARTES_IMPOSTO = {"imposto_icms": "icms", "imposto_difal": "difal", "imposto_pis
 #: profundidade: o publisher ja' rotula a celula abaixo dele.
 COBERTURA_IMPOSTO_MINIMA = 0.98
 #: Celula SEM imposto realizado publicado: o comportamento de antes da T-0069.
-MOTIVO_IMPOSTOS_SEM_REALIZADO = "fonte candidata nao ratificada (pergunta F8); 11,6%-14,6% da receita fiscal"
+MOTIVO_IMPOSTOS_SEM_REALIZADO = "imposto realizado (webgex) ainda nao publicado para a celula: migration 040 pendente, sem NF casada ou impostos recusados no lote"
 #: Residuo tolerado na identidade settlement = revenue + fee_and_tax + shipping.
 #: Medido: 0,00 em 758.324 transacoes (contrato §6.1, P1).
 RESIDUO_REPASSE_MAX = 1.0
