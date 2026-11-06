@@ -1,76 +1,114 @@
-"""Top produtos de marketplace por marca (aba Gerencial).
+"""Top produtos por marca na Gerencial — o que MAIS VENDE, como foi vendido.
 
-Fonte: `gold.agg_vendas_consolidada_produto` (canal = 'marketplace'), a base
-consolidada por nota fiscal: ML, Shopee e TikTok juntos, um SKU canonico por
-produto. Mesma ideia do "Mix Marketplace" da Natalia (ranking por receita e
-pecas), sem refazer o motor dela: o de-para e a consolidacao ja vem prontos.
+Referencia: "Mix Marketplace" da Natalia (question 19829: data, canal, marca,
+sku, quantidade, receita). Aqui o ranking e' por ANUNCIO VENDIDO em cada canal,
+sem de-para e sem explodir kit: se o kit vende mais, aparece o kit.
 
-A base e' MENSAL: o periodo pedido vira os meses inteiros que ele toca. A
-receita e' a faturada (NF), nao o GMV de pedidos das outras telas.
+Fontes (Data Mart), uma consulta por canal selecionado:
+  TikTok  gold.fct_tiktok_product_daily  (product_id; soma = GMV da Torre)
+  ML      gold.vw_ml_produto_daily       (seller_sku; soma = GMV da Torre)
+  Shopee  silver.stg_shopee_order_items x stg_shopee_orders
+          (sem cancelado/nao pago/brinde; preco do item, antes do cupom)
 """
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, timedelta
 from typing import Callable, Optional
 
-from app.schemas.top_produtos import MarcaTop, ProdutoTop, TopProdutosResponse
+from app.schemas.top_produtos import (
+    DetalheProduto, ExtraCanal, MarcaTop, PontoDiario, ProdutoTop, TopProdutosResponse,
+)
 from app.services.gold_service import BRANDS_IN_SCOPE
 
 Consultar = Callable[[str, dict], list[dict]]
 
-TOP_N = 5
+TOP_N = 15
+CANAIS = ("tiktok", "ml", "shopee")
+_ID_DO_CANAL = {1: "tiktok", 2: "ml", 3: "shopee"}
+
+# Cada base devolve (marca, sku, nome, dia, pecas, receita) no intervalo :de..:ate.
+_BASE = {
+    "tiktok": """
+        SELECT brand AS marca, product_id AS sku, product_name AS nome, date AS dia,
+               items_sold AS pecas, gmv AS receita
+          FROM gold.fct_tiktok_product_daily
+         WHERE brand = ANY(:marcas) AND date BETWEEN :de AND :ate""",
+    "ml": """
+        SELECT brand AS marca, COALESCE(NULLIF(seller_sku, ''), item_id) AS sku, title AS nome,
+               ref_date::date AS dia, units_sold AS pecas, revenue AS receita
+          FROM gold.vw_ml_produto_daily
+         WHERE brand = ANY(:marcas) AND ref_date BETWEEN :de AND :ate""",
+    "shopee": """
+        SELECT o.brand AS marca, COALESCE(NULLIF(i.sku, ''), i.item_id) AS sku, i.item_name AS nome,
+               o.created_date_brt AS dia, i.quantity AS pecas, i.quantity * i.discounted_price AS receita
+          FROM silver.stg_shopee_order_items i
+          JOIN silver.stg_shopee_orders o ON o.order_sn = i.order_sn
+         WHERE o.order_status NOT IN ('cancelled', 'unpaid')
+           AND COALESCE(i.is_freebie, false) = false
+           AND o.brand = ANY(:marcas) AND o.created_date_brt BETWEEN :de AND :ate""",
+}
 
 SQL_TOP = """
-WITH base AS (
-    SELECT marca,
-           COALESCE(sku_canonico, codigo_sku, produto) AS sku,
-           MAX(produto) AS produto,
-           MAX(categoria_macro) AS categoria,
-           SUM(quantidade) AS pecas,
-           SUM(receita_produto) AS receita,
-           MAX(ultima_emissao) AS ultima
-      FROM gold.agg_vendas_consolidada_produto
-     WHERE canal = 'marketplace'
-       AND data_mes BETWEEN :mes_inicio AND :mes_fim
-       AND marca = ANY(:marcas)
-     GROUP BY 1, 2
+WITH base AS ({base}),
+agg AS (
+    SELECT marca, sku, MAX(nome) AS nome,
+           SUM(pecas)   FILTER (WHERE dia BETWEEN :ini AND :fim) AS pecas,
+           SUM(receita) FILTER (WHERE dia BETWEEN :ini AND :fim) AS receita,
+           SUM(pecas)   FILTER (WHERE dia BETWEEN :ini_ant AND :fim_ant) AS pecas_ant,
+           SUM(receita) FILTER (WHERE dia BETWEEN :ini_ant AND :fim_ant) AS receita_ant
+      FROM base GROUP BY marca, sku
 ), ranqueado AS (
-    SELECT base.*,
+    SELECT agg.*,
            SUM(receita) OVER (PARTITION BY marca) AS receita_marca,
-           ROW_NUMBER() OVER (PARTITION BY marca ORDER BY receita DESC, sku) AS posicao,
-           MAX(ultima) OVER () AS nf_ate
-      FROM base
-     WHERE receita > 0
+           SUM(receita_ant) OVER (PARTITION BY marca) AS receita_marca_ant,
+           ROW_NUMBER() OVER (PARTITION BY marca ORDER BY receita DESC NULLS LAST, sku) AS posicao
+      FROM agg
 )
-SELECT marca, sku, produto, categoria, pecas, receita, receita_marca, posicao, nf_ate
+SELECT marca, sku, nome, pecas, receita, pecas_ant, receita_ant, receita_marca, receita_marca_ant
   FROM ranqueado
- WHERE posicao <= :top_n
- ORDER BY receita_marca DESC, marca, posicao
+ WHERE posicao <= :top_n AND receita > 0
 """
 
-# "7898652877971 - (N)Ativador ... 500gr - I4" -> "Ativador ... 500gr"
-_EAN_INICIO = re.compile(r"^\s*\d{8,14}\s*-\s*")
-_MARCADOR_N = re.compile(r"^\(N\)\s*", re.IGNORECASE)
-_POSICAO_FIM = re.compile(r"\s*-\s*[A-Z]\d{1,2}(\(\w\))?\s*$")
-_PONTOS_FIM = re.compile(r"[\s.]+$")
+SQL_SERIE = """
+WITH base AS ({base})
+SELECT dia, MAX(nome) AS nome, SUM(pecas) AS pecas, SUM(receita) AS receita
+  FROM base WHERE marca = :marca AND sku = :sku
+ GROUP BY dia ORDER BY dia
+"""
+
+SQL_EXTRAS = {
+    "tiktok": """
+        SELECT SUM(gmv_video) AS video, SUM(gmv_live) AS live, SUM(gmv_product_card) AS card
+          FROM gold.fct_tiktok_product_daily
+         WHERE brand = :marca AND product_id = :sku AND date BETWEEN :ini AND :fim""",
+    "ml": """
+        SELECT SUM(ad_spend) AS investimento, SUM(ad_revenue) AS receita_ads
+          FROM gold.vw_ml_produto_daily
+         WHERE brand = :marca AND COALESCE(NULLIF(seller_sku, ''), item_id) = :sku
+           AND ref_date BETWEEN :ini AND :fim""",
+}
+
+_KIT = re.compile(r"\b(kit|combo)\b", re.IGNORECASE)
 
 
-def limpar_nome(nome: Optional[str]) -> str:
-    s = _EAN_INICIO.sub("", nome or "")
-    s = _MARCADOR_N.sub("", s)
-    s = _POSICAO_FIM.sub("", s)
-    s = _PONTOS_FIM.sub("", s)
-    return re.sub(r"\s{2,}", " ", s).strip() or (nome or "").strip()
+def eh_kit(nome: Optional[str]) -> bool:
+    return bool(_KIT.search(nome or ""))
+
+
+def canais_do_filtro(mkt_ids: list[int]) -> list[str]:
+    return [_ID_DO_CANAL[i] for i in sorted(mkt_ids) if i in _ID_DO_CANAL]
 
 
 def _num(v) -> float:
     return float(v) if v is not None else 0.0
 
 
-def _data(v) -> Optional[date]:
-    if v is None:
-        return None
+def _opt(v) -> Optional[float]:
+    return float(v) if v is not None else None
+
+
+def _data(v) -> date:
     return v if isinstance(v, date) else date.fromisoformat(str(v)[:10])
 
 
@@ -78,31 +116,86 @@ def get_top_produtos(
     consultar: Consultar,
     inicio: date,
     fim: date,
+    comparacao: Optional[tuple[date, date]],
     marcas: Optional[list[str]],
+    canais: list[str],
 ) -> TopProdutosResponse:
     escopo = [m for m in (marcas or BRANDS_IN_SCOPE) if m in BRANDS_IN_SCOPE]
-    mes_inicio, mes_fim = inicio.replace(day=1), fim.replace(day=1)
-    linhas = consultar(SQL_TOP, {
-        "mes_inicio": mes_inicio, "mes_fim": mes_fim, "marcas": escopo, "top_n": TOP_N,
-    }) if escopo else []
+    canais = [c for c in canais if c in CANAIS]
+    # Sem comparacao, a janela anterior fica vazia (ini_ant > fim_ant).
+    ini_ant, fim_ant = comparacao or (fim + timedelta(days=1), inicio)
+    params = {
+        "marcas": escopo, "de": min(inicio, ini_ant), "ate": fim,
+        "ini": inicio, "fim": fim, "ini_ant": ini_ant, "fim_ant": fim_ant, "top_n": TOP_N,
+    }
 
-    por_marca: dict[str, MarcaTop] = {}
-    nf_ate = None
-    for l in linhas:
-        nf_ate = nf_ate or _data(l.get("nf_ate"))
-        total = _num(l["receita_marca"])
-        bloco = por_marca.setdefault(l["marca"], MarcaTop(marca=l["marca"], receita_marca=total, produtos=[]))
-        pecas, receita = _num(l["pecas"]), _num(l["receita"])
-        bloco.produtos.append(ProdutoTop(
-            posicao=int(l["posicao"]),
-            sku=str(l["sku"]),
-            produto=limpar_nome(l["produto"]),
-            categoria=l.get("categoria"),
-            pecas=pecas,
-            receita=receita,
-            preco_medio=receita / pecas if pecas > 0 else None,
-            share_marca=receita / total if total > 0 else None,
+    produtos: dict[str, list[ProdutoTop]] = {}
+    totais: dict[str, list[Optional[float]]] = {}
+    for canal in canais if escopo else []:
+        for l in consultar(SQL_TOP.format(base=_BASE[canal]), params):
+            marca = l["marca"]
+            t = totais.setdefault(marca, [0.0, None])
+            # Totais da marca vem repetidos em cada linha do canal: soma uma vez por canal.
+            if not any(p.canal == canal for p in produtos.get(marca, [])):
+                t[0] += _num(l["receita_marca"])
+                if l.get("receita_marca_ant") is not None:
+                    t[1] = (t[1] or 0.0) + _num(l["receita_marca_ant"])
+            pecas, receita = _num(l["pecas"]), _num(l["receita"])
+            produtos.setdefault(marca, []).append(ProdutoTop(
+                posicao=0, canal=canal, sku=str(l["sku"]), produto=(l["nome"] or str(l["sku"])).strip(),
+                kit=eh_kit(l["nome"]), pecas=pecas, receita=receita,
+                preco_medio=receita / pecas if pecas > 0 else None,
+                pecas_ant=_opt(l.get("pecas_ant")) if comparacao else None,
+                receita_ant=_opt(l.get("receita_ant")) if comparacao else None,
+            ))
+
+    blocos = []
+    for marca, lista in produtos.items():
+        total, total_ant = totais[marca]
+        top = sorted(lista, key=lambda p: (-p.receita, p.canal, p.sku))[:TOP_N]
+        for i, p in enumerate(top, start=1):
+            p.posicao = i
+            p.share_marca = p.receita / total if total > 0 else None
+        blocos.append(MarcaTop(
+            marca=marca, receita_marca=total, receita_marca_ant=total_ant if comparacao else None, produtos=top,
         ))
+    blocos.sort(key=lambda b: -b.receita_marca)
     return TopProdutosResponse(
-        mes_inicio=mes_inicio, mes_fim=mes_fim, nf_ate=nf_ate, marcas=list(por_marca.values()),
+        inicio=inicio, fim=fim,
+        comparacao_inicio=comparacao[0] if comparacao else None,
+        comparacao_fim=comparacao[1] if comparacao else None,
+        canais=canais, marcas=blocos,
+    )
+
+
+def get_detalhe(
+    consultar: Consultar, canal: str, marca: str, sku: str, inicio: date, fim: date,
+) -> Optional[DetalheProduto]:
+    """Serie diaria de 12 meses ate `fim` (para dia/semana/mes no front) e os
+    extras do canal somados em `inicio..fim`. None = anuncio sem venda."""
+    de = fim - timedelta(days=364)
+    linhas = consultar(SQL_SERIE.format(base=_BASE[canal]), {
+        "marcas": [marca], "de": de, "ate": fim, "marca": marca, "sku": sku,
+    })
+    if not linhas:
+        return None
+    nome = next((l["nome"] for l in reversed(linhas) if l.get("nome")), sku)
+
+    extras: list[ExtraCanal] = []
+    if canal in SQL_EXTRAS:
+        [e] = consultar(SQL_EXTRAS[canal], {"marca": marca, "sku": sku, "ini": inicio, "fim": fim}) or [{}]
+        if canal == "tiktok":
+            extras = [ExtraCanal(rotulo=r, valor=_num(e.get(k)), formato="brl")
+                      for r, k in (("GMV por vídeo", "video"), ("GMV por live", "live"), ("GMV pelo card", "card"))]
+        else:
+            invest, rec_ads = _num(e.get("investimento")), _num(e.get("receita_ads"))
+            extras = [ExtraCanal(rotulo="Investimento em ads", valor=invest, formato="brl"),
+                      ExtraCanal(rotulo="Receita via ads", valor=rec_ads, formato="brl")]
+            if invest > 0:
+                extras.append(ExtraCanal(rotulo="ROAS", valor=rec_ads / invest, formato="vezes"))
+
+    return DetalheProduto(
+        canal=canal, marca=marca, sku=sku, produto=str(nome).strip(), kit=eh_kit(nome),
+        serie=[PontoDiario(dia=_data(l["dia"]), pecas=_num(l["pecas"]), receita=_num(l["receita"])) for l in linhas],
+        extras=extras,
     )

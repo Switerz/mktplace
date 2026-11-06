@@ -687,7 +687,13 @@ function GerencialInner() {
         onRetry={sources.retry}
       />
 
-      <TopProdutosMarca brands={filters.brands} dateFrom={filters.dateFrom} dateTo={filters.dateTo} />
+      <TopProdutosMarca
+        channels={filters.channels}
+        brands={filters.brands}
+        dateFrom={filters.dateFrom}
+        dateTo={filters.dateTo}
+        compare={filters.compare}
+      />
 
       {/* ---- Mais detalhes (GERENCIAL-METAS-1) ----
           Profundidade sob demanda: tudo o que a V2 mostrava continua aqui,

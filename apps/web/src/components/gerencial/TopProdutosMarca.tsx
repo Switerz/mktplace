@@ -1,149 +1,354 @@
 "use client";
 
 /**
- * Top 5 produtos por marca (Gerencial).
+ * Mais vendidos por marca (Gerencial).
  *
- * Referencia: "Mix Marketplace" da Natalia (ranking por receita, com pecas,
- * preco medio e categoria · SKU sob o nome). Fonte: `/api/v1/gerencial/top-produtos`,
- * base consolidada por NF — MENSAL e com os marketplaces juntos, por isso o
- * card ignora o filtro de canal e diz quais meses entraram.
+ * Referencia: "Mix Marketplace" da Natalia. O ranking e' por ANUNCIO VENDIDO
+ * em cada canal — kit e' kit, sem de-para — e respeita canal, marca, periodo e
+ * comparacao da barra de filtros. Cada linha abre o detalhe: indicadores do
+ * periodo, venda por dia/semana/mes e o que so' o canal sabe (TikTok: video,
+ * live e card; ML: ads e ROAS).
  */
+import dynamic from "next/dynamic";
 import { useEffect, useState } from "react";
+import { ChevronDown, Trophy } from "lucide-react";
 
-import { torreFetch } from "@/lib/torre-fetch";
-import { MARCAS } from "@/lib/metas";
-import { fmtBrlCurto, fmtNumCurto } from "@/lib/formatters";
+import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
+import TableScrollHint from "@/components/TableScrollHint";
 import InfoDica from "@/components/ui/InfoDica";
+import Segmented from "@/components/ui/Segmented";
+import { CHANNEL_DOT } from "@/lib/gerencial/channel-colors";
+import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
+import { MARCAS } from "@/lib/metas";
+import { fmtBrlCurto, fmtNumCurto, fmtPctBr, fmtVezes } from "@/lib/formatters";
+import {
+  agrupar, buscarDetalhe, buscarTopProdutos, variacao,
+  type DetalheProduto, type Grao, type MarcaTop, type ProdutoTop, type TopProdutosResponse,
+} from "@/lib/gerencial/top-produtos";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+const Grafico = dynamic(() => import("./TopProdutoGrafico"), {
+  ssr: false,
+  loading: () => <div className="h-full w-full animate-pulse rounded-lg bg-raised motion-reduce:animate-none" />,
+});
 
-interface ProdutoTop {
-  posicao: number;
-  sku: string;
-  produto: string;
-  categoria: string | null;
-  pecas: number;
-  receita: number;
-  preco_medio: number | null;
-  share_marca: number | null;
-}
-interface MarcaTop {
-  marca: string;
-  receita_marca: number;
-  produtos: ProdutoTop[];
-}
-interface TopProdutosResponse {
-  mes_inicio: string;
-  mes_fim: string;
-  nf_ate: string | null;
-  marcas: MarcaTop[];
-}
-
-const MES = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"];
-const mesCurto = (iso: string) => `${MES[Number(iso.slice(5, 7)) - 1]}/${iso.slice(2, 4)}`;
+const VISIVEIS = 5;
 const rotuloMarca = (id: string) => MARCAS.find((m) => m.id === id)?.label ?? id.toUpperCase();
+const TH = "py-2 px-2 text-xs font-semibold uppercase tracking-wide text-ink-faint";
 
 interface Props {
+  channels: string[];
   brands: string[];
   dateFrom: string;
   dateTo: string;
+  compare: boolean;
 }
 
-export default function TopProdutosMarca({ brands, dateFrom, dateTo }: Props) {
+export default function TopProdutosMarca({ channels, brands, dateFrom, dateTo, compare }: Props) {
   const [dados, setDados] = useState<TopProdutosResponse | null>(null);
   const [erro, setErro] = useState(false);
-  const marcas = brands.join(",");
+  const [tentativa, setTentativa] = useState(0);
+  const [abertas, setAbertas] = useState<Record<string, boolean>>({});
+  const [aberto, setAberto] = useState<{ marca: string; produto: ProdutoTop } | null>(null);
+  const chave = [channels.join(","), brands.join(","), dateFrom, dateTo, compare].join("|");
 
   useEffect(() => {
     const ac = new AbortController();
-    const q = new URLSearchParams({ date_from: dateFrom, date_to: dateTo });
-    if (marcas) q.set("brands", marcas);
+    const q = new URLSearchParams({ channels: channels.join(","), date_from: dateFrom, date_to: dateTo, compare: String(compare) });
+    if (brands.length) q.set("brands", brands.join(","));
     setErro(false);
     setDados(null);
-    torreFetch(`${API_URL}/api/v1/gerencial/top-produtos?${q}`, { signal: ac.signal })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
-      .then((j: TopProdutosResponse) => setDados(j))
-      .catch((e) => {
-        if (!(e instanceof DOMException && e.name === "AbortError")) setErro(true);
-      });
+    setAberto(null);
+    buscarTopProdutos(q, ac.signal).then(setDados).catch((e) => {
+      if (!(e instanceof DOMException && e.name === "AbortError")) setErro(true);
+    });
     return () => ac.abort();
-  }, [marcas, dateFrom, dateTo]);
+    // `chave` resume os filtros; `tentativa` refaz a busca.
+  }, [chave, tentativa]);
 
-  const meses = dados
-    ? dados.mes_inicio === dados.mes_fim
-      ? mesCurto(dados.mes_inicio)
-      : `${mesCurto(dados.mes_inicio)} a ${mesCurto(dados.mes_fim)}`
-    : null;
+  const comparando = Boolean(dados?.comparacao_inicio);
 
   return (
-    <section aria-labelledby="top-produtos-titulo" className="rounded-xl border border-line bg-surface p-5">
-      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+    <section aria-labelledby="top-produtos-titulo" className="flex flex-col gap-3 rounded-xl border border-line bg-surface p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-1.5">
-          <h2 id="top-produtos-titulo" className="text-sm font-semibold text-ink">
-            Top 5 produtos por marca
+          <Trophy aria-hidden="true" className="h-4 w-4 text-ink-faint" strokeWidth={1.75} />
+          <h2 id="top-produtos-titulo" className="text-sm font-semibold text-ink-muted">
+            Mais vendidos por marca
           </h2>
-          <InfoDica texto="Receita faturada (NF) de marketplace, ML, Shopee e TikTok juntos, por SKU canônico. A base é mensal: o período vira os meses inteiros que ele toca, e o filtro de canal não se aplica. % = parte da receita de marketplace da marca." />
+          <InfoDica texto="Ranking por receita do anúncio como foi vendido em cada canal: kit conta como kit, sem de-para. TikTok e Mercado Livre somam o mesmo GMV da Torre; Shopee usa o preço do item sem cancelados e brindes. Clique num produto para ver o detalhe." />
         </div>
-        {meses && (
-          <span className="text-xs text-ink-muted">
-            Marketplace · {meses}
-            {dados?.nf_ate && ` · NF até ${dados.nf_ate.slice(8, 10)}/${dados.nf_ate.slice(5, 7)}`}
-          </span>
-        )}
+        <span className="text-xs text-ink-faint">Clique num produto para ver o detalhe</span>
       </div>
 
       {erro ? (
-        <p className="text-sm text-crit-ink">Top produtos indisponível.</p>
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-raised p-3">
+          <p className="text-sm text-ink-muted">Mais vendidos indisponível nesta carga.</p>
+          <button
+            type="button"
+            onClick={() => setTentativa((t) => t + 1)}
+            className="min-h-11 rounded-lg border border-line-strong px-3 text-xs font-semibold text-ink-muted hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+          >
+            Tentar novamente
+          </button>
+        </div>
       ) : !dados ? (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3" aria-hidden="true">
-          {[0, 1, 2].map((i) => (
-            <div key={i} className="h-56 animate-pulse rounded-lg bg-raised motion-reduce:animate-none" />
+        <div className="flex flex-col gap-2" role="status" aria-busy="true">
+          <span className="sr-only">Carregando mais vendidos…</span>
+          {[0, 1, 2, 3, 4, 5].map((i) => (
+            <div key={i} className="h-10 animate-pulse rounded bg-accent-soft motion-reduce:animate-none" />
           ))}
         </div>
       ) : dados.marcas.length === 0 ? (
-        <p className="text-sm text-ink-faint">Sem venda de produto no período e marcas selecionados.</p>
+        <p className="text-sm text-ink-faint">Sem venda de produto no período e filtros selecionados.</p>
       ) : (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {dados.marcas.map((m) => (
-            <article key={m.marca} className="rounded-lg border border-line p-3">
-              <header className="mb-2 flex items-baseline justify-between gap-2">
-                <h3 className="text-sm font-semibold text-ink">{rotuloMarca(m.marca)}</h3>
-                <span className="text-xs tabular-nums text-ink-muted">{fmtBrlCurto(m.receita_marca)} no total</span>
-              </header>
-              <ol className="flex flex-col">
-                {m.produtos.map((p) => (
-                  <li key={p.sku} className="grid grid-cols-[1.25rem_1fr_auto] items-start gap-2 border-t border-line py-2 first:border-t-0">
-                    <span className="text-xs font-semibold tabular-nums text-ink-faint">{p.posicao}</span>
-                    <span className="min-w-0">
-                      <span className="block truncate text-sm text-ink" title={p.produto}>
-                        {p.produto}
-                      </span>
-                      <span className="block truncate text-xs text-ink-faint">
-                        {p.categoria ?? "Sem categoria"} · <span className="font-mono">{p.sku}</span>
-                      </span>
-                      {p.share_marca != null && (
-                        <span className="mt-1 block h-1 rounded-full bg-raised" aria-hidden="true">
-                          <span className="block h-1 rounded-full bg-accent" style={{ width: `${p.share_marca * 100}%` }} />
-                        </span>
-                      )}
-                    </span>
-                    <span className="flex flex-col items-end text-right tabular-nums">
-                      <span className="text-sm font-semibold text-ink">{fmtBrlCurto(p.receita)}</span>
-                      <span className="text-xs text-ink-muted">
-                        {fmtNumCurto(p.pecas)} pç
-                        {p.share_marca != null && ` · ${Math.round(p.share_marca * 100)}%`}
-                      </span>
-                      {p.preco_medio != null && (
-                        <span className="text-xs text-ink-faint">PM {fmtBrlCurto(p.preco_medio)}</span>
-                      )}
-                    </span>
-                  </li>
-                ))}
-              </ol>
-            </article>
-          ))}
+        <TableScrollHint>
+          <table className="w-full min-w-[760px] table-fixed border-collapse">
+            <caption className="sr-only">
+              Produtos que mais venderam por marca no período, com receita, peças, preço médio e participação na receita da marca.
+            </caption>
+            <thead>
+              <tr className="border-b border-line">
+                <th scope="col" className={`${TH} w-9 text-left`}>#</th>
+                <th scope="col" className={`${TH} text-left`}>Produto</th>
+                <th scope="col" className={`${TH} w-28 text-right`}>Receita</th>
+                {comparando && <th scope="col" className={`${TH} w-28 text-right`}>vs anterior</th>}
+                <th scope="col" className={`${TH} w-20 text-right`}>Peças</th>
+                <th scope="col" className={`${TH} w-28 text-right`}>Preço médio</th>
+                <th scope="col" className={`${TH} w-36 text-right`}>% da marca</th>
+              </tr>
+            </thead>
+            {dados.marcas.map((m) => (
+              <BlocoMarca
+                key={m.marca}
+                m={m}
+                comparando={comparando}
+                aberta={Boolean(abertas[m.marca])}
+                alternar={() => setAbertas((a) => ({ ...a, [m.marca]: !a[m.marca] }))}
+                abrir={(produto) => setAberto({ marca: m.marca, produto })}
+              />
+            ))}
+          </table>
+        </TableScrollHint>
+      )}
+
+      <KpiDrilldownDialog
+        open={aberto != null}
+        onClose={() => setAberto(null)}
+        title={aberto ? aberto.produto.produto : ""}
+        largura="larga"
+        focusResetKey={aberto ? `${aberto.produto.canal}:${aberto.produto.sku}` : undefined}
+      >
+        {aberto && dados && (
+          <DetalheTop marca={aberto.marca} p={aberto.produto} inicio={dados.inicio} fim={dados.fim} comparando={comparando} />
+        )}
+      </KpiDrilldownDialog>
+    </section>
+  );
+}
+
+function Delta({ valor }: { valor: number | null }) {
+  if (valor == null) return <span className="text-xs text-ink-faint">novo</span>;
+  const sobe = valor >= 0;
+  return (
+    <span className={`inline-flex rounded-full px-1.5 py-0.5 text-xs font-semibold tabular-nums ${sobe ? "bg-ok-soft text-ok-ink" : "bg-crit-soft text-crit-ink"}`}>
+      {fmtPctBr(valor)}
+    </span>
+  );
+}
+
+function CanalSelo({ canal }: { canal: ProdutoTop["canal"] }) {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs text-ink-muted">
+      <span aria-hidden="true" className={`h-2 w-2 rounded-full ${CHANNEL_DOT[canal]}`} />
+      {CHANNEL_LABEL[canal]}
+    </span>
+  );
+}
+
+function KitSelo() {
+  return <span className="rounded-md bg-accent-soft px-1.5 py-0.5 text-xs font-semibold text-accent-ink">Kit</span>;
+}
+
+function BlocoMarca({
+  m, comparando, aberta, alternar, abrir,
+}: { m: MarcaTop; comparando: boolean; aberta: boolean; alternar: () => void; abrir: (p: ProdutoTop) => void }) {
+  const visiveis = aberta ? m.produtos : m.produtos.slice(0, VISIVEIS);
+  const colunas = comparando ? 7 : 6;
+  return (
+    <tbody className="border-b border-line last:border-0">
+      <tr>
+        <th scope="rowgroup" colSpan={colunas} className="px-2 pb-1 pt-3 text-left">
+          <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <span className="text-sm font-semibold text-ink">{rotuloMarca(m.marca)}</span>
+            <span className="text-xs font-medium tabular-nums text-ink-faint">
+              {fmtBrlCurto(m.receita_marca)} no período
+            </span>
+            {comparando && <Delta valor={variacao(m.receita_marca, m.receita_marca_ant)} />}
+          </span>
+        </th>
+      </tr>
+      {visiveis.map((p) => (
+        <tr
+          key={`${p.canal}:${p.sku}`}
+          onClick={() => abrir(p)}
+          className="group cursor-pointer transition-colors hover:bg-accent-soft/50"
+        >
+          <td className="px-2 py-2 align-top text-xs font-semibold tabular-nums text-ink-faint">{p.posicao}</td>
+          <td className="px-2 py-2">
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); abrir(p); }}
+              aria-haspopup="dialog"
+              className="line-clamp-2 w-full rounded text-left text-sm font-medium leading-snug text-ink group-hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              title={p.produto}
+            >
+              {p.produto}
+            </button>
+            <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+              <CanalSelo canal={p.canal} />
+              {p.kit && <KitSelo />}
+              <span className="truncate font-mono text-xs text-ink-faint">{p.sku}</span>
+            </span>
+          </td>
+          <td className="tabular px-2 py-2 text-right align-top text-sm font-semibold text-ink">{fmtBrlCurto(p.receita)}</td>
+          {comparando && (
+            <td className="px-2 py-2 text-right align-top"><Delta valor={variacao(p.receita, p.receita_ant)} /></td>
+          )}
+          <td className="tabular px-2 py-2 text-right align-top text-sm text-ink-muted">{fmtNumCurto(p.pecas)}</td>
+          <td className="tabular px-2 py-2 text-right align-top text-sm text-ink-muted">
+            {p.preco_medio != null ? fmtBrlCurto(p.preco_medio) : "—"}
+          </td>
+          <td className="px-2 py-2 align-top">
+            {p.share_marca != null && (
+              <span className="flex items-center justify-end gap-2">
+                <span className="h-1.5 w-20 rounded-full bg-raised" aria-hidden="true">
+                  <span className="block h-1.5 rounded-full bg-accent" style={{ width: `${Math.min(100, p.share_marca * 100)}%` }} />
+                </span>
+                <span className="tabular w-10 text-right text-sm text-ink-muted">{Math.round(p.share_marca * 100)}%</span>
+              </span>
+            )}
+          </td>
+        </tr>
+      ))}
+      {m.produtos.length > VISIVEIS && (
+        <tr>
+          <td colSpan={colunas} className="px-2 pb-2">
+            <button
+              type="button"
+              onClick={alternar}
+              aria-expanded={aberta}
+              className="inline-flex min-h-11 items-center gap-1 rounded-lg px-2 text-xs font-semibold text-accent hover:bg-accent-soft/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+            >
+              {aberta ? "Mostrar só o top 5" : `Ver top ${m.produtos.length} de ${rotuloMarca(m.marca)}`}
+              <ChevronDown aria-hidden="true" className={`h-4 w-4 transition-transform ${aberta ? "rotate-180" : ""}`} />
+            </button>
+          </td>
+        </tr>
+      )}
+    </tbody>
+  );
+}
+
+const GRAOS = [
+  { valor: "dia", texto: "Dia" },
+  { valor: "semana", texto: "Semana" },
+  { valor: "mes", texto: "Mês" },
+] as const;
+const METRICAS = [
+  { valor: "receita", texto: "Receita" },
+  { valor: "pecas", texto: "Peças" },
+] as const;
+const TITULO_GRAO: Record<Grao, string> = { dia: "últimos 30 dias", semana: "últimas 12 semanas", mes: "últimos 12 meses" };
+
+function Indicador({ rotulo, valor, delta }: { rotulo: string; valor: string; delta?: React.ReactNode }) {
+  return (
+    <div className="flex flex-col gap-1 rounded-lg border border-line p-3">
+      <span className="text-xs font-semibold uppercase tracking-wide text-ink-faint">{rotulo}</span>
+      <span className="text-xl font-semibold tabular-nums text-ink">{valor}</span>
+      {delta && <span className="self-start">{delta}</span>}
+    </div>
+  );
+}
+
+function DetalheTop({
+  marca, p, inicio, fim, comparando,
+}: { marca: string; p: ProdutoTop; inicio: string; fim: string; comparando: boolean }) {
+  const [det, setDet] = useState<DetalheProduto | null>(null);
+  const [erro, setErro] = useState(false);
+  const [grao, setGrao] = useState<Grao>("dia");
+  const [metrica, setMetrica] = useState<"receita" | "pecas">("receita");
+
+  useEffect(() => {
+    const ac = new AbortController();
+    setDet(null);
+    setErro(false);
+    buscarDetalhe({ canal: p.canal, marca, sku: p.sku, dateFrom: inicio, dateTo: fim }, ac.signal).then(setDet).catch((e) => {
+      if (!(e instanceof DOMException && e.name === "AbortError")) setErro(true);
+    });
+    return () => ac.abort();
+  }, [p.canal, p.sku, marca, inicio, fim]);
+
+  const barras = det ? agrupar(det.serie, fim, grao) : [];
+  const fmtExtra = (v: number, f: "brl" | "num" | "vezes") => (f === "brl" ? fmtBrlCurto(v) : f === "vezes" ? fmtVezes(v) : fmtNumCurto(v));
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="text-sm font-semibold text-ink">{rotuloMarca(marca)}</span>
+        <CanalSelo canal={p.canal} />
+        {p.kit && <KitSelo />}
+        <span className="font-mono text-xs text-ink-faint">{p.sku}</span>
+        <span className="text-xs text-ink-faint">#{p.posicao} da marca</span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+        <Indicador rotulo="Receita" valor={fmtBrlCurto(p.receita)} delta={comparando ? <Delta valor={variacao(p.receita, p.receita_ant)} /> : undefined} />
+        <Indicador rotulo="Peças" valor={fmtNumCurto(p.pecas)} delta={comparando ? <Delta valor={variacao(p.pecas, p.pecas_ant)} /> : undefined} />
+        <Indicador rotulo="Preço médio" valor={p.preco_medio != null ? fmtBrlCurto(p.preco_medio) : "—"} />
+        <Indicador rotulo="% da marca" valor={p.share_marca != null ? `${Math.round(p.share_marca * 100)}%` : "—"} />
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-ink">
+            Venda {metrica === "receita" ? "em R$" : "em peças"} · {TITULO_GRAO[grao]}
+          </h3>
+          <div className="flex flex-wrap gap-2">
+            <Segmented rotulo="Métrica" opcoes={METRICAS} valor={metrica} aoEscolher={setMetrica} />
+            <Segmented rotulo="Agrupamento" opcoes={GRAOS} valor={grao} aoEscolher={setGrao} />
+          </div>
+        </div>
+        <div className="h-56">
+          {erro ? (
+            <p className="text-sm text-ink-muted">Histórico do produto indisponível.</p>
+          ) : !det ? (
+            <div className="h-full w-full animate-pulse rounded-lg bg-raised motion-reduce:animate-none" />
+          ) : (
+            <Grafico barras={barras} metrica={metrica} canal={p.canal} />
+          )}
+        </div>
+      </div>
+
+      {det && det.extras.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <h3 className="text-sm font-semibold text-ink">
+            {p.canal === "tiktok" ? "De onde veio o GMV no período" : "Ads no período"}
+          </h3>
+          <dl className="grid grid-cols-2 gap-2 md:grid-cols-3">
+            {det.extras.map((e) => (
+              <div key={e.rotulo} className="flex flex-col gap-0.5 rounded-lg bg-raised px-3 py-2">
+                <dt className="text-xs text-ink-faint">{e.rotulo}</dt>
+                <dd className="text-sm font-semibold tabular-nums text-ink">
+                  {fmtExtra(e.valor, e.formato)}
+                  {e.formato === "brl" && p.canal === "tiktok" && p.receita > 0 && (
+                    <span className="ml-1.5 text-xs font-medium text-ink-faint">{Math.round((e.valor / p.receita) * 100)}%</span>
+                  )}
+                </dd>
+              </div>
+            ))}
+          </dl>
         </div>
       )}
-    </section>
+    </div>
   );
 }

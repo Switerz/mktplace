@@ -1,51 +1,82 @@
-"""Top 5 produtos por marca (Gerencial): escopo de marcas, meses e montagem."""
+"""Top produtos por marca (Gerencial): ranking por anuncio vendido entre canais,
+totais da marca, comparacao, escopo e detalhe."""
 from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
 
-from app.services.top_produtos_service import get_top_produtos, limpar_nome
+from app.services.top_produtos_service import canais_do_filtro, eh_kit, get_detalhe, get_top_produtos
 
 
-def test_limpar_nome_tira_ean_marcador_e_posicao():
-    assert limpar_nome("7898652877971 - (N)Ativador e Modelador Anti-frizz Cachos 500gr - I4") == \
-        "Ativador e Modelador Anti-frizz Cachos 500gr"
-    assert limpar_nome("7908790700687-SERUM ADEUS OLHEIRAS KOKESHI 10ML -F5") == "SERUM ADEUS OLHEIRAS KOKESHI 10ML"
-    assert limpar_nome("7908787702625 - DEO COLONIA NO 13 - 25ML - Masculino - E7(B)") == \
-        "DEO COLONIA NO 13 - 25ML - Masculino"
-    assert limpar_nome("PREBIOTICA FIBRAS 200G - RITUARIA . .") == "PREBIOTICA FIBRAS 200G - RITUARIA"
-    assert limpar_nome("Creme Hidratante Facial Pele De Porcelana - Kokeshi 30g") == \
-        "Creme Hidratante Facial Pele De Porcelana - Kokeshi 30g"
+def _linha(marca, sku, nome, pecas, receita, total, ant=None, total_ant=None):
+    return {"marca": marca, "sku": sku, "nome": nome, "pecas": pecas, "receita": receita,
+            "pecas_ant": None, "receita_ant": ant, "receita_marca": total, "receita_marca_ant": total_ant}
 
 
-def test_monta_marcas_com_share_preco_e_meses():
+def test_kit_pelo_nome():
+    assert eh_kit("Kit Facial Kokeshi Completo 3 Passos")
+    assert eh_kit("COMBO Body Splash")
+    assert not eh_kit("Creme Gota de Colágeno - Kitsune")  # palavra inteira
+    assert canais_do_filtro([3, 1]) == ["tiktok", "shopee"]
+
+
+def test_ranqueia_entre_canais_e_soma_total_uma_vez_por_canal():
+    por_canal = {
+        "gold.fct_tiktok_product_daily": [
+            _linha("kokeshi", "1735", "Kit Facial Kokeshi", Decimal("10"), Decimal("500"), Decimal("1000"), 400, 900),
+            _linha("kokeshi", "1736", "Gota de Colágeno", 20, 300, 1000, None, 900),
+        ],
+        "gold.vw_ml_produto_daily": [
+            _linha("kokeshi", "KS03016", "Olhos de Gueixa", 5, 400, 600, 100, 100),
+        ],
+    }
     chamadas = []
 
     def consultar(sql, params):
         chamadas.append(params)
-        return [
-            {"marca": "kokeshi", "sku": "20002", "produto": "7908790700120 - Creme Gota de Colágeno - F6",
-             "categoria": "Skin Care", "pecas": Decimal("100"), "receita": Decimal("2500"),
-             "receita_marca": Decimal("10000"), "posicao": 1, "nf_ate": "2026-11-05"},
-            {"marca": "kokeshi", "sku": "KS03016", "produto": "Olhos de Gueixa", "categoria": None,
-             "pecas": 0, "receita": 50.0, "receita_marca": 10000.0, "posicao": 2, "nf_ate": "2026-11-05"},
-        ]
+        return next(v for k, v in por_canal.items() if k in sql)
 
-    r = get_top_produtos(consultar, date(2026, 10, 15), date(2026, 11, 5), ["kokeshi", "denavita"])
+    r = get_top_produtos(consultar, date(2026, 11, 1), date(2026, 11, 5),
+                         (date(2026, 10, 27), date(2026, 10, 31)), ["kokeshi", "denavita"], ["tiktok", "ml"])
 
     assert chamadas[0]["marcas"] == ["kokeshi"]  # fora do escopo da Torre nao entra
-    assert (r.mes_inicio, r.mes_fim, r.nf_ate) == (date(2026, 10, 1), date(2026, 11, 1), date(2026, 11, 5))
+    assert chamadas[0]["de"] == date(2026, 10, 27)
     [k] = r.marcas
-    assert k.receita_marca == 10000
-    top1, top2 = k.produtos
-    assert top1.produto == "Creme Gota de Colágeno"
-    assert top1.preco_medio == 25 and top1.share_marca == 0.25
-    assert top2.preco_medio is None  # sem pecas, sem preco (nunca divisao por zero)
+    assert k.receita_marca == 1600 and k.receita_marca_ant == 1000
+    assert [(p.posicao, p.canal, p.sku) for p in k.produtos] == [
+        (1, "tiktok", "1735"), (2, "ml", "KS03016"), (3, "tiktok", "1736")]
+    top1 = k.produtos[0]
+    assert top1.kit and top1.preco_medio == 50 and top1.share_marca == 500 / 1600 and top1.receita_ant == 400
+
+
+def test_sem_comparacao_nao_devolve_anterior():
+    def consultar(sql, params):
+        assert params["ini_ant"] > params["fim_ant"]  # janela anterior vazia
+        return [_linha("barbours", "BB1", "Body Splash", 1, 10, 10, 99, 99)]
+
+    r = get_top_produtos(consultar, date(2026, 11, 1), date(2026, 11, 5), None, None, ["shopee"])
+    assert r.marcas[0].produtos[0].receita_ant is None and r.marcas[0].receita_marca_ant is None
 
 
 def test_sem_marca_no_escopo_nao_consulta():
     def consultar(sql, params):
         raise AssertionError("nao deveria consultar")
 
-    r = get_top_produtos(consultar, date(2026, 11, 1), date(2026, 11, 5), ["denavita"])
-    assert r.marcas == []
+    assert get_top_produtos(consultar, date(2026, 11, 1), date(2026, 11, 5), None, ["denavita"], ["ml"]).marcas == []
+
+
+def test_detalhe_serie_e_roas_do_ml():
+    def consultar(sql, params):
+        if "ad_spend" in sql:
+            return [{"investimento": Decimal("50"), "receita_ads": Decimal("200")}]
+        return [{"dia": "2026-11-01", "nome": "Kit Prebiotica", "pecas": 2, "receita": Decimal("100")},
+                {"dia": date(2026, 11, 2), "nome": None, "pecas": 1, "receita": 50}]
+
+    d = get_detalhe(consultar, "ml", "rituaria", "MLKIT", date(2026, 11, 1), date(2026, 11, 5))
+    assert d.kit and d.produto == "Kit Prebiotica"
+    assert [p.dia for p in d.serie] == [date(2026, 11, 1), date(2026, 11, 2)]
+    assert [(e.rotulo, e.valor) for e in d.extras][-1] == ("ROAS", 4.0)
+
+
+def test_detalhe_sem_venda_e_none():
+    assert get_detalhe(lambda s, p: [], "shopee", "apice", "X", date(2026, 11, 1), date(2026, 11, 5)) is None
