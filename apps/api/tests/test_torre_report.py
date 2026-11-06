@@ -94,7 +94,8 @@ def test_mensagem_abre_com_o_resumo_e_tem_chave_do_dia():
     rep = tr.compor_report(_dados(gmv, {("kokeshi", "ml"): 30_000_000.0}))
     texto = tr.montar_mensagem(rep)
     assert texto.splitlines()[0].startswith(
-        ":sunrise: *Bom dia! Ontem (qua, 04/11): R$ 1,23 mi de GMV nas marcas,")
+        ":sunrise: *Bom dia! Ontem (qua, 04/11): R$ 1,23 mi de GMV nas marcas "
+        "(Shopee R$ 0 + Meli R$ 1,23 mi),")
     assert "Novembro até ontem:" in texto and "(Mercado Livre)" in texto
     assert tr.chave_do_report(rep) == "report:2026-11-04"
 
@@ -142,3 +143,18 @@ def test_bolas_da_meta():
     assert [tr._bola_meta(p) for p in (None, 1.0, 0.85, 0.72, 0.5)] == [
         ":white_circle:", ":large_green_circle:", ":large_yellow_circle:",
         ":large_orange_circle:", ":red_circle:"]
+
+
+def test_gmv_dividido_entre_shopee_e_meli():
+    gmv = {("kokeshi", "shopee", ONTEM): 200_000.0, ("kokeshi", "ml", ONTEM): 100_000.0,
+           ("apice", "shopee", ONTEM): 50_000.0}
+    rep = tr.compor_report(_dados(gmv))
+    assert tr.divisao(rep.total) == "Shopee R$ 250,0 mil + Meli R$ 100,0 mil"
+    k = next(x for x in rep.linhas if x.marca == "kokeshi")
+    assert "R$ 300,0 mil (Shopee R$ 200,0 mil + Meli R$ 100,0 mil)" in tr.montar_mensagem(rep)
+    m = tr.montar_blocos(rep)
+    assert "(Shopee R$ 250,0 mil + Meli R$ 100,0 mil)" in m.texto
+    assert tr.divisao(k) in str(m.blocos)
+    # TikTok so' aparece quando vendeu
+    rep = tr.compor_report(_dados({**gmv, ("kokeshi", "tiktok", ONTEM): 10_000.0}))
+    assert tr.divisao(rep.total).endswith(" + TikTok R$ 10,0 mil")
