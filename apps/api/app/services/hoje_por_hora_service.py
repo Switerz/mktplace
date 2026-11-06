@@ -1,0 +1,121 @@
+"""VENDAS-POR-HORA-1 — o "Hoje" padronizado: os canais cortados na MESMA hora cheia.
+
+Le' `marts.fact_marketplace_hourly_sales` (vendas por hora, gravadas pela DAG
+`marketplace_tower_dia_corrente` via `pipelines.sync_vendas_por_hora`) e soma
+de 00:00 ate' o corte, hoje, ontem e no mesmo dia da semana passada.
+
+🔑 O CORTE
+----------
+`corte_hora = H` significa "vendas de 00:00 ate' H:00" (horas 0..H-1). E' a
+MENOR hora fechada entre os canais do filtro: se a Shopee so' chegou ate' 11h,
+ninguem passa de 11h. Assim os canais sao comparaveis entre si, e hoje e'
+comparavel com ontem.
+
+A KOKESHI NA SHOPEE
+-------------------
+Chega por arquivo, sem hora de pedido: nao esta' na tabela. Quando o filtro a
+inclui, a resposta diz isso em `limitacoes` — ausencia nao vira zero calado.
+"""
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta
+from typing import Optional
+
+from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from app.deps.period import APP_TIMEZONE
+
+TABELA = "marts.fact_marketplace_hourly_sales"
+FONTES = "marts.fact_marketplace_hourly_sales_fonte"
+
+CANAL_POR_ID = {1: "tiktok", 2: "ml", 3: "shopee"}
+SHOPEE_ID = 3
+
+LIMITACAO_KOKESHI_SHOPEE = (
+    "Kokeshi na Shopee fica fora do corte por hora: os pedidos dela chegam por "
+    "arquivo exportado, sem o horário de cada pedido."
+)
+
+
+def _bloco(gmv, pedidos) -> dict:
+    gmv = float(gmv or 0)
+    pedidos = int(pedidos or 0)
+    return {"gmv": round(gmv, 2), "pedidos": pedidos,
+            "ticket": round(gmv / pedidos, 2) if pedidos else None}
+
+
+def hora_fechada_do_canal(fonte_ate: Optional[datetime], hoje: date) -> int:
+    """Quantas horas de HOJE o canal ja' fechou (0 a 24)."""
+    if fonte_ate is None:
+        return 0
+    local = fonte_ate.astimezone(APP_TIMEZONE)
+    if local.date() < hoje:
+        return 0
+    if local.date() > hoje:
+        return 24
+    return local.hour
+
+
+def calcular_corte(fontes: dict[int, Optional[datetime]], mkt_ids: list[int],
+                   agora: datetime) -> int:
+    """Menor hora fechada entre os canais do filtro, nunca alem da hora atual."""
+    hoje = agora.astimezone(APP_TIMEZONE).date()
+    horas = [hora_fechada_do_canal(fontes.get(m), hoje) for m in mkt_ids]
+    return min(horas + [agora.astimezone(APP_TIMEZONE).hour])
+
+
+def get_hoje_por_hora(db: Session, mkt_ids: list[int], brand_keys: Optional[list[str]],
+                      agora: Optional[datetime] = None) -> dict:
+    agora = (agora or datetime.now(APP_TIMEZONE)).astimezone(APP_TIMEZONE)
+    hoje = agora.date()
+    dias = {"hoje": hoje, "ontem": hoje - timedelta(days=1), "semana_passada": hoje - timedelta(days=7)}
+
+    existe = db.execute(text("SELECT to_regclass(:t) IS NOT NULL AND to_regclass(:f) IS NOT NULL"),
+                        {"t": TABELA, "f": FONTES}).scalar()
+    base = {"dia": hoje.isoformat(), "corte_hora": None, "canais": [], "limitacoes": []}
+    if not existe:
+        return {**base, "disponivel": False,
+                "motivo": "As vendas por hora ainda não estão publicadas no banco."}
+
+    fontes = {r[0]: r[1] for r in db.execute(
+        text(f"SELECT marketplace_id, fonte_ate FROM {FONTES} WHERE marketplace_id = ANY(:m)"),
+        {"m": mkt_ids})}
+    corte = calcular_corte(fontes, mkt_ids, agora)
+    canais = [{"channel": CANAL_POR_ID[m],
+               "fonte_ate": fontes[m].isoformat() if fontes.get(m) else None,
+               "horas_fechadas_hoje": hora_fechada_do_canal(fontes.get(m), hoje)}
+              for m in mkt_ids]
+    limitacoes = []
+    if SHOPEE_ID in mkt_ids and (brand_keys is None or "kokeshi" in brand_keys):
+        limitacoes.append(LIMITACAO_KOKESHI_SHOPEE)
+
+    linhas = db.execute(text(f"""
+        SELECT h.dia, h.marketplace_id, SUM(h.gmv) AS gmv, SUM(h.pedidos) AS pedidos
+        FROM {TABELA} h
+        JOIN marts.dim_loja l ON l.loja_id = h.loja_id
+        WHERE h.dia = ANY(:dias)
+          AND h.hora < :corte
+          AND h.marketplace_id = ANY(:mkt_ids)
+          AND (CAST(:brands AS text[]) IS NULL OR l.brand_key = ANY(CAST(:brands AS text[])))
+        GROUP BY 1, 2
+    """), {"dias": list(dias.values()), "corte": corte, "mkt_ids": mkt_ids,
+           "brands": brand_keys}).mappings().all()
+
+    somas = {(r["dia"], r["marketplace_id"]): (r["gmv"], r["pedidos"]) for r in linhas}
+
+    def total(dia: date, ids: list[int]) -> dict:
+        gmv = sum(float(somas.get((dia, m), (0, 0))[0] or 0) for m in ids)
+        pedidos = sum(int(somas.get((dia, m), (0, 0))[1] or 0) for m in ids)
+        return _bloco(gmv, pedidos)
+
+    return {
+        **base,
+        "disponivel": True,
+        "corte_hora": corte,
+        "canais": canais,
+        "limitacoes": limitacoes,
+        **{nome: total(d, mkt_ids) for nome, d in dias.items()},
+        "por_canal": [{"channel": CANAL_POR_ID[m], **{nome: total(d, [m]) for nome, d in dias.items()}}
+                      for m in mkt_ids],
+    }

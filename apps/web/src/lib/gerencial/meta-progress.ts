@@ -194,7 +194,11 @@ export interface ProgressoMeta {
   projecao: number | null;
   projecaoSobreMeta: number | null;
   falta: number;
-  /** Quanto precisa vender por dia, nos dias restantes, para bater a meta. */
+  /**
+   * Quanto precisa vender num dia NORMAL (peso 1) dos dias restantes para
+   * bater a meta: falta / peso dos dias que restam, a "Nova meta dia normal"
+   * da planilha. Sem curva, falta / dias restantes.
+   */
   porDiaNecessario: number | null;
   status: StatusMeta;
 }
@@ -219,6 +223,8 @@ export function progressoMeta(args: {
    * = linear (dia / dias do mes), a conta de antes das curvas.
    */
   fracaoAte?: (dia: number) => number;
+  /** Meta de um dia de peso 1 (`metaDiaNormalDoEscopo`). Ausente = meta / dias do mes. */
+  metaDiaNormal?: number;
 }): ProgressoMeta | null {
   const { meta, realizado, mes, hoje } = args;
   if (meta == null || meta <= 0 || realizado == null) return null;
@@ -239,6 +245,9 @@ export function progressoMeta(args: {
   const planoAteData = meta * fracao;
   const projecao = encerrado ? realizado : fracao > 0 ? realizado / fracao : null;
   const falta = Math.max(meta - realizado, 0);
+  // Peso dos dias que restam, em "dias normais": (1 - fracao) x soma dos pesos
+  // = (1 - fracao) x meta / meta do dia normal. No linear da' os dias restantes.
+  const pesoRestante = ((1 - fracao) * meta) / (args.metaDiaNormal ?? meta / n);
 
   let status: StatusMeta;
   if (realizado >= meta) status = "atingida";
@@ -261,7 +270,7 @@ export function progressoMeta(args: {
     projecao,
     projecaoSobreMeta: projecao == null ? null : projecao / meta,
     falta,
-    porDiaNecessario: diasRestantes > 0 && falta > 0 ? falta / diasRestantes : null,
+    porDiaNecessario: diasRestantes > 0 && falta > 0 && pesoRestante > 0 ? falta / pesoRestante : null,
     status,
   };
 }

@@ -77,6 +77,7 @@ import BrandChannelMatrix, { cellKey, type SignalsState } from "@/components/ger
 import MovementsPanels from "@/components/gerencial/MovementsPanels";
 import AttentionQueue from "@/components/gerencial/AttentionQueue";
 import MetaHero from "@/components/gerencial/MetaHero";
+import HojeAteAHora from "@/components/gerencial/HojeAteAHora";
 import DecisoesTopo from "@/components/gerencial/DecisoesTopo";
 import MarcasMeta, { type MetaDaMarca } from "@/components/gerencial/MarcasMeta";
 import { useMetasDoMes } from "@/hooks/useMetasDoMes";
@@ -91,7 +92,13 @@ import {
   topComerciais,
   ultimoDiaComDado,
 } from "@/lib/gerencial/meta-progress";
-import { escopoTemCurva, fracaoDoEscopo, progressoDoDia, resumoSemDado } from "@/lib/metas-curva";
+import {
+  escopoTemCurva,
+  fracaoDoEscopo,
+  metaDiaNormalDoEscopo,
+  progressoDoDia,
+  resumoSemDado,
+} from "@/lib/metas-curva";
 import { hojeBrt } from "@/lib/metas";
 import {
   ChannelSeriesDrilldownContent,
@@ -340,6 +347,7 @@ function GerencialInner() {
             hoje,
             ultimoDia,
             fracaoAte: fracaoDoEscopo(celulasEscopo, mesMeta),
+            metaDiaNormal: metaDiaNormalDoEscopo(celulasEscopo, mesMeta),
           })
         : null,
     [metaAplicavel, mesMeta, metaEscopo.total, realizadoEscopo.total, celulasEscopo, hoje, ultimoDia],
@@ -363,6 +371,10 @@ function GerencialInner() {
         hoje,
         ultimoDia,
         fracaoAte: fracaoDoEscopo(
+          celulasEscopo.filter((c) => c.brand === id),
+          mesMeta,
+        ),
+        metaDiaNormal: metaDiaNormalDoEscopo(
           celulasEscopo.filter((c) => c.brand === id),
           mesMeta,
         ),
@@ -550,6 +562,10 @@ function GerencialInner() {
         onOpenGmv={() => setDialog({ kind: "kpi", key: "gmv" })}
         fullNormal={fullNormal}
       />
+
+      {/* VENDAS-POR-HORA-1: com "Hoje", os canais cortados na mesma hora cheia
+          e comparados com ontem e a semana passada ate' a mesma hora. */}
+      {diaEmAndamento && <HojeAteAHora channels={filters.channels} brands={filters.brands} />}
 
       <KpiBand
         kpis={kpis}

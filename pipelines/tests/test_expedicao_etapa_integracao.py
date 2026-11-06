@@ -292,9 +292,10 @@ def test_cadeia_real_e_linear_e_passa_pela_033(tmp_path):
     grafo = json.loads(
         _python_isolado(ROTEIRO_GRAFO, str(VERSIONS.parent), cwd=tmp_path)
     )
-    assert grafo["heads"] == ["038"]
+    assert grafo["heads"] == ["039"]
     assert grafo["bases"] == ["001"]
-    assert grafo["revisoes"][:9] == ["038", "037", "036", "035", "034", "033", "032", "031", "030"]
+    assert grafo["revisoes"][:10] == ["039", "038", "037", "036", "035", "034", "033", "032", "031", "030"]
+    assert grafo["pais"]["039"] == "038"
     assert grafo["pais"]["038"] == "037"
     assert grafo["pais"]["037"] == "036"
     assert grafo["pais"]["036"] == "035"
