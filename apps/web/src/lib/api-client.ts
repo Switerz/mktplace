@@ -72,6 +72,8 @@ export interface BrandRow {
   gpm: number | null;
   ml_roas: number | null;
   ml_cancel_rate_pct: number | null;
+  /** Ads ML + Shopee da marca (mesma soma do `ad_spend` do overview). */
+  ad_spend?: number | null;
 }
 
 export interface MonthPoint {
