@@ -772,8 +772,9 @@ test("jornada ML: fila aberta com etapas e coorte indisponivel com a limitacao",
   assert.match(html, /Pedidos aguardando expedição/);
   assert.match(html, /Aguardando expedição/);
   assert.match(html, /100,0%/);
-  assert.match(html, /Vencidos: indisponível — o Mercado Livre não publica prazo de despacho/);
-  assert.match(html, /Pedidos dos últimos dias<\/h3>[\s\S]*Indisponível neste canal: o Mercado Livre não publica prazo de despacho/);
+  // EXPEDICAO-SEM-TEXTAO: a ressalva sai da tela e fica no hover.
+  assert.doesNotMatch(html, /data-sobreposicao|Vencidos: indisponível/);
+  assert.match(html, /Pedidos dos últimos dias<\/h3>[\s\S]*title="[^"]*o Mercado Livre não publica prazo de despacho[^"]*"[^>]*>\s*Indisponível neste canal\./);
   assert.match(html, /substatus do shipment não publicado na fila/);
 });
 
@@ -794,7 +795,7 @@ test("jornada TikTok: coorte rotulada, so' o selo 'Desatualizada' (publicacao no
   assert.match(html, />Desatualizada</);
   assert.match(html, /Parcial:/);
   assert.match(html, /1 dia\(s\) sem publicação na janela/);
-  assert.match(html, /Indisponível neste canal: o TikTok não publica fila aberta/);
+  assert.match(html, /title="[^"]*o TikTok não publica fila aberta[^"]*"[^>]*>\s*Indisponível neste canal\./);
 });
 
 // ===========================================================================
@@ -1214,4 +1215,13 @@ test("EXPEDICAO-TIKTOK-PADRAO: o TikTok usa a Jornada compacta, como a fila", ()
   );
   assert.doesNotMatch(html, /Pedidos aguardando expedição<\/h3>/);
   assert.doesNotMatch(html, /Fila por etapa[^<]*\b0\b/, "nunca zero");
+});
+
+test("EXPEDICAO-SEM-TEXTAO: a Jornada nao tem paragrafo de ressalva na tela", () => {
+  const corpo = ficticiaT0021("/api/v1/expedicao/jornada?channel=shopee", "ok")!.corpo;
+  const html = renderCompacto({ http: 200, json: corpo }, "shopee");
+  assert.doesNotMatch(html, /Dentro dessas etapas|aparecem abaixo|ainda mudando|dia\(s\) fechado|>Fora da contagem|aria-label="Limitações"|data-sobreposicao/);
+  const fonte = readFileSync(join(process.cwd(), "src/components/expedicao/JornadaPedidos.tsx"), "utf8");
+  assert.doesNotMatch(fonte, /<Sobreposicoes|<Limitacoes|ainda mudando\./);
+  assert.match(fonte, /extras=\{\[\.\.\.c\.limitacoes, \.\.\.foraDaContagem\(c\)\]\}/);
 });

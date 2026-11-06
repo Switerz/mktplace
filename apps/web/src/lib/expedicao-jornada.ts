@@ -465,12 +465,12 @@ const DESCRICAO_ETAPA: Record<string, string> = {
   enviado_sem_registro:
     "A fonte diz que o pedido saiu, mas sem a data da coleta: não dá para saber se foi no prazo.",
   "shopee.aguardando":
-    "Ainda sem coleta. Os que já passaram do prazo aparecem abaixo, em “Dentro dessas etapas”.",
+    "Ainda sem coleta.",
   aguardando:
-    "Ainda sem o evento escolhido (coleta ou despacho). Os que já passaram do prazo aparecem abaixo.",
+    "Ainda sem o evento escolhido (coleta ou despacho).",
   "shopee.concluido":
-    "Já coletados pela transportadora. Os coletados depois do prazo aparecem abaixo, em “Dentro dessas etapas”.",
-  concluido: "Já saíram (coleta ou despacho, conforme o evento). Os que saíram com atraso aparecem abaixo.",
+    "Já coletados pela transportadora.",
+  concluido: "Já saíram (coleta ou despacho, conforme o evento).",
 };
 
 /** Descricao da etapa no canal; `null` para chave desconhecida (sem "ⓘ"). */

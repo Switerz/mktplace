@@ -323,7 +323,9 @@ export function PopupColetaPerdida({
                     <tr>
                       <th scope="col">Pedido</th>
                       {variasMarcas ? <th scope="col">Marca</th> : null}
-                      <th scope="col">Em {dia}</th>
+                      <th scope="col" title="Como o pedido estava no fim desse dia: aguardando coleta se a etiqueta já estava pronta, senão aguardando envio.">
+                        Em {dia}
+                      </th>
                       <th scope="col">Hoje</th>
                       <th scope="col" title="Data do pagamento: é quando o TikTok libera o pedido para envio (sem NF-e, na mesa de embalo).">
                         Aguardando envio desde
@@ -379,17 +381,9 @@ export function PopupColetaPerdida({
             </DrilldownSecao>
           </>
         ) : null}
-        <p className="text-xs text-ink-faint">
-          Pedidos com prazo de coleta em {diaCurto(vencimento)} (pagos de {diaCurto(dados?.paid_from)} a{" "}
-          {diaCurto(dados?.paid_to)}),{" "}
-          {escopo === "todos"
-            ? "sem coleta (IN_TRANSIT) até o fim desse dia, com ou sem etiqueta pronta — a mesma conta da LDR."
-            : "etiqueta pronta até o fim desse dia e sem coleta (IN_TRANSIT) até o fim dele."}{" "}
-          &quot;Em {diaCurto(vencimento)}&quot; é como o pedido estava no fim desse dia: aguardando coleta se a etiqueta
-          já estava pronta, senão aguardando envio (ou retido pelo TikTok). &quot;Aguardando envio desde&quot; é o
-          pagamento; &quot;Aguardando coleta desde&quot; é quando o pedido ficou embalado, com NF-e e etiqueta.
-          Prazo reconstruído pela política do TikTok (coleta até 2 dias úteis após o pagamento).
-        </p>
+        {/* EXPEDICAO-SEM-TEXTAO (05/11/2026): o paragrafo de metodologia saiu.
+            O titulo ja' diz o dia; cada coluna explica a si mesma no hover; o
+            "prazo reconstruído" ja' esta' no chip da pagina. */}
       </div>
     </KpiDrilldownDialog>
   );

@@ -22,13 +22,24 @@ export function textoDaAjuda(chave: ChaveMetrica): string {
   return `${def.definicao} ${def.limitacoes}`;
 }
 
-export default function AjudaMetrica({ chave, className = "" }: { chave: ChaveMetrica; className?: string }) {
+export default function AjudaMetrica({
+  chave,
+  className = "",
+  extras = [],
+}: {
+  chave: ChaveMetrica;
+  className?: string;
+  /** EXPEDICAO-SEM-TEXTAO: ressalvas que vem da RESPOSTA (limitacoes da API,
+   * o que ficou fora da contagem). Entram no balao, nunca soltas na tela. */
+  extras?: readonly string[];
+}) {
   const def = definicaoDe(chave);
+  const nota = [def.limitacoes, ...extras.filter((e) => e && e !== def.limitacoes)].join(" ");
   return (
     <InfoDica
       titulo={def.nome}
       texto={def.definicao}
-      nota={def.limitacoes}
+      nota={nota}
       className={`align-middle ${className}`}
     />
   );
