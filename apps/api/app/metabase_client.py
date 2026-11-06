@@ -9,7 +9,13 @@ import httpx
 from app.config import settings
 
 
-def query(sql: str) -> list[dict]:
+#: Espera padrao por uma consulta. Quem sabe que a sua e' pesada pede mais
+#: (`timeout=`), em vez de todo endpoint esperar o mesmo tanto quando o
+#: Metabase trava.
+TIMEOUT_PADRAO_S = 60.0
+
+
+def query(sql: str, timeout: float = TIMEOUT_PADRAO_S) -> list[dict]:
     """
     Executa uma query SQL nativa no Data Mart via Metabase e retorna list[dict].
     Lança httpx.HTTPError se a requisição falhar.
@@ -19,7 +25,7 @@ def query(sql: str) -> list[dict]:
         "type": "native",
         "native": {"query": sql},
     }
-    with httpx.Client(timeout=30.0) as client:
+    with httpx.Client(timeout=timeout) as client:
         resp = client.post(
             f"{settings.metabase_url}/api/dataset",
             headers={"x-api-key": settings.metabase_api_key},

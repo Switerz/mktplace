@@ -37,6 +37,28 @@ Dentro de uma resposta `ok`, inventario SEM_LEITURA tem quantidades `None`,
 marca sem fotografia no dia tem todos os numeros `None` e o total diz que e'
 PARCIAL. Nada disso vira 0.
 
+SEM ESTOQUE FULL (T-0051) NAO E' AUSENCIA
+------------------------------------------
+Linha na fato de marca com `inventarios = 0` (contagens 0, quantidades NULL,
+linhagem `source_run_id`/`published_at` presente) e NENHUMA linha de
+inventario nem de status no dia: a enumeracao terminou e deu zero. A coluna
+NULL nao e' lida como zero: o 0 vem da regra de contrato. A marca sai com
+`estado = "sem_estoque_full"`, quantidades 0, conta como coberta e nao torna
+o total parcial. Qualquer outra divergencia marca x inventario continua 503.
+A 029 ja' admite essa linha (CHECK `(inventarios_full_lidos > 0) =
+(disponivel_full IS NOT NULL)`); nenhuma migration foi necessaria.
+
+IDENTIFICACAO (T-0018, migration 038)
+-------------------------------------
+Cada inventario traz o seu anuncio-ancora (gravado pelo publicador). SKU e
+titulo vem da 014 (`marts.fact_marketplace_listing_price_daily`) por marca +
+`item_id`, a linha mais recente com `ref_date` <= a da fotografia, por
+`DISTINCT ON (brand, item_id)`: no maximo UMA linha por item, entao o JOIN
+nunca duplica inventario nem estoque. A 014 nao tem `variation_id` (preco e' de ITEM):
+em variacao o SKU e' o do item, e a resposta diz isso (`ancora_e_variacao`).
+Sem a 038 aplicada, ou sem a 014 legivel, a listagem sai como antes, com
+`sku`/`titulo`/`anuncios_extras` nulos e uma limitacao declarada.
+
 SEGURANCA
 ---------
 Allowlist explicita de colunas; nunca `SELECT *`. Filtros sempre como
@@ -56,6 +78,11 @@ from sqlalchemy.orm import Session
 INVENTORY_TABLE = "marts.fact_ml_full_stock_inventory_daily"
 STATUS_TABLE = "marts.fact_ml_full_stock_status_daily"
 BRAND_TABLE = "marts.fact_ml_full_stock_brand_daily"
+#: Migration 014: SKU e titulo por (ref_date, item_id). So' para identificacao.
+PRICE_TABLE = "marts.fact_marketplace_listing_price_daily"
+#: Colunas da migration 038 em INVENTORY_TABLE.
+COLUNAS_ANCORA = ("anuncio_ancora_item_id", "anuncio_ancora_variation_id",
+                  "anuncios_extras")
 
 #: ALLOWLIST, espelhando o CHECK da 029. Sem filtro = exatamente estas.
 EXPECTED_BRANDS = ("barbours", "kokeshi", "lescent", "rituaria")
@@ -133,6 +160,17 @@ LIMITACAO_ALOCACAO = (
     "Venda sem vínculo com exatamente um inventário NÃO é rateada: fica fora "
     "da velocidade do inventário e aparece na cobertura da alocação da marca."
 )
+LIMITACAO_IDENTIFICACAO = (
+    "SKU e título são do anúncio-âncora do inventário (Full ativo primeiro) e "
+    "vêm do cadastro do ITEM: em anúncio com variações, o SKU pode não ser o da "
+    "variação. “+N anúncios” indica outros anúncios no mesmo inventário; o "
+    "estoque continua contado uma vez."
+)
+LIMITACAO_SEM_IDENTIFICACAO = (
+    "SKU e título indisponíveis neste ambiente: a migration 038 ainda não foi "
+    "aplicada ou a tabela de preços (014) não está acessível. A listagem "
+    "continua correta, só sem identificação."
+)
 LIMITACAO_SEM_AGENDAMENTO = (
     "A publicação ainda não tem agendamento: a data mostrada é a da última "
     "execução autorizada do publicador."
@@ -193,19 +231,33 @@ SQL_FATOS_EXISTEM = text("""
            to_regclass(:marca)      IS NOT NULL AS tem_marca
 """)
 
+#: Identificacao exige as TRES colunas da 038 e a 014 legivel. Sem elas a
+#: listagem sai sem SKU/titulo -- nunca 500 por coluna ausente.
+SQL_IDENTIFICACAO_DISPONIVEL = text("""
+    SELECT (SELECT COUNT(*) FROM information_schema.columns
+             WHERE table_schema = 'marts'
+               AND table_name = 'fact_ml_full_stock_inventory_daily'
+               AND column_name = ANY(CAST(:colunas AS text[]))) = :n_colunas
+               AS tem_ancora,
+           COALESCE(has_table_privilege(to_regclass(:precos), 'SELECT'), FALSE)
+               AS tem_precos
+""")
+
 SQL_ULTIMA_FOTOGRAFIA = text(f"""
     SELECT MAX(ref_date) AS ref_date
       FROM {BRAND_TABLE}
      WHERE brand = ANY(CAST(:brands AS text[]))
 """)
 
+#: `source_run_id` e' lido so' para provar a linhagem do "sem estoque Full";
+#: nao sai no payload.
 SQL_MARCAS_DO_DIA = text(f"""
     SELECT brand, inventarios, inventarios_full_lidos,
            inventarios_compartilhados, disponivel_full, nao_disponivel_full,
            transfer_full, unidades_28d_alocadas,
            unidades_28d_item_varios_inventarios,
            unidades_28d_sem_inventory_id, unidades_28d_fora_da_ponte,
-           cobertura_da_alocacao, published_at
+           cobertura_da_alocacao, source_run_id, published_at
       FROM {BRAND_TABLE}
      WHERE ref_date = :ref_date
        AND brand = ANY(CAST(:brands AS text[]))
@@ -257,32 +309,42 @@ SQL_STATUS = text(f"""
      ORDER BY s.brand, quantidade DESC, s.status_raw
 """)
 
-_FILTRO_LISTAGEM = """
+#: Linhas de status por marca SEM o JOIN com inventario: uma marca "sem
+#: estoque Full" nao pode ter nenhuma. Contagem so', nenhum ID.
+SQL_STATUS_POR_MARCA = text(f"""
+    SELECT brand, COUNT(*) AS linhas
+      FROM {STATUS_TABLE}
      WHERE ref_date = :ref_date
        AND brand = ANY(CAST(:brands AS text[]))
-       AND (:incluir_fora_do_full OR classificacao_torre <> 'FORA_DO_FULL')
+     GROUP BY brand
+""")
+
+_FILTRO_LISTAGEM = """
+     WHERE i.ref_date = :ref_date
+       AND i.brand = ANY(CAST(:brands AS text[]))
+       AND (:incluir_fora_do_full OR i.classificacao_torre <> 'FORA_DO_FULL')
 """
 
 SQL_TOTAL_NO_FILTRO = text(f"""
-    SELECT COUNT(*) AS total FROM {INVENTORY_TABLE}
+    SELECT COUNT(*) AS total FROM {INVENTORY_TABLE} i
     {_FILTRO_LISTAGEM}
 """)
+
+_COLUNAS_LISTAGEM = """
+    SELECT i.ref_date, i.brand, i.read_status, i.eh_full,
+           i.disponivel, i.nao_disponivel, i.transfer,
+           i.total_coerente, i.detalhe_coerente,
+           i.anuncios, i.anuncios_ativos, i.anuncios_full,
+           i.unidades_28d, i.media_diaria_28d, i.cobertura_torre_dias,
+           i.classificacao_torre, i.vinculo_vendas"""
 
 #: Ordem OPERACIONAL: ruptura, baixo, e logo depois SEM_LEITURA -- "nao
 #: sabemos" precisa ser visto antes do que esta' sobrando. Desempate pela
 #: chave completa para ordem estavel. `inventory_id` entra SO' no ORDER BY:
 #: nao e' selecionado, para nao poder vazar na API publica.
-SQL_INVENTARIOS = text(f"""
-    SELECT ref_date, brand, read_status, eh_full,
-           disponivel, nao_disponivel, transfer,
-           total_coerente, detalhe_coerente,
-           anuncios, anuncios_ativos, anuncios_full,
-           unidades_28d, media_diaria_28d, cobertura_torre_dias,
-           classificacao_torre, vinculo_vendas
-      FROM {INVENTORY_TABLE}
-    {_FILTRO_LISTAGEM}
+_ORDEM_LISTAGEM = """
      ORDER BY
-        CASE classificacao_torre
+        CASE i.classificacao_torre
             WHEN 'RUPTURA_CANDIDATA'  THEN 0
             WHEN 'BAIXO_CANDIDATO'    THEN 1
             WHEN 'SEM_LEITURA'        THEN 2
@@ -292,11 +354,43 @@ SQL_INVENTARIOS = text(f"""
             WHEN 'SEM_DEMANDA_MEDIDA' THEN 6
             ELSE 7
         END,
-        cobertura_torre_dias ASC NULLS LAST,
-        disponivel DESC NULLS LAST,
-        brand, seller_id, inventory_id
+        i.cobertura_torre_dias ASC NULLS LAST,
+        i.disponivel DESC NULLS LAST,
+        i.brand, i.seller_id, i.inventory_id
      LIMIT :limite
-""")
+"""
+
+SQL_INVENTARIOS = text(f"""{_COLUNAS_LISTAGEM}
+      FROM {INVENTORY_TABLE} i
+    {_FILTRO_LISTAGEM}{_ORDEM_LISTAGEM}""")
+
+#: Mesma listagem + identificacao. `item_014` tem UMA linha por (marca, item)
+#: (`DISTINCT ON`): a mais recente com `ref_date` <= o dia exibido (todas as
+#: linhas listadas sao desse dia). Varias datas/linhas do mesmo item na 014
+#: nunca duplicam o inventario; o LEFT JOIN e' 1:1. Ancora nula ou sem match
+#: -> SKU/titulo nulos. A 014 nao tem `variation_id`: o match e' por marca +
+#: item. `seller_id` desempata (a PK da 014 permite o mesmo item em contas
+#: distintas no mesmo dia). CTE e nao LATERAL: a 014 so' tem a PK
+#: (ref_date, ...) e um LATERAL por item a varreria uma vez por inventario.
+SQL_INVENTARIOS_IDENTIFICADOS = text(f"""
+    WITH item_014 AS (
+        SELECT DISTINCT ON (l.brand, l.item_id)
+               l.brand, l.item_id, l.seller_sku, l.listing_title
+          FROM {PRICE_TABLE} l
+         WHERE l.marketplace = 'ml'
+           AND l.brand = ANY(CAST(:brands AS text[]))
+           AND l.ref_date <= :ref_date
+         ORDER BY l.brand, l.item_id, l.ref_date DESC, l.seller_id
+    ){_COLUNAS_LISTAGEM},
+           i.anuncios_extras,
+           (i.anuncio_ancora_variation_id IS NOT NULL) AS ancora_e_variacao,
+           (i.anuncio_ancora_item_id IS NOT NULL)      AS tem_ancora,
+           p.seller_sku    AS sku,
+           p.listing_title AS titulo
+      FROM {INVENTORY_TABLE} i
+      LEFT JOIN item_014 p
+        ON p.brand = i.brand AND p.item_id = i.anuncio_ancora_item_id
+    {_FILTRO_LISTAGEM}{_ORDEM_LISTAGEM}""")
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +438,22 @@ def fatos_disponiveis(db: Session) -> bool:
                ("tem_inventario", "tem_status", "tem_marca"))
 
 
+def identificacao_disponivel(db: Session) -> bool:
+    """Colunas da 038 presentes E a 014 legivel por este papel."""
+    linha = db.execute(SQL_IDENTIFICACAO_DISPONIVEL, {
+        "colunas": list(COLUNAS_ANCORA), "n_colunas": len(COLUNAS_ANCORA),
+        "precos": PRICE_TABLE}).mappings().one()
+    return bool(linha["tem_ancora"]) and bool(linha["tem_precos"])
+
+
+def _texto_opcional(valor) -> Optional[str]:
+    """Vazio/espacos viram `None`: ausencia explicita, nunca string vazia."""
+    if valor is None:
+        return None
+    texto = str(valor).strip()
+    return texto or None
+
+
 def _horas_desde(publicado: Optional[datetime],
                  agora: datetime) -> Optional[float]:
     if publicado is None:
@@ -353,14 +463,18 @@ def _horas_desde(publicado: Optional[datetime],
     return round((agora - publicado).total_seconds() / 3600, 1)
 
 
-def _agregar_contagens(linhas: list[dict]) -> dict[str, dict]:
-    """Contagens por marca a partir das linhas agrupadas de SQL_CONTAGENS."""
-    por_marca: dict[str, dict] = defaultdict(lambda: {
+def _contagem_vazia() -> dict:
+    return {
         "inventarios": 0, "full": 0, "full_lidos": 0, "fora_do_full": 0,
         "compartilhados": 0, "lidos": 0, "sem_leitura": 0,
         "full_sem_leitura": 0, "por_classificacao": defaultdict(int),
         "disp_full": [], "nao_disp_full": [], "transfer_full": [],
-    })
+    }
+
+
+def _agregar_contagens(linhas: list[dict]) -> dict[str, dict]:
+    """Contagens por marca a partir das linhas agrupadas de SQL_CONTAGENS."""
+    por_marca: dict[str, dict] = defaultdict(_contagem_vazia)
     for r in linhas:
         m = por_marca[r["brand"]]
         n = int(r["inventarios"])
@@ -386,12 +500,42 @@ def _agregar_contagens(linhas: list[dict]) -> dict[str, dict]:
     return por_marca
 
 
-def _reconciliar(marca: str, fato: dict, contagem: Optional[dict]) -> None:
-    """A fato de marca e a de inventario descrevem o MESMO dia. Se divergem,
-    nenhuma das duas e' escolhida em silencio."""
-    if contagem is None:
+ESTADO_COM_INVENTARIO = "com_inventario"
+ESTADO_SEM_ESTOQUE_FULL = "sem_estoque_full"
+
+
+def _conferir_sem_estoque_full(marca: str, fato: dict) -> None:
+    """Agregado com 0 inventarios e nenhuma linha de inventario no dia: so' e'
+    "sem estoque Full" se TODA a linha de marca disser o mesmo e tiver
+    linhagem. Qualquer outro numero e' contradicao, nunca um zero escolhido."""
+    contraditos = [c for c in ("inventarios_full_lidos",
+                               "inventarios_compartilhados")
+                   if int(fato[c]) != 0]
+    contraditos += [c for c in ("disponivel_full", "nao_disponivel_full",
+                                "transfer_full")
+                    if fato[c] is not None]
+    if contraditos:
         raise MLFullEstoqueContractError(
-            f"marca {marca}: agregado sem inventarios no dia")
+            f"marca {marca}: agregado com 0 inventarios e "
+            + ", ".join(contraditos) + " preenchido(s)")
+    if not fato.get("source_run_id") or fato.get("published_at") is None:
+        raise MLFullEstoqueContractError(
+            f"marca {marca}: agregado com 0 inventarios sem linhagem")
+
+
+def _reconciliar(marca: str, fato: dict, contagem: Optional[dict],
+                 linhas_status: int = 0) -> str:
+    """A fato de marca e a de inventario descrevem o MESMO dia. Se divergem,
+    nenhuma das duas e' escolhida em silencio. Devolve o estado da marca."""
+    if contagem is None:
+        if int(fato["inventarios"]) != 0:
+            raise MLFullEstoqueContractError(
+                f"marca {marca}: agregado sem inventarios no dia")
+        _conferir_sem_estoque_full(marca, fato)
+        if linhas_status:
+            raise MLFullEstoqueContractError(
+                f"marca {marca}: agregado com 0 inventarios e status no dia")
+        return ESTADO_SEM_ESTOQUE_FULL
     pares = (
         ("inventarios", int(fato["inventarios"]), contagem["inventarios"]),
         ("inventarios_full_lidos", int(fato["inventarios_full_lidos"]),
@@ -403,6 +547,7 @@ def _reconciliar(marca: str, fato: dict, contagem: Optional[dict]) -> None:
         if no_agregado != nos_inventarios:
             raise MLFullEstoqueContractError(
                 f"marca {marca}: {campo} diverge entre agregado e inventarios")
+    return ESTADO_COM_INVENTARIO
 
 
 # ---------------------------------------------------------------------------
@@ -468,8 +613,20 @@ def get_ml_full_estoque_block(
     if orfas:
         raise MLFullEstoqueContractError(
             "inventarios sem agregado de marca no dia: " + ", ".join(orfas))
-    for marca, fato in fatos_marca.items():
-        _reconciliar(marca, fato, contagens.get(marca))
+    status_brutos = {r["brand"]: int(r["linhas"]) for r in
+                     db.execute(SQL_STATUS_POR_MARCA, p).mappings().all()}
+    estados = {marca: _reconciliar(marca, fato, contagens.get(marca),
+                                   status_brutos.get(marca, 0))
+               for marca, fato in fatos_marca.items()}
+    sem_estoque = {m for m, e in estados.items()
+                   if e == ESTADO_SEM_ESTOQUE_FULL}
+
+    def qtd_marca(marca: str, campo: str) -> Optional[int]:
+        """Sem estoque Full: nao ha' inventario nenhum, entao 0 MEDIDO. Nos
+        demais casos, o valor da fato (None continua None)."""
+        if marca in sem_estoque:
+            return 0
+        return _opt_int(fatos_marca[marca][campo])
 
     status_por_marca: dict[str, list] = defaultdict(list)
     for r in db.execute(SQL_STATUS, p).mappings().all():
@@ -479,8 +636,10 @@ def get_ml_full_estoque_block(
 
     filtro = {**p, "incluir_fora_do_full": bool(incluir_fora_do_full)}
     total_no_filtro = int(db.execute(SQL_TOTAL_NO_FILTRO, filtro).scalar() or 0)
+    identificado = identificacao_disponivel(db)
     linhas = [dict(r) for r in db.execute(
-        SQL_INVENTARIOS, {**filtro, "limite": limite}).mappings().all()]
+        SQL_INVENTARIOS_IDENTIFICADOS if identificado else SQL_INVENTARIOS,
+        {**filtro, "limite": limite}).mappings().all()]
 
     # ---- marcas: com e sem fotografia, na ordem da allowlist pedida --------
     blocos_marca = []
@@ -493,9 +652,10 @@ def get_ml_full_estoque_block(
                 ultima_fotografia=ult["ref_date"] if ult else None,
                 published_at=ult["published_at"] if ult else None))
             continue
-        c = contagens[marca]
+        # Sem estoque Full nao tem linha de contagem: tudo zero, por contrato.
+        c = contagens.get(marca) or _contagem_vazia()
         blocos_marca.append(MarcaEstoque(
-            brand=marca, tem_fotografia_no_dia=True,
+            brand=marca, tem_fotografia_no_dia=True, estado=estados[marca],
             ultima_fotografia=dia, published_at=fato["published_at"],
             inventarios=int(fato["inventarios"]),
             inventarios_full_lidos=int(fato["inventarios_full_lidos"]),
@@ -503,9 +663,9 @@ def get_ml_full_estoque_block(
             leitura=Leitura(inventarios=c["inventarios"],
                             inventarios_lidos=c["lidos"],
                             inventarios_sem_leitura=c["sem_leitura"]),
-            disponivel_full=_opt_int(fato["disponivel_full"]),
-            nao_disponivel_full=_opt_int(fato["nao_disponivel_full"]),
-            transfer_full=_opt_int(fato["transfer_full"]),
+            disponivel_full=qtd_marca(marca, "disponivel_full"),
+            nao_disponivel_full=qtd_marca(marca, "nao_disponivel_full"),
+            transfer_full=qtd_marca(marca, "transfer_full"),
             unidades_28d_alocadas=int(fato["unidades_28d_alocadas"]),
             unidades_28d_item_varios_inventarios=int(
                 fato["unidades_28d_item_varios_inventarios"]),
@@ -532,8 +692,9 @@ def get_ml_full_estoque_block(
     if sem_foto:
         motivos_parcial.append(
             "Sem fotografia no dia: " + ", ".join(sem_foto) + ".")
+    # Sem estoque Full tem disponivel 0 medido: nao e' "sem Full lido".
     sem_full_lido = [m for m in com_foto
-                     if fatos_marca[m]["disponivel_full"] is None]
+                     if qtd_marca(m, "disponivel_full") is None]
     if sem_full_lido:
         motivos_parcial.append(
             "Sem inventário Full lido: " + ", ".join(sem_full_lido) + ".")
@@ -547,11 +708,11 @@ def get_ml_full_estoque_block(
                             inventarios_sem_leitura=total("sem_leitura"))
     indicadores = Indicadores(
         disponivel_full=_soma_opcional(
-            fatos_marca[m]["disponivel_full"] for m in com_foto),
+            qtd_marca(m, "disponivel_full") for m in com_foto),
         nao_disponivel_full=_soma_opcional(
-            fatos_marca[m]["nao_disponivel_full"] for m in com_foto),
+            qtd_marca(m, "nao_disponivel_full") for m in com_foto),
         transfer_full=_soma_opcional(
-            fatos_marca[m]["transfer_full"] for m in com_foto),
+            qtd_marca(m, "transfer_full") for m in com_foto),
         total_parcial=bool(motivos_parcial),
         motivos_total_parcial=motivos_parcial,
         inventarios=leitura_total.inventarios,
@@ -594,6 +755,12 @@ def get_ml_full_estoque_block(
             classificacao_torre=r["classificacao_torre"],
             vinculo_vendas=r["vinculo_vendas"],
             ref_date=r["ref_date"],
+            sku=_texto_opcional(r.get("sku")),
+            titulo=_texto_opcional(r.get("titulo")),
+            anuncios_extras=_opt_int(r.get("anuncios_extras")),
+            # Sem ancora (ou sem a 038) nao ha' o que dizer sobre variacao.
+            ancora_e_variacao=(bool(r["ancora_e_variacao"])
+                               if r.get("tem_ancora") else None),
         )
         for posicao, r in enumerate(linhas, start=1)
     ]
@@ -606,6 +773,7 @@ def get_ml_full_estoque_block(
         LIMITACAO_GRAO, LIMITACAO_AUSENCIA, LIMITACAO_FULL,
         LIMITACAO_COBERTURA_TORRE, LIMITACAO_LIMIARES, LIMITACAO_ALOCACAO,
         LIMITACAO_TRANSFER, LIMITACAO_SEM_AGENDAMENTO,
+        LIMITACAO_IDENTIFICACAO if identificado else LIMITACAO_SEM_IDENTIFICACAO,
     ]
     truncado = len(inventarios) < total_no_filtro
     if truncado:

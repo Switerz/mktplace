@@ -59,6 +59,35 @@ export function travadosPorEtapa(linhas: Pick<LinhaFila, "etapa">[]): { etapa: s
     .map(([etapa, qtd]) => ({ etapa, rotulo: rotuloDaEtapa(etapa), n: qtd }));
 }
 
+/**
+ * EXPEDICAO-PERTO-DE-VENCER-FILTRO — filtro rapido do popup "Perto de vencer":
+ * todos, so' o que vence hoje, so' o proximo dia de prazo. "Hoje" e' o dia de
+ * Brasilia da FOTOGRAFIA (`effective_at`), nunca o relogio do navegador — o
+ * mesmo dia que a API usou para montar a lista (`due_soon`).
+ */
+export type FiltroVencimento = "todos" | "hoje" | "proximo";
+
+/** "AAAA-MM-DD" do instante no dia de Brasilia; invalido ou nulo, nulo. */
+export function diaBrtDe(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Sao_Paulo" }).format(d);
+}
+
+/** Recorta as linhas pelo dia do prazo; "todos" devolve a lista como veio. */
+export function filtrarPorVencimento<L extends Pick<LinhaFila, "dispatch_deadline">>(
+  linhas: L[],
+  filtro: FiltroVencimento,
+  hoje: string | null,
+  proximo: string | null,
+): L[] {
+  if (filtro === "todos") return linhas;
+  const dia = filtro === "hoje" ? hoje : proximo;
+  if (!dia) return [];
+  return linhas.filter((l) => diaBrtDe(l.dispatch_deadline) === dia);
+}
+
 /** Mais que isso vira "mostrando N de M": o popup e' para olhar, nao exportar. */
 export const LIMITE_TRAVADOS = 200;
 

@@ -4,8 +4,10 @@ import { Suspense, useEffect, useState } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
 import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import ThemeToggle from "@/components/theme/ThemeToggle";
+import ContaUsuario from "@/components/auth/ContaUsuario";
 import { buildPreservedQuery, hrefForPage } from "@/lib/filters/nav-links";
 import NavList from "./NavList";
+import MarcaTorre from "./MarcaTorre";
 
 /**
  * UX-TORRE-B2B-1 — modo da sidebar.
@@ -118,14 +120,12 @@ function SidebarInner() {
     // Duas camadas de proposito: a EXTERNA estica com o flex do shell e pinta
     // a faixa ate o rodape; a INTERNA gruda no topo e rola sozinha.
     <aside
-      className={`hidden md:block md:shrink-0 md:border-r md:border-shell-line md:bg-shell ${animar ? "transition-[width] duration-200" : ""} ${largura}`}
+      className={`tc-shell-fundo hidden md:block md:shrink-0 md:border-r md:border-shell-line md:bg-shell ${animar ? "transition-[width] duration-200" : ""} ${largura}`}
     >
       <div className="sticky top-0 flex h-screen flex-col">
         {/* Identidade + botao de recolher */}
         <div className="flex items-center gap-2.5 border-b border-shell-line px-3 py-3">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-accent">
-            <span className="text-xs font-bold tracking-tight text-accent-on">TC</span>
-          </div>
+          <MarcaTorre tamanho={32} className="h-8 w-8 rounded-lg" />
           <div className={`min-w-0 flex-1 ${soAberta}`}>
             <p className="truncate text-sm font-semibold leading-tight text-shell-ink">Torre de Controle</p>
             <p className="truncate text-xs leading-tight text-shell-faint">Marketplaces · Gobeaute</p>
@@ -172,9 +172,13 @@ function SidebarInner() {
         <div className="border-t border-shell-line px-2 py-2.5">
           <div className={soAberta}>
             <ThemeToggle variante="shell" />
+            <div className="mt-2">
+              <ContaUsuario />
+            </div>
           </div>
           <div className={soRecolhida}>
             <ThemeToggle variante="shell" ciclico />
+            <ContaUsuario compacto />
           </div>
         </div>
       </div>

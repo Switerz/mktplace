@@ -1,5 +1,7 @@
 "use client";
 
+import { useId } from "react";
+
 /**
  * Faixa de cinco KPIs da Gerencial V2 (Gate V2-1, Task D).
  *
@@ -112,36 +114,50 @@ const SETA: Record<"up" | "down" | "flat", string> = { up: "▲", down: "▼", f
 /**
  * Mini grafico da tendencia. Decorativo (`aria-hidden`): a leitura acessivel e'
  * o texto ao lado, que diz a direcao e o recorte comparado.
+ *
+ * UX-VIDRO-3 (da proposta aprovada): linha de 2px na cor do KPI, area
+ * preenchida em degrade da mesma cor ate' sumir na base e ponto final redondo
+ * com anel da superficie. Tudo em `currentColor`, entao a paleta e' a do KPI
+ * (`text-kpi-*`) nos dois temas.
  */
 function Sparkline({ pontos, tinta }: { pontos: number[]; tinta: string }) {
+  // `useId` traz ":" e outros simbolos que quebrariam o `url(#...)` do SVG.
+  const idDegrade = `kpi-area-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
   const min = Math.min(...pontos);
   const max = Math.max(...pontos);
   const faixa = max - min;
   const passo = 100 / (pontos.length - 1);
   // Serie constante fica no MEIO: colada no chao ela parece "caiu para zero".
-  const y = (v: number) => (faixa === 0 ? 14 : 26 - ((v - min) / faixa) * 24);
-  const coords = pontos.map((v, i) => `${(i * passo).toFixed(2)},${y(v).toFixed(2)}`);
-  const ultimoY = y(pontos[pontos.length - 1]);
-  // O ponto final e' um <rect> SEPARADO, fora do `preserveAspectRatio="none"`
-  // da linha: dentro dele o quadrado esticaria junto com o grafico.
+  const y = (v: number) => (faixa === 0 ? 16 : 28 - ((v - min) / faixa) * 24);
+  const xy = pontos.map((v, i) => [i * passo, y(v)] as const);
+  const linha = xy.map(([x, yy], i) => `${i ? "L" : "M"}${x.toFixed(2)} ${yy.toFixed(2)}`).join(" ");
+  const ultimoY = xy[xy.length - 1][1];
+  // O ponto final e' um <span> SEPARADO, fora do `preserveAspectRatio="none"`
+  // da linha: dentro dele o circulo esticaria junto com o grafico.
   return (
-    <span className={`relative block h-6 w-full ${tinta}`}>
-      <svg viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true" className="tc-revela absolute inset-0 h-full w-[calc(100%-6px)]">
-        <polyline
-          points={coords.join(" ")}
+    <span className={`relative block h-9 w-full ${tinta}`}>
+      <svg viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true" className="tc-revela absolute inset-0 h-full w-[calc(100%-5px)] overflow-visible">
+        <defs>
+          <linearGradient id={idDegrade} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stopColor="currentColor" stopOpacity={0.32} />
+            <stop offset="1" stopColor="currentColor" stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        <path d={`${linha} L100 32 L0 32 Z`} fill={`url(#${idDegrade})`} stroke="none" />
+        <path
+          d={linha}
           fill="none"
           stroke="currentColor"
-          strokeWidth={1.5}
+          strokeWidth={2}
           strokeLinejoin="round"
           strokeLinecap="round"
           vectorEffect="non-scaling-stroke"
-          opacity={0.75}
         />
       </svg>
       <span
         aria-hidden="true"
-        className="absolute right-0 h-1.5 w-1.5 rounded-[1px] bg-current animate-[tc-fade_240ms_var(--mov-ease)_700ms_both] motion-reduce:animate-none"
-        style={{ top: `calc(${(ultimoY / 28) * 100}% - 3px)` }}
+        className="absolute right-0 h-2 w-2 rounded-full bg-current ring-2 ring-surface animate-[tc-fade_240ms_var(--mov-ease)_700ms_both] motion-reduce:animate-none"
+        style={{ top: `calc(${(ultimoY / 32) * 100}% - 4px)` }}
       />
     </span>
   );
@@ -163,7 +179,7 @@ function LinhaDeTendencia({ t, tinta }: { t: TendenciaKpi; tinta: string }) {
   const detalhe =
     t.variacaoPct != null ? `${t.rotulo}: ${t.variacaoPct >= 0 ? "+" : ""}${t.variacaoPct.toFixed(1)}%` : undefined;
   return (
-    <span className="mt-1 block w-28" title={detalhe}>
+    <span className="block w-24 shrink-0 min-[1440px]:w-28" title={detalhe}>
       <Sparkline pontos={suavizar(t.pontos)} tinta={tinta} />
       {t.direcao && <span className="sr-only">Tendência: {DIRECAO_FALADA[t.direcao]}.</span>}
     </span>
@@ -254,21 +270,23 @@ function KpiCard({
         <span className="text-lg md:text-xl lg:text-2xl xl:text-lg min-[1440px]:text-2xl font-semibold tracking-tight text-ink-faint tabular-nums leading-tight">N/D</span>
       )}
 
-      {(kpi.deltaPct != null && kpi.value) || kpi.reference ? (
-        <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          {kpi.deltaPct != null && kpi.value && <DeltaBadge pct={kpi.deltaPct} tone={kpi.deltaTone} />}
-          {kpi.reference && <span className="text-xs text-ink-faint tabular-nums">{kpi.reference}</span>}
+      {/* UX-VIDRO-3 (print aprovado): rodape em duas colunas — variacao e
+          nota a' esquerda, mini grafico a' direita, alinhados pela base. */}
+      <span className="mt-auto flex items-end justify-between gap-3 pt-1">
+        <span className="flex min-w-0 flex-col gap-1">
+          {(kpi.deltaPct != null && kpi.value) || kpi.reference ? (
+            <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              {kpi.deltaPct != null && kpi.value && <DeltaBadge pct={kpi.deltaPct} tone={kpi.deltaTone} />}
+              {kpi.reference && <span className="text-xs text-ink-faint tabular-nums">{kpi.reference}</span>}
+            </span>
+          ) : null}
+          {kpi.comparisonNote && <span className="text-xs text-ink-faint">{kpi.comparisonNote}</span>}
+          {kpi.unavailableReason && (
+            <span className="text-xs text-ink-faint leading-snug">{kpi.unavailableReason}</span>
+          )}
         </span>
-      ) : null}
-
-      {tendencia && tendencia.pontos.length >= 4 && kpi.value && (
-        <LinhaDeTendencia t={tendencia} tinta={ICONE_KPI[kpi.key].tinta} />
-      )}
-
-      <span className="mt-auto flex flex-col gap-0.5 pt-1">
-        {kpi.comparisonNote && <span className="text-xs text-ink-faint">{kpi.comparisonNote}</span>}
-        {kpi.unavailableReason && (
-          <span className="text-xs text-ink-faint leading-snug">{kpi.unavailableReason}</span>
+        {tendencia && tendencia.pontos.length >= 4 && kpi.value && (
+          <LinhaDeTendencia t={tendencia} tinta={ICONE_KPI[kpi.key].tinta} />
         )}
       </span>
     </button>

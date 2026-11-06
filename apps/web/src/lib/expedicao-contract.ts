@@ -237,6 +237,9 @@ export interface Snapshot {
   /** EXPEDICAO-ATRASO-7D — dias de vencimento (Brasilia), "AAAA-MM-DD". */
   late_7d_window_start?: string | null;
   late_7d_window_end?: string | null;
+  /** EXPEDICAO-ABA-7D — dias do total de pedidos (Gerencial). */
+  orders_7d_window_start?: string | null;
+  orders_7d_window_end?: string | null;
 }
 
 export interface Totais {
@@ -270,6 +273,11 @@ export interface Totais {
    */
   due_7d_count?: number | null;
   late_7d_count?: number | null;
+  /** EXPEDICAO-ABA-7D — mesma base de `due_7d_count`. */
+  over_48h_7d_count?: number | null;
+  stalled_7d_count?: number | null;
+  /** EXPEDICAO-ABA-7D — pedidos feitos nos 7 dias (o numero do Gerencial). */
+  orders_7d_count?: number | null;
 }
 
 export interface ResumoConta extends Totais {
@@ -285,6 +293,8 @@ export interface ResumoConta extends Totais {
    * Centre (Kokeshi), que tem a hora da propria carga. Ausente na API antiga.
    */
   observed_at?: string | null;
+  /** EXPEDICAO-ABA-7D — "agendada" (de hora em hora) ou "export" (bot, a cada 2 h). */
+  origem?: string | null;
 }
 
 export interface FrescorMarca {
@@ -942,15 +952,23 @@ export function estadoDaTendencia(
   erro: boolean,
   series: SerieConta[],
   contasEsperadas: number,
+  /**
+   * EXPEDICAO-ABA-7D — contas carregadas pelo export do Seller Centre (bot, a
+   * cada 2 h). Nao tem ponto em toda hora por construcao: nao contam na
+   * cobertura horaria (o atraso delas aparece na linha, "N hora(s) sem ponto").
+   */
+  contasDeCarga: ReadonlySet<string> = new Set(),
 ): EstadoTendencia {
   if (carregando) return "carregando";
   if (erro) return "erro";
   if (!series.length) return "vazia";
+  const esperadas = Math.max(0, contasEsperadas - contasDeCarga.size);
   const porHora = new Map<string, number>();
   for (const s of series) {
+    if (contasDeCarga.has(s.shopAccount)) continue;
     for (const p of s.pontos) porHora.set(p.hora, (porHora.get(p.hora) ?? 0) + 1);
   }
-  for (const n of porHora.values()) if (n < contasEsperadas) return "parcial";
+  for (const n of porHora.values()) if (n < esperadas) return "parcial";
   return "ok";
 }
 
@@ -1589,6 +1607,9 @@ const MEDIDAS: readonly (keyof Totais)[] = [
   "due_soon_count",
   "due_7d_count",
   "late_7d_count",
+  "over_48h_7d_count",
+  "stalled_7d_count",
+  "orders_7d_count",
 ];
 
 export interface RecorteMarca {

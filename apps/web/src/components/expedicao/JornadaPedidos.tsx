@@ -16,7 +16,7 @@
  * A rota ainda nao existe em producao: 404, erro de rede e `disabled` viram
  * "Jornada indisponível" discreto — sem alerta vermelho, sem quebrar a tela.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import Chip from "@/components/ui/Chip";
 import InfoDica from "@/components/ui/InfoDica";
@@ -37,12 +37,11 @@ import {
   rotuloDaCoorte,
   rotuloEtapa,
   rotuloSobreposicao,
-  textoDaSobreposicao,
   type CanalJornada,
   type CargaJornada,
+  type EstadoJornada,
   type EtapaJornada,
   type RespostaJornada,
-  type SobreposicaoJornada,
 } from "@/lib/expedicao-jornada";
 import { formatarInteiro, partesDoPercentualComBase } from "@/lib/expedicao-formato";
 
@@ -160,43 +159,19 @@ function ListaDeEtapas({
   );
 }
 
-function Sobreposicoes({
-  itens,
-  etapas,
-  base,
-  evento,
-}: {
-  itens: SobreposicaoJornada[];
-  etapas: EtapaJornada[];
-  base: number;
-  evento: "coleta" | "despacho" | null;
-}) {
-  if (!itens.length) return null;
-  return (
-    <div className="mt-3">
-      <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
-        Dentro dessas etapas — não se somam
-      </h4>
-      <ul className="mt-1.5 flex flex-col gap-1 text-xs text-ink-muted">
-        {itens.map((s) => (
-          <li key={s.key} data-sobreposicao={s.key} title={rotuloSobreposicao(s.key)}>
-            {textoDaSobreposicao(s, etapas, base, evento)}
-          </li>
-        ))}
-      </ul>
-    </div>
+/**
+ * EXPEDICAO-SEM-TEXTAO (05/11/2026): sobreposicoes ("dentro dessas etapas —
+ * não se somam"), dias ainda mudando, "fora da contagem" e limitacoes sairam
+ * da tela — confundiam e ninguem le' paragrafo no painel. Vencidos e atrasos
+ * ja' estao no "Risco atual" e no "Prazo"; as ressalvas da resposta vao para o
+ * "ⓘ" do painel, junto da definicao.
+ */
+function foraDaContagem(c: NonNullable<RespostaJornada["coorte"]>): string[] {
+  if (!c.fora_da_coorte.length) return [];
+  const itens = c.fora_da_coorte.map((f) =>
+    f.count === null ? `${rotuloSobreposicao(f.key)}: indisponível` : `${formatarInteiro(f.count)} ${rotuloSobreposicao(f.key)}`,
   );
-}
-
-function Limitacoes({ itens }: { itens: string[] }) {
-  if (!itens.length) return null;
-  return (
-    <ul className="mt-3 list-disc pl-4 text-xs text-ink-muted" aria-label="Limitações">
-      {itens.map((l) => (
-        <li key={l}>{l}</li>
-      ))}
-    </ul>
-  );
+  return [`Fora da contagem: ${itens.join(" · ")}.`];
 }
 
 /**
@@ -213,16 +188,19 @@ function SecaoNula({ titulo, secao, r }: { titulo: string; secao: "fila_aberta" 
         <div data-testid={`exp-jornada-${secao}-indisponivel`}>
           <EstadoSecao tipo="indisponivel" titulo={`Indisponível agora: ${motivo}.`} />
         </div>
-        <Limitacoes itens={r.limitacoes} />
       </Panel>
     );
   }
   return (
     <Panel titulo={titulo}>
-      <p role="status" className="text-sm text-ink-muted" data-testid={`exp-jornada-${secao}-indisponivel`}>
-        Indisponível neste canal{r.limitacoes.length ? `: ${r.limitacoes[0]}` : "."}
+      <p
+        role="status"
+        className="text-sm text-ink-muted"
+        data-testid={`exp-jornada-${secao}-indisponivel`}
+        title={r.limitacoes.join(" ") || undefined}
+      >
+        Indisponível neste canal.
       </p>
-      <Limitacoes itens={r.limitacoes.slice(1)} />
     </Panel>
   );
 }
@@ -232,6 +210,35 @@ export function filaTemEtapasReais(r: RespostaJornada): boolean {
   const f = r.fila_aberta;
   return Boolean(
     f && f.etapas.some((e) => e.key !== "aguardando_expedicao" && e.key !== "nao_publicada"),
+  );
+}
+
+/**
+ * T-0029 — a fila aberta SEM etapa real, no modo compacto: UMA linha discreta
+ * e SEM numero. Base, barra e "Aguardando expedição" ja' sao o "Risco atual";
+ * repeti-los aqui era o que o #124/#127 tirou. `null` = nada a dizer.
+ *   - fila nula com motivo: "indisponível agora", nunca zero;
+ *   - base 0: o vazio da lista (prevalece sobre "não publicadas");
+ *   - base > 0 sem etapa real (coluna ausente ou tudo `nao_publicada`, que a
+ *     API nao distingue): "ainda não publicadas".
+ */
+function linhaDaFilaSemEtapa(r: RespostaJornada): ReactNode {
+  const f = r.fila_aberta;
+  if (!f) {
+    const motivo = motivoDaSecao(r, "fila_aberta");
+    return motivo ? (
+      <p role="status" className="text-sm text-ink-muted" data-testid="exp-jornada-fila-indisponivel">
+        Fila por etapa indisponível agora: {motivo}.
+      </p>
+    ) : null;
+  }
+  if (f.base === 0) {
+    return <ListaDeEtapas etapas={f.etapas} base={0} evento={null} rotulo="Etapas da fila aberta" canal={r.channel} />;
+  }
+  return (
+    <p role="status" className="text-sm text-ink-muted" data-testid="exp-jornada-fila-sem-etapa">
+      Etapas da fila ainda não publicadas neste canal.
+    </p>
   );
 }
 
@@ -247,7 +254,7 @@ function BlocoFilaAberta({ r, compacta = false }: { r: RespostaJornada; compacta
       // so' o aviso quando a leitura esta' velha.
       acao={
         <span className="flex flex-wrap items-center gap-1.5">
-          <AjudaMetrica chave="jornada.fila_aberta" />
+          <AjudaMetrica chave="jornada.fila_aberta" extras={f.limitacoes} />
           {f.snapshot_at && filaDesatualizada(f) ? (
             <Chip ponto tom="atencao" title="Os números descrevem o instante da publicação, não agora.">
               Desatualizada
@@ -262,14 +269,6 @@ function BlocoFilaAberta({ r, compacta = false }: { r: RespostaJornada; compacta
         </div>
       ) : null}
       <ListaDeEtapas etapas={f.etapas} base={f.base} evento={null} rotulo="Etapas da fila aberta" canal={r.channel} />
-      {/* Compacta (fila da Shopee/ML): vencidos, travados etc. ja' estao no
-          "Risco atual" — repeti-los aqui seria o mesmo numero duas vezes. */}
-      {compacta ? null : (
-        <Sobreposicoes itens={f.sobreposicoes} etapas={f.etapas} base={f.base} evento={null} />
-      )}
-      {/* As limitacoes (ex.: "FBS nao separado na fila aberta") ficam sempre:
-          sao elas que dizem que esta base nao e' a do "Risco atual". */}
-      <Limitacoes itens={f.limitacoes} />
     </Panel>
   );
 }
@@ -292,7 +291,7 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
         // a hora fica so' no topo da tela. O aviso ESCRITO so' quando velha
         // (a publicacao vai no `title`). O "ⓘ" fica fora do h3.
         <span className="flex flex-wrap items-center gap-1.5">
-          <AjudaMetrica chave="jornada.coorte" />
+          <AjudaMetrica chave="jornada.coorte" extras={[...c.limitacoes, ...foraDaContagem(c)]} />
           {velha ? (
             <Chip
               ponto
@@ -316,77 +315,28 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
         </div>
       ) : null}
       <ListaDeEtapas etapas={c.etapas} base={c.base} evento={evento} rotulo="Etapas da coorte" canal={r.channel} />
-      <Sobreposicoes itens={c.sobreposicoes} etapas={c.etapas} base={c.base} evento={evento} />
-      {c.fora_da_coorte.length ? (
-        <p className="mt-2 text-xs text-ink-muted">
-          Fora da contagem:{" "}
-          {c.fora_da_coorte
-            .map((f) =>
-              f.count === null ? `${rotuloSobreposicao(f.key)}: indisponível` : `${formatarInteiro(f.count)} ${rotuloSobreposicao(f.key)}`,
-            )
-            .join(" · ")}
-          .
-        </p>
-      ) : null}
-      {c.maturidade ? (
-        <p className="mt-1 text-xs text-ink-muted">
-          {c.maturidade.dias_maduros} dia(s) fechado(s), {c.maturidade.dias_imaturos} ainda mudando.
-        </p>
-      ) : null}
-      <Limitacoes itens={c.limitacoes} />
     </Panel>
   );
 }
 
-export default function JornadaPedidos({
+/**
+ * Os estados que NAO sao "pronta", iguais nos dois modos (T-0029: o compacto
+ * deixou de sumir calado). 404, rede e `disabled` sao discretos, sem alerta;
+ * 5xx e payload fora do contrato sao erro, com nova tentativa.
+ */
+function EstadosDaJornada({
+  estado,
   carga,
+  resposta,
   aoTentarDeNovo,
-  marca = null,
-  compacta = false,
 }: {
+  estado: EstadoJornada;
   carga: CargaJornada;
+  resposta: RespostaJornada | null;
   aoTentarDeNovo: () => void;
-  /** Marca pedida (`?marca=`), para conferir `brands_applied`. */
-  marca?: string | null;
-  /**
-   * EXPEDICAO-TRAVADOS-1 — so' o que o "Risco atual" nao diz. A fila aberta
-   * entra apenas com etapa REAL publicada (T-0015) e sem as sobreposicoes; a
-   * coorte, quando existe. Sem nenhuma das duas, a secao inteira sai.
-   */
-  compacta?: boolean;
 }) {
-  const estado = estadoDaJornada(carga);
-  const resposta = carga.resultado?.ok ? carga.resultado.resposta : null;
-  if (compacta) {
-    if (estado !== "pronta" || !resposta) return null;
-    const comFila = filaTemEtapasReais(resposta);
-    const comCoorte = Boolean(resposta.coorte);
-    if (!comFila && !comCoorte) return null;
-    return (
-      <SecaoGerencial
-        titulo="Jornada"
-        dica="Em que etapa estão os pedidos agora e como terminaram os dos últimos dias."
-      >
-        {avisoDeMarcaNaoAplicada(marca, resposta) ? (
-          <div data-testid="exp-jornada-marca-nao-aplicada">
-            <EstadoSecao tipo="parcial" titulo={avisoDeMarcaNaoAplicada(marca, resposta)!} />
-          </div>
-        ) : null}
-        {resposta.status === "partial" && motivoDoTopo(resposta) ? (
-          <EstadoSecao tipo="parcial" titulo={motivoDoTopo(resposta)!} />
-        ) : null}
-        <div className={`grid gap-3 ${comFila && comCoorte ? "lg:grid-cols-2" : ""}`} data-testid="exp-jornada">
-          {comFila ? <BlocoFilaAberta r={resposta} compacta /> : null}
-          {comCoorte ? <BlocoCoorte r={resposta} /> : null}
-        </div>
-      </SecaoGerencial>
-    );
-  }
   return (
-    <SecaoGerencial
-      titulo="Jornada"
-      dica="Quantos pedidos há em cada etapa: os que aguardam expedição agora e como terminaram os dos últimos dias."
-    >
+    <>
       {estado === "carregando" ? <EstadoSecao tipo="carregando" titulo="Carregando a jornada…" /> : null}
       {estado === "indisponivel" ? (
         <p role="status" className="text-sm text-ink-muted" data-testid="exp-jornada-indisponivel">
@@ -417,6 +367,76 @@ export default function JornadaPedidos({
           descricao={explicarMotivo(resposta.reason) ?? undefined}
         />
       ) : null}
+    </>
+  );
+}
+
+// Pedido de 30/10/2026 (main): sem "fila aberta"/"coorte" no texto.
+const DICA_COMPACTA = "Em que etapa estão os pedidos agora e como terminaram os dos últimos dias.";
+
+export default function JornadaPedidos({
+  carga,
+  aoTentarDeNovo,
+  marca = null,
+  compacta = false,
+}: {
+  carga: CargaJornada;
+  aoTentarDeNovo: () => void;
+  /** Marca pedida (`?marca=`), para conferir `brands_applied`. */
+  marca?: string | null;
+  /**
+   * EXPEDICAO-TRAVADOS-1 — so' o que o "Risco atual" nao diz. A fila aberta
+   * entra com o painel apenas com etapa REAL publicada (T-0015) e sem as
+   * sobreposicoes; a coorte, quando existe. T-0029: sem etapa real, a fila
+   * vira uma linha SEM numero (`linhaDaFilaSemEtapa`), e carregando, erro e
+   * indisponivel aparecem como no modo completo — a secao nao some calada.
+   */
+  compacta?: boolean;
+}) {
+  const estado = estadoDaJornada(carga);
+  const resposta = carga.resultado?.ok ? carga.resultado.resposta : null;
+  if (compacta) {
+    if (estado !== "pronta" || !resposta) {
+      return (
+        <SecaoGerencial titulo="Jornada" dica={DICA_COMPACTA}>
+          <EstadosDaJornada estado={estado} carga={carga} resposta={resposta} aoTentarDeNovo={aoTentarDeNovo} />
+        </SecaoGerencial>
+      );
+    }
+    const comEtapas = filaTemEtapasReais(resposta);
+    const linhaDaFila = comEtapas ? null : linhaDaFilaSemEtapa(resposta);
+    // "Fila" = a fila tem algo a dizer: painel com etapa real OU a linha.
+    const comFila = comEtapas || linhaDaFila !== null;
+    const comCoorte = Boolean(resposta.coorte);
+    // Com a resposta "pronta" ha' sempre uma secao presente, entao isto so'
+    // protege o caso fila nula SEM motivo + coorte nula (hoje `fora_do_ar`).
+    if (!comFila && !comCoorte) return null;
+    return (
+      <SecaoGerencial titulo="Jornada" dica={DICA_COMPACTA}>
+        {avisoDeMarcaNaoAplicada(marca, resposta) ? (
+          <div data-testid="exp-jornada-marca-nao-aplicada">
+            <EstadoSecao tipo="parcial" titulo={avisoDeMarcaNaoAplicada(marca, resposta)!} />
+          </div>
+        ) : null}
+        {resposta.status === "partial" && motivoDoTopo(resposta) ? (
+          <EstadoSecao tipo="parcial" titulo={motivoDoTopo(resposta)!} />
+        ) : null}
+        {linhaDaFila}
+        {comEtapas || comCoorte ? (
+          <div className={`grid gap-3 ${comEtapas && comCoorte ? "lg:grid-cols-2" : ""}`} data-testid="exp-jornada">
+            {comEtapas ? <BlocoFilaAberta r={resposta} compacta /> : null}
+            {comCoorte ? <BlocoCoorte r={resposta} /> : null}
+          </div>
+        ) : null}
+      </SecaoGerencial>
+    );
+  }
+  return (
+    <SecaoGerencial
+      titulo="Jornada"
+      dica="Quantos pedidos há em cada etapa: os que aguardam expedição agora e como terminaram os dos últimos dias."
+    >
+      <EstadosDaJornada estado={estado} carga={carga} resposta={resposta} aoTentarDeNovo={aoTentarDeNovo} />
       {estado === "pronta" && resposta ? (
         <>
           {avisoDeMarcaNaoAplicada(marca, resposta) ? (

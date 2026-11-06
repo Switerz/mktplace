@@ -39,14 +39,25 @@ import {
   subvalorContagemML,
   temFiltroAtivoML,
   textoVazioML,
+  ContratoMLError,
+  ROTULO_SEM_ESTOQUE_FULL_ML,
+  estadoExibicaoMarcaML,
+  marcasSemEstoqueFullML,
+  subtextoSaldoZeroML,
+  subvalorDisponivelTotalML,
+  todasSemEstoqueFullML,
+  validarPayloadML,
+  identificacaoML,
+  seloAnunciosExtrasML,
+  SEM_IDENTIFICACAO_ML,
+  ROTULO_SKU_ITEM_VARIACAO_ML,
+  ROTULO_TITULO_ITEM_VARIACAO_ML,
   type FrescorML,
+  type MarcaML,
+  type MLFullEstoqueOk,
   type MLFullEstoqueResponse,
   type MotivoIndisponivelML,
 } from "../src/lib/ml-full-estoque.ts";
-import {
-  ML_FULL_ESTOQUE_FLAG,
-  mlFullEstoqueEnabled,
-} from "../src/lib/ml-full-estoque-flag.ts";
 import {
   ESTOQUE_FULL_NAV,
   ML_FULL_ESTOQUE_NAV,
@@ -85,26 +96,10 @@ function frescor(over: Partial<FrescorML> = {}): FrescorML {
 // Flag e navegacao
 // ---------------------------------------------------------------------------
 
-test("flag e' fail-closed e propria", () => {
-  const liga = (v: string | undefined) =>
-    mlFullEstoqueEnabled({ NEXT_PUBLIC_ML_FULL_STOCK_ENABLED: v } as NodeJS.ProcessEnv);
-  assert.equal(liga("true"), true);
-  for (const v of ["", "1", "TRUE", "yes", "false", undefined]) {
-    assert.equal(liga(v), false, `"${v}" nao pode ligar a tela`);
-  }
-  assert.equal(ML_FULL_ESTOQUE_FLAG, "NEXT_PUBLIC_ML_FULL_STOCK_ENABLED");
-  // Ligar o estoque Shopee nao liga o estoque ML.
-  assert.equal(
-    mlFullEstoqueEnabled({
-      NEXT_PUBLIC_SHOPEE_FBS_STOCK_ENABLED: "true",
-    } as NodeJS.ProcessEnv),
-    false,
-  );
-});
-
-test("a rota tem guard no servidor", () => {
-  assert.match(PAGE_SRC, /mlFullEstoqueEnabled\(\)/);
-  assert.match(PAGE_SRC, /notFound\(\)/);
+test("a rota nao depende de flag de build: quem decide e' a API", () => {
+  assert.doesNotMatch(PAGE_SRC, /notFound\(\)/);
+  assert.doesNotMatch(PAGE_SRC, /process\.env/);
+  assert.match(PAGE_SRC, /<MLFullEstoqueClient \/>/);
 });
 
 test("o menu responde so' a propria flag e nao colide com /full-ml nem /estoque-full", () => {
@@ -409,4 +404,299 @@ test("D2: 'Ver a ultima fotografia' move o foco para o campo de data", () => {
   assert.ok(voltar.includes("dataRef.current?.focus()"));
   const input = CLIENT_SRC.split('type="date"')[1]?.split("/>")[0] ?? "";
   assert.ok(input.includes("ref={dataRef}"));
+});
+
+// ---------------------------------------------------------------------------
+// T-0051: "Sem estoque Full" x "saldo disponivel 0" x ausencia
+// ---------------------------------------------------------------------------
+
+type Tipo = "com_inventario" | "saldo_zero" | "sem_estoque_full" | "ausente";
+
+function marca(brand: string, tipo: Tipo): MarcaML {
+  const vazio = {
+    brand,
+    ultima_fotografia: null,
+    published_at: null,
+    inventarios: null,
+    inventarios_full_lidos: null,
+    inventarios_compartilhados: null,
+    leitura: null,
+    disponivel_full: null,
+    nao_disponivel_full: null,
+    transfer_full: null,
+    unidades_28d_alocadas: null,
+    unidades_28d_item_varios_inventarios: null,
+    unidades_28d_sem_inventory_id: null,
+    unidades_28d_fora_da_ponte: null,
+    cobertura_da_alocacao: null,
+    por_classificacao: {},
+    nao_disponivel_por_status: [],
+  };
+  if (tipo === "ausente") return { ...vazio, tem_fotografia_no_dia: false, estado: null };
+  const foto = {
+    ...vazio,
+    tem_fotografia_no_dia: true,
+    ultima_fotografia: "2026-11-04",
+    published_at: "2026-11-04T12:00:00Z",
+  };
+  if (tipo === "sem_estoque_full") {
+    return {
+      ...foto,
+      estado: "sem_estoque_full",
+      inventarios: 0,
+      inventarios_full_lidos: 0,
+      inventarios_compartilhados: 0,
+      leitura: { inventarios: 0, inventarios_lidos: 0, inventarios_sem_leitura: 0 },
+      disponivel_full: 0,
+      nao_disponivel_full: 0,
+      transfer_full: 0,
+    };
+  }
+  const zero = tipo === "saldo_zero";
+  return {
+    ...foto,
+    estado: "com_inventario",
+    inventarios: 2,
+    inventarios_full_lidos: 2,
+    inventarios_compartilhados: 0,
+    leitura: { inventarios: 2, inventarios_lidos: 2, inventarios_sem_leitura: 0 },
+    disponivel_full: zero ? 0 : 900,
+    nao_disponivel_full: zero ? 15 : 0,
+    transfer_full: zero ? 4 : 0,
+  };
+}
+
+function payloadOk(marcas: MarcaML[], parcial = false): MLFullEstoqueOk {
+  return {
+    status: "ok",
+    marketplace: "ml",
+    scope_label: "s",
+    frescor: frescor(),
+    cobertura: {
+      marcas_esperadas: marcas.map((m) => m.brand),
+      marcas_com_fotografia: marcas.filter((m) => m.tem_fotografia_no_dia).map((m) => m.brand),
+      marcas_sem_fotografia: marcas.filter((m) => !m.tem_fotografia_no_dia).map((m) => m.brand),
+      leitura: { inventarios: 0, inventarios_lidos: 0, inventarios_sem_leitura: 0 },
+    },
+    indicadores: {
+      disponivel_full: 0,
+      nao_disponivel_full: 0,
+      transfer_full: 0,
+      total_parcial: parcial,
+      motivos_total_parcial: [],
+      inventarios: 0,
+      inventarios_full: 0,
+      inventarios_full_lidos: 0,
+      inventarios_fora_do_full: 0,
+      inventarios_compartilhados: 0,
+      inventarios_lidos: 0,
+      inventarios_sem_leitura: 0,
+      inventarios_ruptura: 0,
+      inventarios_baixo: 0,
+      inventarios_excesso: 0,
+      inventarios_sem_giro: 0,
+      inventarios_suficientes: 0,
+      inventarios_sem_demanda_medida: 0,
+      inventarios_exigem_acao: 0,
+    },
+    marcas,
+    inventarios: [],
+    total_no_filtro: 0,
+    truncado: false,
+    incluiu_fora_do_full: false,
+    limites: { cobertura_baixa_dias: 7, cobertura_excesso_dias: 90, provisorio: true, observacao: "" },
+    limitacoes: [],
+  };
+}
+
+function marcasValidadas(p: MLFullEstoqueResponse): MarcaML[] {
+  const v = validarPayloadML(p);
+  assert.ok(!isIndisponivelML(v));
+  return (v as MLFullEstoqueOk).marcas;
+}
+
+test("T-0051: parser aceita os tres estados e preserva o zero medido", () => {
+  const [kok, bar, les] = marcasValidadas(
+    payloadOk([
+      marca("kokeshi", "sem_estoque_full"),
+      marca("barbours", "saldo_zero"),
+      marca("lescent", "ausente"),
+    ]),
+  );
+  assert.equal(kok.estado, "sem_estoque_full");
+  assert.equal(kok.disponivel_full, 0);
+  assert.equal(bar.estado, "com_inventario");
+  assert.equal(les.estado, null);
+  assert.equal(les.disponivel_full, null, "ausencia nao vira zero");
+});
+
+test("T-0051: estado desconhecido ou incoerente e' erro de contrato, nunca zero", () => {
+  const com = (m: MarcaML) => () => validarPayloadML(payloadOk([m]));
+  const desconhecido = { ...marca("kokeshi", "sem_estoque_full"), estado: "nao_opera_full" };
+  assert.throws(com(desconhecido as unknown as MarcaML), ContratoMLError);
+  // "Sem estoque Full" sem o zero medido: fonte incompleta nao vira zero.
+  assert.throws(
+    com({ ...marca("kokeshi", "sem_estoque_full"), disponivel_full: null }),
+    ContratoMLError,
+  );
+  // Estado com fotografia numa marca sem fotografia, e vice-versa.
+  assert.throws(
+    com({ ...marca("kokeshi", "ausente"), estado: "sem_estoque_full" }),
+    ContratoMLError,
+  );
+  assert.throws(com({ ...marca("kokeshi", "saldo_zero"), estado: null }), ContratoMLError);
+  assert.match(new ContratoMLError().message, /não significa estoque zero/);
+  // Indisponivel passa direto.
+  const ind: MLFullEstoqueResponse = {
+    status: "unavailable",
+    marketplace: "ml",
+    unavailable_reason: "x",
+    motivo_tecnico: "sem_fotografia_publicada",
+    scope_label: "s",
+  };
+  assert.equal(validarPayloadML(ind), ind);
+});
+
+test("T-0051: API anterior sem o campo continua legivel (com fotografia = com inventario)", () => {
+  const semCampo = (m: MarcaML) => {
+    const copia: Record<string, unknown> = { ...m };
+    delete copia.estado;
+    return copia as unknown as MarcaML;
+  };
+  const [bar, kok] = marcasValidadas(
+    payloadOk([
+      semCampo(marca("barbours", "com_inventario")),
+      semCampo(marca("kokeshi", "ausente")),
+    ]),
+  );
+  assert.equal(bar.estado, "com_inventario");
+  assert.equal(kok.estado, null);
+});
+
+test("T-0051: exibicao por marca dos tres estados", () => {
+  const sem = marca("kokeshi", "sem_estoque_full");
+  const zero = marca("barbours", "saldo_zero");
+  const aus = marca("lescent", "ausente");
+  const med = marca("rituaria", "com_inventario");
+
+  assert.equal(estadoExibicaoMarcaML(sem), "sem_estoque_full");
+  assert.equal(subtextoSaldoZeroML(sem), null, "sem estoque Full nao e' saldo 0");
+  assert.equal(ROTULO_SEM_ESTOQUE_FULL_ML, "Sem estoque Full");
+
+  assert.equal(estadoExibicaoMarcaML(zero), "com_inventario");
+  assert.equal(fmtOpcional(zero.disponivel_full), "0");
+  assert.equal(subtextoSaldoZeroML(zero), "saldo disponível 0 · 15 não disponível");
+  assert.equal(subtextoSaldoZeroML({ ...zero, nao_disponivel_full: null }), "saldo disponível 0");
+
+  assert.equal(estadoExibicaoMarcaML(aus), "sem_fotografia");
+  assert.equal(fmtOpcional(aus.disponivel_full), SEM_DADO);
+  assert.equal(subtextoSaldoZeroML(aus), null);
+
+  assert.equal(subtextoSaldoZeroML(med), null);
+  assert.deepEqual(marcasSemEstoqueFullML([sem, zero, aus, med]), ["kokeshi"]);
+});
+
+test("T-0051: total -- todas sem estoque Full = 0 nao parcial; com ausencia = parcial", () => {
+  const todas = ["barbours", "kokeshi", "lescent", "rituaria"].map((b) =>
+    marca(b, "sem_estoque_full"),
+  );
+  assert.equal(todasSemEstoqueFullML(todas), true);
+  assert.equal(
+    subvalorDisponivelTotalML({ parcial: false, marcas: todas, inventariosFullLidos: 0 }),
+    "Sem estoque Full",
+  );
+
+  const umaAusente = [marca("barbours", "ausente"), ...todas.slice(1)];
+  assert.equal(todasSemEstoqueFullML(umaAusente), false);
+  assert.equal(
+    subvalorDisponivelTotalML({ parcial: true, marcas: umaAusente, inventariosFullLidos: 0 }),
+    PREFIXO_PARCIAL_ML,
+    "parcial sempre vence",
+  );
+
+  const mistas = [marca("barbours", "com_inventario"), marca("kokeshi", "sem_estoque_full")];
+  assert.equal(
+    subvalorDisponivelTotalML({ parcial: false, marcas: mistas, inventariosFullLidos: 2 }),
+    "2 inventários Full lidos",
+  );
+  assert.equal(todasSemEstoqueFullML([]), false, "lista vazia nao e' 'sem estoque'");
+
+  // Estado vazio: so' diz "Sem estoque Full" quando TODO o escopo e' assim.
+  assert.equal(
+    textoVazioML({ refDate: "2026-11-04", inventarios: 0, filtroAtivo: true, semEstoqueFull: true }),
+    "Sem estoque Full na fotografia de 04/11/2026: a leitura terminou sem nenhum inventário.",
+  );
+  assert.equal(
+    textoVazioML({ refDate: "2026-11-04", inventarios: 0, filtroAtivo: false, semEstoqueFull: false }),
+    "A fotografia de 04/11/2026 não tem inventários.",
+  );
+});
+
+test("T-0051: a tela valida o payload, distingue os estados e nao diz 'nao opera Full'", () => {
+  assert.ok(CLIENT_SRC.includes("validarPayloadML(await fetchMLFullEstoque("));
+  assert.ok(CLIENT_SRC.includes("e instanceof ContratoMLError"));
+  assert.ok(CLIENT_SRC.includes('estadoExibicaoMarcaML(m) === "sem_estoque_full"'));
+  assert.ok(CLIENT_SRC.includes("subtextoSaldoZeroML(m)"));
+  assert.ok(CLIENT_SRC.includes("semEstoqueFull: todasSemEstoqueFullML(payload.marcas)"));
+  const LIB_SRC = readFileSync(join(RAIZ, "src", "lib", "ml-full-estoque.ts"), "utf8");
+  for (const src of [CLIENT_SRC, LIB_SRC]) {
+    assert.ok(!/n[ãa]o opera (o )?Full/i.test(src), "'nao opera Full' e' outra afirmacao");
+  }
+  // A pill de "sem estoque Full" nao usa o ambar da ausencia.
+  const pill =
+    CLIENT_SRC.split("marcasSemEstoqueFullML(payload.marcas).length > 0")[1]?.split("</span>")[0] ?? "";
+  assert.ok(pill.includes("bg-slate-50"));
+  assert.ok(!pill.includes("amber"));
+});
+
+// ---------------------------------------------------------------------------
+// T-0018: identificacao por inventario (SKU · titulo, +N anuncios)
+// ---------------------------------------------------------------------------
+
+test("identificacao: 'SKU · titulo', so' um dos dois, ou 'sem identificação'", () => {
+  assert.deepEqual(identificacaoML({ sku: "SKU-1", titulo: "Shampoo 300ml" }), {
+    texto: "SKU-1 · Shampoo 300ml",
+    identificado: true,
+    avisoVariacao: null,
+  });
+  assert.equal(identificacaoML({ sku: null, titulo: "Perfume" }).texto, "Perfume");
+  assert.equal(identificacaoML({ sku: "SKU-2", titulo: null }).texto, "SKU-2");
+  // Ausente, nulo, vazio ou so' espacos: neutro e explicito, nunca vazio.
+  for (const vazio of [{}, { sku: null, titulo: null }, { sku: "  ", titulo: "" }]) {
+    const r = identificacaoML(vazio);
+    assert.equal(r.texto, SEM_IDENTIFICACAO_ML);
+    assert.equal(r.identificado, false);
+    assert.equal(r.avisoVariacao, null);
+  }
+  assert.equal(SEM_IDENTIFICACAO_ML, "sem identificação");
+});
+
+test("identificacao em variacao declara que o SKU e' do item", () => {
+  const r = identificacaoML({ sku: "SKU-1", titulo: "Kit", ancora_e_variacao: true });
+  assert.equal(r.avisoVariacao, ROTULO_SKU_ITEM_VARIACAO_ML);
+  assert.equal(ROTULO_SKU_ITEM_VARIACAO_ML, "SKU do item (variação)");
+  assert.equal(
+    identificacaoML({ sku: null, titulo: "Kit", ancora_e_variacao: true }).avisoVariacao,
+    ROTULO_TITULO_ITEM_VARIACAO_ML,
+  );
+  // Sem identificacao nao ha' o que qualificar.
+  assert.equal(identificacaoML({ sku: null, titulo: null, ancora_e_variacao: true }).avisoVariacao, null);
+  assert.equal(identificacaoML({ sku: "S", titulo: "T", ancora_e_variacao: null }).avisoVariacao, null);
+});
+
+test("selo '+N anúncios' so' com extras > 0; nulo/0 nao desenha selo", () => {
+  assert.equal(seloAnunciosExtrasML(2), "+2 anúncios");
+  assert.equal(seloAnunciosExtrasML(1), "+1 anúncio");
+  for (const v of [0, null, undefined, -1, Number.NaN]) {
+    assert.equal(seloAnunciosExtrasML(v as number | null | undefined), null);
+  }
+});
+
+test("a tabela mostra a identificacao com tokens existentes e sem ID do anuncio", () => {
+  assert.ok(CLIENT_SRC.includes(">Identificação</th>"));
+  assert.ok(CLIENT_SRC.includes("identificacaoML(i)"));
+  assert.ok(CLIENT_SRC.includes("seloAnunciosExtrasML(i.anuncios_extras)"));
+  assert.ok(CLIENT_SRC.includes("text-ink-muted italic"), "sem identificacao em tom neutro");
+  assert.ok(!CLIENT_SRC.includes("anuncio_ancora"), "o ID do anuncio nao chega a' tela");
+  assert.ok(!CLIENT_SRC.includes("inventory_id"));
 });

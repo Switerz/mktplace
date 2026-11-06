@@ -483,3 +483,53 @@ test("QA F1: o `sr-only` da taxa empilhada fica dentro de um invólucro `relativ
   const kpi = renderToStaticMarkup(h(TaxaComBase, { numerador: 199, base: 5940, taxa: 0.0335 }));
   assert.doesNotMatch(kpi, /sr-only/);
 });
+
+// ---------------------------------------------------------------------------
+// EXPEDICAO-TIKTOK-PADRAO — o TikTok no mesmo desenho da Shopee e do ML
+// ---------------------------------------------------------------------------
+import { ondeAgirNosAbertos, type MarcaAbertos } from "../src/lib/expedicao-tiktok-abertos.ts";
+import { montarBarraDeQualidadeTikTok as barraTk, ROTULO_EVENTO_CURTO } from "../src/lib/expedicao-tiktok-contract.ts";
+
+function marcaAberta(brand: string, overdue: number, over_48h = 0): MarcaAbertos {
+  return {
+    brand, oldest_paid_at: null, open: overdue + over_48h, awaiting_shipment: 0, awaiting_collection: 0,
+    on_hold: 0, overdue, overdue_shipment: 0, overdue_collection: overdue, due_today: 0, due_next_day: 0,
+    on_time: 0, over_48h,
+  };
+}
+
+test("onde agir do TikTok: a marca que concentra os vencidos, na frase da fila", () => {
+  const marcas = [marcaAberta("kokeshi", 1732), marcaAberta("apice", 1294), marcaAberta("lescent", 541)];
+  const t = { ...marcaAberta("todas", 3567) };
+  const item = ondeAgirNosAbertos(t, marcas, (m) => m.toUpperCase());
+  assert.deepEqual(item, { chave: "overdue", tom: "critico", texto: "KOKESHI concentra 1.732 dos 3.567 vencidos." });
+});
+
+test("onde agir do TikTok: sem vencido cai para acima de 48 h; uma marca so' nao gera frase", () => {
+  const marcas = [marcaAberta("kokeshi", 0, 10), marcaAberta("apice", 0, 30)];
+  const t = marcaAberta("todas", 0, 40);
+  assert.equal(ondeAgirNosAbertos(t, marcas)?.texto, "APICE concentra 30 dos 40 acima de 48 h.");
+  assert.equal(ondeAgirNosAbertos(t, marcas)?.tom, "atencao");
+  assert.equal(ondeAgirNosAbertos(t, [marcas[0]]), null);
+  assert.equal(ondeAgirNosAbertos(marcaAberta("todas", 0, 0), marcas), null);
+  assert.equal(ondeAgirNosAbertos(null, marcas), null);
+});
+
+test("prazo reconstruido vira chip curto, com o texto inteiro no ⓘ", () => {
+  const barra = barraTk({
+    deadline_is_reconstructed: true,
+    alerts: [],
+    ldr: { partial_due_days: 1 },
+  } as unknown as Parameters<typeof barraTk>[0]);
+  assert.equal(barra.severidade, "info");
+  assert.ok(barra.detalhes.every((d) => d.curto), "todo item tem rotulo curto: a barra vira linha discreta");
+  assert.equal(barra.detalhes[0].curto, "Prazo reconstruído · medição interna");
+  assert.equal(barra.detalhes[1].curto, "1 vencimento ainda no prazo");
+});
+
+test("filtros do TikTok numa linha: Evento curto e 'Período' como nos outros canais", () => {
+  assert.deepEqual(ROTULO_EVENTO_CURTO, { coleta: "Coleta", despacho: "Despacho" });
+  const tk = lerFonte(juntar(import.meta.dirname, "..", "src/components/expedicao/TikTokDispatchPanel.tsx"), "utf8");
+  assert.match(tk, /rotulo="Período"/);
+  assert.doesNotMatch(tk, /rotulo="Janela"/);
+});

@@ -3,9 +3,10 @@
   BRANDS, GMV_MONTHLY,
 } from "./mock-data";
 import type { HojePorHora } from "./gerencial/hoje-por-hora";
+import { torreFetch } from "./torre-fetch.ts";
 import { calcMoM } from "./formatters";
 import {
-  DEFAULT_MARKETPLACE_SELECTION,
+  ALL_MARKETPLACE_SELECTION,
   isMarketplaceSelected,
   serializeMarketplaceSelection,
   type MarketplaceSelection,
@@ -72,6 +73,8 @@ export interface BrandRow {
   gpm: number | null;
   ml_roas: number | null;
   ml_cancel_rate_pct: number | null;
+  /** Ads ML + Shopee da marca (mesma soma do `ad_spend` do overview). */
+  ad_spend?: number | null;
 }
 
 export interface MonthPoint {
@@ -156,7 +159,7 @@ async function withCache<T>(key: string, fn: () => Promise<T>): Promise<T> {
 
 async function apiFetch<T>(path: string): Promise<T | null> {
   try {
-    const res = await fetch(`${API_URL}${path}`);
+    const res = await torreFetch(`${API_URL}${path}`);
     if (!res.ok) return null;
     // `await` explicito: sem ele, uma rejeicao de res.json() (corpo invalido)
     // escaparia deste catch, pois a promise seria devolvida sem ser
@@ -412,7 +415,7 @@ export function fetchBrands(
 }
 
 export function fetchMonthly(
-  selection: MarketplaceSelection = DEFAULT_MARKETPLACE_SELECTION,
+  selection: MarketplaceSelection = ALL_MARKETPLACE_SELECTION,
 ): Promise<{ data: MonthPoint[]; live: boolean }> {
   interface ApiResp { data: MonthPoint[] }
   const marketplace = serializeMarketplaceSelection(selection);
@@ -1864,7 +1867,7 @@ export interface PedidosData {
 }
 
 export function fetchPedidos(
-  selection: MarketplaceSelection = DEFAULT_MARKETPLACE_SELECTION,
+  selection: MarketplaceSelection = ALL_MARKETPLACE_SELECTION,
   filters?: GlobalFilterParams,
   daysBack = 30,
 ): Promise<PedidosData | null> {
@@ -2308,7 +2311,7 @@ export async function fetchMonitoramentoPreco(
   const qs = buildMonitoramentoPrecoQuery(params);
   let res: Response;
   try {
-    res = await fetch(
+    res = await torreFetch(
       `${API_URL}/api/v1/performance/monitoramento-preco?${qs.toString()}`,
       { signal },
     );
@@ -2349,7 +2352,7 @@ export async function fetchAvoeSnapshot(
 ): Promise<AvoeSnapshotResponse> {
   let res: Response;
   try {
-    res = await fetch(`${API_URL}/api/v1/performance/avoe-snapshot`, { signal });
+    res = await torreFetch(`${API_URL}/api/v1/performance/avoe-snapshot`, { signal });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") throw err;
     throw new AvoeSnapshotError("Nao foi possivel contatar a API.", null);
@@ -2395,7 +2398,7 @@ export async function fetchMLFulfillment(
 ): Promise<MLFulfillmentResponse> {
   let res: Response;
   try {
-    res = await fetch(
+    res = await torreFetch(
       `${API_URL}/api/v1/performance/ml-fulfillment?${query}`,
       { signal },
     );
@@ -2445,7 +2448,7 @@ export async function fetchShopeeFbs(
 ): Promise<ShopeeFbsPayload> {
   let res: Response;
   try {
-    res = await fetch(
+    res = await torreFetch(
       `${API_URL}/api/v1/performance/shopee-fbs?${query}`,
       { signal },
     );
@@ -2499,7 +2502,7 @@ export async function fetchEstoqueFull(
 ): Promise<EstoqueFullResponse> {
   let res: Response;
   try {
-    res = await fetch(
+    res = await torreFetch(
       `${API_URL}/api/v1/performance/shopee-fbs-estoque?${query}`,
       { signal },
     );
@@ -2545,7 +2548,7 @@ export async function fetchMLFullEstoque(
 ): Promise<MLFullEstoqueResponse> {
   let res: Response;
   try {
-    res = await fetch(
+    res = await torreFetch(
       `${API_URL}/api/v1/performance/ml-full-estoque?${query}`,
       { signal },
     );

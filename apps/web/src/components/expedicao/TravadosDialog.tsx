@@ -29,8 +29,10 @@ import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
 import DrilldownSecao from "@/components/drilldown/DrilldownSecao";
 import EvidenceRow from "@/components/drilldown/EvidenceRow";
 import NumeroAnimado from "@/components/ui/NumeroAnimado";
+import Segmented from "@/components/ui/Segmented";
 import {
   canalTemPrazo,
+  diaDoProximoVencimento,
   formatarHoras,
   numeroDoPedido,
   rotuloDeadline,
@@ -42,6 +44,8 @@ import {
 import {
   LISTAS,
   csvDaLista,
+  diaBrtDe,
+  filtrarPorVencimento,
   motivoDoTravado,
   nomeDoCsv,
   percentualDaFila,
@@ -51,6 +55,7 @@ import {
   temEtapaPublicada,
   travadosPorEtapa,
   type AlvoTravados,
+  type FiltroVencimento,
 } from "@/lib/expedicao-travados";
 import { buscarExpedicao } from "@/lib/expedicao-demo";
 import { formatarInteiro } from "@/lib/expedicao-formato";
@@ -61,7 +66,41 @@ export type { AlvoTravados };
 type Estado =
   | { tipo: "carregando" }
   | { tipo: "erro" }
-  | { tipo: "ok"; linhas: LinhaFila[]; total: number };
+  | {
+      tipo: "ok";
+      linhas: LinhaFila[];
+      total: number;
+      /** Dia de Brasilia da fotografia e o proximo dia de prazo (filtro rapido). */
+      hoje: string | null;
+      proximo: string | null;
+      efetivoEm: string | null;
+      /** Contagem EXATA da API (`due_today_count`/`due_next_day_count`) no recorte. */
+      contagemHoje: number | null;
+      contagemProximo: number | null;
+    };
+
+/**
+ * EXPEDICAO-PERTO-DE-VENCER-FILTRO — contagem exata de hoje / proximo dia no
+ * recorte do popup. `accounts[]` e `totals` sao do canal inteiro (os filtros
+ * de marca/conta recortam so' a lista), entao o recorte soma as contas.
+ */
+function contagemDoRecorte(
+  json: RespostaExpedicao,
+  marca: string | null,
+  conta: string | null,
+  campo: "due_today_count" | "due_next_day_count",
+): number | null {
+  if (!marca && !conta) {
+    const v = json.totals?.[campo];
+    return typeof v === "number" ? v : null;
+  }
+  const contas = (json.accounts ?? []).filter((a) => (conta ? a.shop_account === conta : a.brand === marca));
+  if (!contas.length || contas.some((a) => typeof a[campo] !== "number")) return null;
+  return contas.reduce((soma, a) => soma + (a[campo] as number), 0);
+}
+
+/** Lista do proximo dia buscada a parte quando a de "perto de vencer" vem cortada. */
+type ListaDoProximo = { tipo: "carregando" } | { tipo: "erro" } | { tipo: "ok"; linhas: LinhaFila[] };
 
 /** POPUPS-1 — contagem por rotulo, da maior para a menor. */
 function contarPor(linhas: LinhaFila[], rotulo: (l: LinhaFila) => string): { rotulo: string; n: number }[] {
@@ -119,6 +158,7 @@ export default function TravadosDialog({
 }) {
   const [estado, setEstado] = useState<Estado>({ tipo: "carregando" });
   const [tentativa, setTentativa] = useState(0);
+  const [filtroDia, setFiltroDia] = useState<FiltroVencimento>("todos");
   const lista = alvo?.lista ?? "travados";
   const cfg = LISTAS[lista];
   const ehTravados = lista === "travados";
@@ -140,7 +180,17 @@ export default function TravadosDialog({
       .then((json) => {
         if (!vivo) return;
         const linhas = json.queue ?? [];
-        setEstado({ tipo: "ok", linhas, total: json.pagination?.total ?? linhas.length });
+        const efetivoEm = json.snapshot?.effective_at ?? null;
+        setEstado({
+          tipo: "ok",
+          linhas,
+          total: json.pagination?.total ?? linhas.length,
+          hoje: diaBrtDe(efetivoEm),
+          proximo: json.snapshot?.next_due_date ?? null,
+          efetivoEm,
+          contagemHoje: contagemDoRecorte(json, alvo?.marca ?? null, alvo?.conta ?? null, "due_today_count"),
+          contagemProximo: contagemDoRecorte(json, alvo?.marca ?? null, alvo?.conta ?? null, "due_next_day_count"),
+        });
       })
       .catch(() => {
         if (vivo) setEstado({ tipo: "erro" });
@@ -148,7 +198,38 @@ export default function TravadosDialog({
     return () => {
       vivo = false;
     };
+    // `alvo` muda junto com `query` (o dialogo remonta por `key`).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, query, tentativa]);
+
+  // Com a lista de "perto de vencer" cortada no limite da API, o proximo dia
+  // (que vem depois de hoje na ordem por prazo) pode ter ficado de fora: o
+  // filtro busca a lista propria dele (`due_next_day`), na mesma rota.
+  const cortadaNaFonte = estado.tipo === "ok" && estado.total > estado.linhas.length;
+  const precisaDoProximo = lista === "perto_de_vencer" && filtroDia === "proximo" && cortadaNaFonte;
+  const queryProximo = alvo && precisaDoProximo ? queryDaLista("vence_proximo", canal, alvo.marca, alvo.conta) : null;
+  const [listaProximo, setListaProximo] = useState<ListaDoProximo | null>(null);
+  useEffect(() => {
+    if (!queryProximo || listaProximo?.tipo === "ok") return;
+    let vivo = true;
+    setListaProximo({ tipo: "carregando" });
+    buscarExpedicao(`${api}/api/v1/expedicao?${queryProximo}`, { headers: { Accept: "application/json" } })
+      .then(async (r) => {
+        if (!r.ok) throw new Error("http");
+        return (await r.json()) as RespostaExpedicao;
+      })
+      .then((json) => {
+        if (vivo) setListaProximo({ tipo: "ok", linhas: json.queue ?? [] });
+      })
+      .catch(() => {
+        if (vivo) setListaProximo({ tipo: "erro" });
+      });
+    return () => {
+      vivo = false;
+    };
+    // `listaProximo` fora das dependencias: buscada uma vez, fica em memoria.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, queryProximo]);
 
   // Carregada a lista, o total e' o dela (mesma leitura que os pedidos abaixo).
   const travados = estado.tipo === "ok" ? estado.total : (alvo?.travados ?? 0);
@@ -165,14 +246,44 @@ export default function TravadosDialog({
     (estado.tipo === "ok" && estado.linhas.some((l) => l.dispatch_deadline != null));
   // Etapa (T-0015): so' com a migration 033 aplicada e o publicador novo.
   const temEtapa = estado.tipo === "ok" && temEtapaPublicada(estado.linhas);
-  const porEtapa = estado.tipo === "ok" && temEtapa ? travadosPorEtapa(estado.linhas) : [];
   // POPUPS-1 — quebras sobre as linhas carregadas. Com a lista cortada no
   // limite, elas falam dos N mais antigos, e o rotulo da secao diz isso.
-  const linhas = estado.tipo === "ok" ? estado.linhas : [];
+  const todasAsLinhas = estado.tipo === "ok" ? estado.linhas : [];
+  // EXPEDICAO-PERTO-DE-VENCER-FILTRO — so' na lista "perto de vencer" e com o
+  // dia da fotografia conhecido; etapa, tabela e CSV seguem o recorte.
+  const temFiltroDia = lista === "perto_de_vencer" && estado.tipo === "ok" && estado.hoje !== null;
+  const hojeFoto = estado.tipo === "ok" ? estado.hoje : null;
+  const proximoFoto = estado.tipo === "ok" ? estado.proximo : null;
+  const filtroAtivo: FiltroVencimento = temFiltroDia ? filtroDia : "todos";
+  const linhas =
+    filtroAtivo === "proximo" && precisaDoProximo
+      ? listaProximo?.tipo === "ok"
+        ? listaProximo.linhas
+        : []
+      : filtrarPorVencimento(todasAsLinhas, filtroAtivo, hojeFoto, proximoFoto);
+  const carregandoProximo = filtroAtivo === "proximo" && precisaDoProximo && listaProximo?.tipo !== "ok";
+  // O numero do chip e' o da API (exato); sem ele, o das linhas carregadas.
+  const nHoje =
+    estado.tipo === "ok" && estado.contagemHoje !== null
+      ? estado.contagemHoje
+      : filtrarPorVencimento(todasAsLinhas, "hoje", hojeFoto, proximoFoto).length;
+  const nProximo =
+    estado.tipo === "ok" && estado.contagemProximo !== null
+      ? estado.contagemProximo
+      : filtrarPorVencimento(todasAsLinhas, "proximo", hojeFoto, proximoFoto).length;
+  const diaProximo = estado.tipo === "ok" ? diaDoProximoVencimento(estado.proximo, estado.efetivoEm) : "amanhã";
+  const porEtapa = estado.tipo === "ok" && temEtapa ? travadosPorEtapa(linhas) : [];
   const porMotivo = ehTravados ? contarPor(linhas, motivoDoTravado) : [];
   const porMarca = variasMarcas ? contarPor(linhas, (l) => brandLabel(l.brand)) : [];
-  const cortada = estado.tipo === "ok" && estado.total > estado.linhas.length;
-  const amostra = cortada ? <span className="tabular-nums">nos {formatarInteiro(linhas.length)} {ordem}</span> : undefined;
+  const cortada = cortadaNaFonte;
+  // Com filtro, a ressalva so' aparece se o recorte carregado nao tem todos.
+  const nDoFiltro = filtroAtivo === "hoje" ? nHoje : filtroAtivo === "proximo" ? nProximo : null;
+  const amostra =
+    filtroAtivo === "todos" ? (
+      cortada ? <span className="tabular-nums">nos {formatarInteiro(todasAsLinhas.length)} {ordem}</span> : undefined
+    ) : nDoFiltro !== null && !carregandoProximo && linhas.length < nDoFiltro ? (
+      <span className="tabular-nums">nos {formatarInteiro(linhas.length)} de {formatarInteiro(nDoFiltro)}</span>
+    ) : undefined;
   const tinta = cfg.tom === "critico" ? "text-crit-ink" : "text-warn-ink";
   const pilula = cfg.tom === "critico" ? "bg-crit-soft text-crit-ink" : "bg-warn-soft text-warn-ink";
   // Rodape so' com o que falta dizer; sem nada, nenhum paragrafo vazio.
@@ -223,6 +334,26 @@ export default function TravadosDialog({
             <p role="status" className="text-sm text-ink-muted">{cfg.vazio}</p>
           ) : (
             <>
+              {temFiltroDia ? (
+                <Segmented<FiltroVencimento>
+                  rotulo="Filtrar por dia do prazo"
+                  className="self-start"
+                  opcoes={[
+                    { valor: "todos", texto: `Todos · ${formatarInteiro(estado.total)}` },
+                    { valor: "hoje", texto: `Vence hoje · ${formatarInteiro(nHoje)}` },
+                    { valor: "proximo", texto: `Vence ${diaProximo} · ${formatarInteiro(nProximo)}` },
+                  ]}
+                  valor={filtroAtivo}
+                  aoEscolher={setFiltroDia}
+                />
+              ) : null}
+
+              {carregandoProximo ? (
+                <p role="status" className="text-sm text-ink-muted">
+                  {listaProximo?.tipo === "erro" ? "Não foi possível carregar os pedidos do próximo dia." : "Carregando pedidos…"}
+                </p>
+              ) : null}
+
               {ehTravados ? (
                 <DrilldownSecao titulo="Por que travou" acao={amostra}>
                   <Quebra itens={porMotivo} base={linhas.length} />
@@ -249,9 +380,11 @@ export default function TravadosDialog({
                 acao={
                   <>
                     <span className="tabular-nums">
-                      {cortada
-                        ? `${formatarInteiro(linhas.length)} ${ordem} de ${formatarInteiro(estado.total)}`
-                        : `${ordem} primeiro`}
+                      {filtroAtivo !== "todos"
+                        ? `${formatarInteiro(linhas.length)}${nDoFiltro !== null && linhas.length < nDoFiltro ? ` de ${formatarInteiro(nDoFiltro)}` : ""} ${filtroAtivo === "hoje" ? "vencem hoje" : `vencem ${diaProximo}`}`
+                        : cortada
+                          ? `${formatarInteiro(linhas.length)} ${ordem} de ${formatarInteiro(estado.total)}`
+                          : `${ordem} primeiro`}
                     </span>
                     <button
                       type="button"
@@ -283,7 +416,7 @@ export default function TravadosDialog({
                       </tr>
                     </thead>
                     <tbody>
-                      {estado.linhas.map((l, i) => (
+                      {linhas.map((l, i) => (
                         <tr key={`${l.shop_account}-${numeroDoPedido(l) ?? i}`} className="border-t border-line">
                           {temCodigo ? (
                             <td className="whitespace-nowrap font-mono text-xs text-ink">

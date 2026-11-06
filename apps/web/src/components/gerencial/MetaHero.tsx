@@ -25,6 +25,7 @@ import { ROTULO_STATUS, type ProgressoMeta, type StatusMeta } from "@/lib/gerenc
 import { diaDaSemana, type ProgressoDia, type StatusDia } from "@/lib/metas-curva";
 import { fmtCompacto, rotuloMes } from "@/lib/metas";
 import { fmtPctBr } from "@/lib/formatters";
+import type { DivisaoFull } from "@/lib/gerencial/divisao-full";
 import InfoDica from "@/components/ui/InfoDica";
 import NumeroAnimado from "@/components/ui/NumeroAnimado";
 
@@ -83,6 +84,8 @@ interface Props {
   metasHref: string;
   /** Abre o detalhe do GMV (o mesmo drill-down que o card de GMV abria). */
   onOpenGmv: () => void;
+  /** Receita entre Full (ML Full + Shopee FBS) e normal; `null` = sem dado. */
+  fullNormal?: DivisaoFull | null;
 }
 
 export default function MetaHero(props: Props) {
@@ -102,6 +105,7 @@ export default function MetaHero(props: Props) {
             <SemMeta {...props} />
           )}
           <Divisao channels={props.channels} gmvByChannel={props.gmvByChannel} total={gmv} />
+          {!error && props.fullNormal && gmv ? <DivisaoFullNormal d={props.fullNormal} total={gmv} /> : null}
         </div>
         {props.diaMeta ? (
           <SeloDoDia progressoDia={props.progressoDia} metasHref={props.metasHref} />
@@ -256,10 +260,14 @@ function BarraDaMeta({ progresso: p, mesMeta, comCurva, canaisForaDaMeta }: Prop
       {p.porDiaNecessario != null && (
         <p
           className="mt-1.5 text-xs text-ink-muted tabular-nums"
-          title={`Faltam ${fmtCompacto(p.falta)} em ${p.diasRestantes} ${p.diasRestantes === 1 ? "dia" : "dias"}`}
+          title={
+            comCurva
+              ? `Faltam ${fmtCompacto(p.falta)} em ${p.diasRestantes} ${p.diasRestantes === 1 ? "dia" : "dias"}. Dia normal = o que falta ÷ peso dos dias que restam na curva; dias de evento pedem mais.`
+              : `Faltam ${fmtCompacto(p.falta)} em ${p.diasRestantes} ${p.diasRestantes === 1 ? "dia" : "dias"}`
+          }
         >
           faltam <b className="font-semibold text-ink">{fmtCompacto(p.falta)}</b> · {fmtCompacto(p.porDiaNecessario)}/dia
-          {comCurva ? " em média" : ""}
+          {comCurva ? " normal" : ""}
         </p>
       )}
     </div>
@@ -407,6 +415,31 @@ function Divisao({
           <li key={c} className="inline-flex items-center gap-1.5">
             <span aria-hidden="true" className={`h-2 w-2 rounded-full ${PONTO[c]}`} />
             {CHANNEL_LABEL[c]} {fmtCompacto(v)} · {Math.round((v / total) * 100)}%
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** Mesma leitura da divisao por canal, agora por modalidade de envio. */
+function DivisaoFullNormal({ d, total }: { d: DivisaoFull; total: number }) {
+  const partes = [
+    { rotulo: "Full", v: d.full, cor: "bg-accent" },
+    { rotulo: "Normal", v: d.normal, cor: "bg-ink-faint" },
+  ].filter((p) => p.v > 0);
+  return (
+    <div className="mt-3" title="Full = Mercado Livre Full + Shopee FBS. Proporção medida nos pedidos com modalidade de envio conhecida; TikTok entra em normal.">
+      <div className="flex h-1.5 gap-0.5 overflow-hidden rounded-full" aria-hidden="true">
+        {partes.map((p) => (
+          <div key={p.rotulo} className={p.cor} style={{ flex: p.v }} />
+        ))}
+      </div>
+      <ul className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-muted tabular-nums">
+        {partes.map((p) => (
+          <li key={p.rotulo} className="inline-flex items-center gap-1.5">
+            <span aria-hidden="true" className={`h-2 w-2 rounded-full ${p.cor}`} />
+            {p.rotulo} {fmtCompacto(p.v)} · {Math.round((p.v / total) * 100)}%
           </li>
         ))}
       </ul>

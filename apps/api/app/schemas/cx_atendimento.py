@@ -1,0 +1,232 @@
+"""CX-MKT-1 — schema da aba CX (`/api/v1/cx/atendimento` e `/api/v1/cx/shopee`).
+
+Contrato: `docs/cx_atendimento_contrato.md`.
+
+Reaproveita `Indicador` e `Cobertura` da Performance das contas: as mesmas
+regras valem aqui (so' `dado` carrega valor; numero Torre nunca leva limiar
+oficial; ausencia nunca vira zero).
+
+O QUE ESTA FATIA MOSTRA
+-----------------------
+So' o que ja' existe no Data Mart, sem ingestao nova:
+  * ML: cancelamentos, taxa e motivo (`cancel_detail`). Reclamacao NAO: a
+    taxa oficial vem da reputacao do ML (aba Performance);
+  * Shopee: cancelamentos por motivo e por quem cancelou, e pedidos em
+    devolucao agora (`to_return`).
+O resto da aba (fila de acao, motivo das reclamacoes, devolucoes do TikTok e
+da Shopee) chega como `pendencias`: blocos com motivo explicito, nunca zero.
+"""
+from __future__ import annotations
+
+from datetime import date, datetime
+from typing import Literal, Optional
+
+from pydantic import BaseModel, model_validator
+
+from app.schemas.account_performance import CanalPerformance, Cobertura, Indicador
+from app.schemas.performance_oficial import ContaOficial, ContaSemFoto, EstadoCanal
+
+#: Quem originou o cancelamento/caso, em vocabulario comum aos canais.
+Natureza = Literal["comprador", "reclamacao", "logistica", "vendedor", "plataforma"]
+EstadoBloco = Literal["dado", "vazio_legitimo", "sem_fonte", "erro"]
+
+#: Janelas aceitas (dias fechados ate' D-1).
+JANELAS_DIAS: tuple[int, ...] = (7, 30, 90)
+
+
+class Janela(BaseModel):
+    inicio: date
+    fim: date
+    dias: int
+
+
+class Motivo(BaseModel):
+    codigo: str
+    rotulo: str
+    natureza: Natureza
+    quantidade: int
+    #: Participacao no total do bloco, 0-100.
+    pct: float
+    #: False = codigo novo, fora do mapa de rotulos: aparece com o texto da
+    #: plataforma para o mapa ser corrigido, nunca descartado.
+    mapeado: bool = True
+
+
+class BlocoMotivos(BaseModel):
+    titulo: str
+    estado: EstadoBloco
+    total: Optional[int] = None
+    itens: list[Motivo] = []
+    ajuda: str
+    #: Volume deixado de fora de proposito (ex.: Shopee "pedido nao pago").
+    excluidos: Optional[int] = None
+    rotulo_excluidos: Optional[str] = None
+    motivo_indisponivel: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _ausencia_nao_e_zero(self) -> "BlocoMotivos":
+        if self.estado != "dado" and (self.total is not None or self.itens):
+            raise ValueError("so' o estado 'dado' carrega total e itens")
+        if self.estado == "dado" and self.total is None:
+            raise ValueError("estado 'dado' exige total")
+        return self
+
+
+class LinhaMarca(BaseModel):
+    """Uma linha marca x canal. Coluna ausente na fonte = None, nunca 0."""
+    marca: str
+    pedidos: Optional[int] = None
+    taxa_cancelamento_pct: Optional[float] = None
+    cancelamentos: Optional[int] = None
+    cancelamentos_comprador: Optional[int] = None
+    em_devolucao: Optional[int] = None
+
+
+class Pendencia(BaseModel):
+    codigo: str
+    titulo: str
+    motivo: str
+
+
+class CanalAtendimento(BaseModel):
+    canal: CanalPerformance
+    cobertura: Cobertura
+    indicadores: list[Indicador]
+    motivos: Optional[BlocoMotivos] = None
+    marcas: list[LinhaMarca] = []
+    pendencias: list[Pendencia] = []
+    atualizado_em: Optional[datetime] = None
+
+
+class AtendimentoResponse(BaseModel):
+    gerado_em: datetime
+    janela: Janela
+    canais: list[CanalAtendimento]
+
+
+# ---------------------------------------------------------------------------
+# Aba CX (menu principal), 04/11/2026: primeira versao so' Shopee.
+# ---------------------------------------------------------------------------
+class NaoLidas(BaseModel):
+    """Conversas nao lidas no chat, ultima foto da loja (`shopee_cx_coleta`)."""
+    marca: str
+    #: None = a Shopee nao devolveu o numero (nunca zero).
+    valor: Optional[int] = None
+    capturado_em: Optional[datetime] = None
+    #: Volume de conversas (`get_conversation_list`, 04/11/2026): conversas com
+    #: mensagem nos ultimos 7/30 dias e quantas tem a ultima mensagem do
+    #: comprador. None = coleta ainda sem essa leitura (nunca zero).
+    conversas_7d: Optional[int] = None
+    conversas_30d: Optional[int] = None
+    aguardando_resposta: Optional[int] = None
+    #: True = bateu o teto de paginas: o numero e' um piso.
+    conversas_truncado: Optional[bool] = None
+    #: Fila (05/11/2026): das que aguardam resposta, quantas esperam ate' 1 h,
+    #: 1-4 h, 4-24 h e mais de 24 h, e a espera da mais antiga (segundos).
+    aguardando_ate_1h: Optional[int] = None
+    aguardando_1a4h: Optional[int] = None
+    aguardando_4a24h: Optional[int] = None
+    aguardando_mais_24h: Optional[int] = None
+    espera_max_s: Optional[int] = None
+    #: Tempo de resposta no periodo (segundos). Lojas com app: mediana das
+    #: respostas da loja (`raw.shopee_chat_respostas`, sem automaticas);
+    #: Kokeshi: media que o bot le no Seller Centre.
+    tempo_resposta_s: Optional[int] = None
+    tempo_resposta_p90_s: Optional[int] = None
+    respostas: Optional[int] = None
+    respostas_ate_1h_pct: Optional[float] = None
+    #: Primeira resposta medida (a coleta comecou em 05/11/2026).
+    respostas_desde: Optional[datetime] = None
+    tempo_resposta_fonte: Optional[Literal["mediana", "media_seller_centre"]] = None
+
+
+class LinhaDevolucao(BaseModel):
+    marca: str
+    #: Pedidos de devolucao/reembolso abertos na janela (todos os status).
+    devolucoes: Optional[int] = None
+    aceitas: Optional[int] = None
+    em_andamento: Optional[int] = None
+    #: O comprador desistiu do pedido de devolucao.
+    canceladas: Optional[int] = None
+    #: Soma de `refund_amount` (R$) so' das aceitas.
+    reembolsado: Optional[float] = None
+
+
+class DevolucoesShopee(BaseModel):
+    """Devolucoes/reembolsos criados na janela (`raw.shopee_returns`)."""
+    estado: EstadoBloco
+    fonte: str
+    motivo_indisponivel: Optional[str] = None
+    total: Optional[int] = None
+    aceitas: Optional[int] = None
+    em_andamento: Optional[int] = None
+    canceladas: Optional[int] = None
+    #: Soma de `refund_amount` (R$) das devolucoes ACEITAS da janela.
+    reembolsado: Optional[float] = None
+    motivos: Optional[BlocoMotivos] = None
+    marcas: list[LinhaDevolucao] = []
+
+    @model_validator(mode="after")
+    def _ausencia_nao_e_zero(self) -> "DevolucoesShopee":
+        if self.estado != "dado" and (self.total is not None or self.marcas):
+            raise ValueError("so' o estado 'dado' carrega total e marcas")
+        return self
+
+
+class ChatShopee(BaseModel):
+    """Metricas de atendimento da Saude da Conta (fotografia diaria oficial).
+
+    Cada conta traz so' as metricas do grupo "Atendimento" (taxa de resposta
+    do chat, nota da loja e, quando a Shopee publica, tempo de resposta e
+    chats sem resposta), com a meta da propria Shopee.
+    """
+    estado: EstadoCanal
+    motivo: Optional[str] = None
+    fonte: str
+    contas: list[ContaOficial] = []
+    sem_foto: list[ContaSemFoto] = []
+    #: Conversas nao lidas (coleta propria, a cada 2 h).
+    nao_lidas_estado: EstadoBloco = "sem_fonte"
+    nao_lidas: list[NaoLidas] = []
+
+
+class CxShopeeResponse(BaseModel):
+    gerado_em: datetime
+    janela: Janela
+    chat: ChatShopee
+    atendimento: CanalAtendimento
+    devolucoes: DevolucoesShopee
+
+
+# ---------------------------------------------------------------------------
+# CX-PEDIDOS-MOTIVO (05/11/2026): os pedidos de um motivo do Pareto
+# ---------------------------------------------------------------------------
+class PedidoMotivo(BaseModel):
+    marca: str
+    #: Numero do pedido na Shopee. None quando a Torre retem o numero
+    #: (`expedicao_numero_pedido_publico` desligada).
+    pedido: Optional[str] = None
+    #: Numero da solicitacao de devolucao (so' devolucao).
+    devolucao: Optional[str] = None
+    dia: Optional[date] = None
+    situacao: Optional[str] = None
+    #: Valor reembolsado (so' devolucao reembolsada).
+    valor: Optional[float] = None
+
+
+class PedidosMotivoResponse(BaseModel):
+    gerado_em: datetime
+    janela: Janela
+    tipo: Literal["cancelamento", "devolucao"]
+    codigo: str
+    rotulo: Optional[str] = None
+    estado: Literal["dado", "vazio_legitimo", "erro"]
+    motivo_indisponivel: Optional[str] = None
+    #: Total exato do motivo (o numero da barra do Pareto).
+    total: Optional[int] = None
+    #: True = a lista mostra so' os mais recentes (teto de 500).
+    truncado: bool = False
+    #: True = uma das fontes (Data Mart ou Neon) falhou; a lista esta' incompleta.
+    parcial: bool = False
+    numero_publico: bool = True
+    pedidos: list[PedidoMotivo] = []

@@ -16,7 +16,7 @@ O corte comum resolve as duas coisas. Ele é a **menor hora fechada** entre os c
 
 | Peça | O que faz |
 |---|---|
-| `marts.fact_marketplace_hourly_sales` (migration 036) | Dia BRT × hora BRT × canal × loja, com GMV e pedidos. Só horas fechadas. |
+| `marts.fact_marketplace_hourly_sales` (migration 039) | Dia BRT × hora BRT × canal × loja, com GMV e pedidos. Só horas fechadas. |
 | `marts.fact_marketplace_hourly_sales_fonte` | Uma linha por canal: até quando a fonte comprovadamente tem dado. |
 | `pipelines.sync_vendas_por_hora` | Lê o Data Mart pedido a pedido e regrava os últimos 8 dias. |
 | DAG `marketplace_tower_dia_corrente` (Airflow) | Chama o módulo de hora em hora, no minuto 40. |
@@ -37,7 +37,7 @@ Conferido em 03/11/2026, de 26/10 a 02/11: a soma por dia bate com a fato public
 1. **Mesclar este PR** no `mktplace`.
 2. **Airflow** (`goca-se/airflow`): fazer um PR que sobe o pin `MKTPLACE_PIPELINES_SHA` para o merge e acrescenta o passo `dia_vendas_hora` à DAG do dia corrente. Primeiro para a develop, depois o `-para-main`.
 3. **Esperar a imagem nova no ar.** O commit "update image" precisa aparecer no `goca-se/managed-apps`.
-4. **Só então aplicar a migration no Neon:** `alembic upgrade 036`. O PMA recusa rodar quando a cabeça do Neon não existe no grafo do pin, por isso a imagem vem antes. Até a migration, o passo novo falha e o bloco diz "indisponível". O resto da Gerencial não é afetado.
+4. **Só então aplicar a migration no Neon:** `alembic upgrade 039`. O PMA recusa rodar quando a cabeça do Neon não existe no grafo do pin, por isso a imagem vem antes. Até a migration, o passo novo falha e o bloco diz "indisponível". O resto da Gerencial não é afetado.
 5. **Dar acesso ao perfil de escrita da Torre:**
 
    ```sql

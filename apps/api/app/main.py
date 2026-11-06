@@ -3,7 +3,21 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import readiness
-from app.routers import account_performance, b2b_revenda, dre, expedicao, metas, performance, regioes
+from app.gate_sessao import GateDeSessao
+from app.routers import (
+    account_performance,
+    alertas,
+    b2b_revenda,
+    cx_atendimento,
+    dre,
+    expedicao,
+    metas,
+    ml_ldr,
+    performance,
+    performance_oficial,
+    regioes,
+    tiktok_abertos,
+)
 
 app = FastAPI(
     title="Torre de Controle de Marketplaces — GoBeauté",
@@ -12,23 +26,36 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+# Gate de sessao ANTES do CORS: add_middleware insere por fora, entao o CORS
+# fica como camada mais externa e responde preflight/401 com cabecalhos CORS.
+app.add_middleware(GateDeSessao)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Torre-Auth"],
 )
 
 app.include_router(performance.router)
 app.include_router(regioes.router)
 app.include_router(expedicao.router)
+app.include_router(tiktok_abertos.router)
+# CX-MKT-2: secao Performance da Expedicao, inerte ate' `expedicao_performance_api_enabled`.
+app.include_router(performance_oficial.router)
+# CX-MKT-3: LDR do ML para a faixa do topo (mesma flag da Performance).
+app.include_router(ml_ldr.router)
+app.include_router(ml_ldr.router_shopee)
 app.include_router(dre.router)
 app.include_router(b2b_revenda.router)
 # T-0014: registrada, mas inerte -- responde 404 enquanto
 # `performance_contas_api_enabled` estiver desligada (padrao).
 app.include_router(account_performance.router)
+# Aba CX (menu principal): `/api/v1/cx/*`, flag `cx_api_enabled` (ligada).
+app.include_router(cx_atendimento.router)
 app.include_router(metas.router)
+app.include_router(alertas.router)
 
 
 @app.api_route("/health", methods=["GET", "HEAD"])

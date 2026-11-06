@@ -50,6 +50,7 @@ from app.schemas.expedicao import (
     DeadlineStatus,
 )
 from app.services import expedicao_shopee_ldr_service as shopee_ldr_svc
+from app.services import expedicao_atraso_7d_export as atraso_7d_export
 from app.services import expedicao_tiktok_service as tiktok_svc
 
 CHECK_FRESHNESS = "expedicao_source_freshness"
@@ -496,7 +497,8 @@ def _abrir_snapshot(db) -> None:
 #: oficial da Shopee). Lidas por `to_jsonb(r) ->> ...`: o MESMO SELECT roda
 #: antes e depois da migration que as cria (coluna ausente = NULL = "nao
 #: calculado"), sem sonda e sem ordem de deploy.
-_ATRASO_7D_INTEIROS = ("due_7d_count", "late_7d_count")
+_ATRASO_7D_INTEIROS = ("due_7d_count", "late_7d_count",
+                       "over_48h_7d_count", "stalled_7d_count")
 _ATRASO_7D_DATAS = ("late_7d_window_start", "late_7d_window_end")
 COLUNAS_ATRASO_7D = ", ".join(
     f"to_jsonb(r) ->> '{c}' AS {c}" for c in _ATRASO_7D_INTEIROS + _ATRASO_7D_DATAS)
@@ -520,15 +522,54 @@ def _somar_atraso_7d(resumos: list[dict]) -> dict:
            and r.get("late_7d_count") is not None]
     if not com:
         return {"due_7d_count": None, "late_7d_count": None,
+                "over_48h_7d_count": None, "stalled_7d_count": None,
                 "late_7d_window_start": None, "late_7d_window_end": None}
+
+    def _soma(c: str):
+        vals = [r[c] for r in com if r.get(c) is not None]
+        return sum(vals) if vals else None
+
     inicios = [r["late_7d_window_start"] for r in com if r.get("late_7d_window_start")]
     fins = [r["late_7d_window_end"] for r in com if r.get("late_7d_window_end")]
     return {
         "due_7d_count": sum(r["due_7d_count"] for r in com),
         "late_7d_count": sum(r["late_7d_count"] for r in com),
+        "over_48h_7d_count": _soma("over_48h_7d_count"),
+        "stalled_7d_count": _soma("stalled_7d_count"),
         "late_7d_window_start": min(inicios) if inicios else None,
         "late_7d_window_end": max(fins) if fins else None,
     }
+
+
+#: EXPEDICAO-ABA-7D — total de pedidos dos ultimos 7 dias, o MESMO numero do
+#: Gerencial (`performance_service`: soma de `orders` da fato diaria), por
+#: marca no marketplace do canal. Janela = a do atraso: `[hoje-7, hoje-1]`
+#: (dias de Brasilia da fotografia).
+PEDIDOS_7D_SQL = """
+    SELECT l.brand_key AS brand, COALESCE(SUM(f.orders), 0) AS pedidos,
+           count(DISTINCT f.date) AS dias
+    FROM marts.fact_marketplace_daily_performance f
+    JOIN marts.dim_loja l ON l.loja_id = f.loja_id
+    WHERE f.date BETWEEN :desde AND :ate AND f.marketplace_id = :mkt
+    GROUP BY l.brand_key
+"""
+
+
+def janela_7d(effective_at: datetime) -> tuple[date, date]:
+    hoje = _dia_brt(effective_at)
+    return hoje - timedelta(days=7), hoje - timedelta(days=1)
+
+
+def _pedidos_7d(db, canal: Canal, effective_at: datetime) -> dict[str, int]:
+    """`marca -> pedidos` da janela, do Gerencial. Falha vira {} (sem total)."""
+    desde, ate = janela_7d(effective_at)
+    try:
+        linhas = _linhas(db, PEDIDOS_7D_SQL, {"desde": desde, "ate": ate,
+                                              "mkt": canal.marketplace_id})
+        return {str(r["brand"]).lower(): int(r["pedidos"]) for r in linhas
+                if r.get("brand") is not None and r.get("pedidos") is not None}
+    except Exception:  # noqa: BLE001 — total auxiliar; a fila continua
+        return {}
 
 
 def _carregar_snapshot(db, canal: Canal) -> tuple[Optional[dict], Optional[str]]:
@@ -610,8 +651,8 @@ def _fotografia_export(db, canal: Canal, contas_da_fonte: set[str]) -> list[dict
     if not contas:
         return []
     resumos = _linhas(db, f"""
-        SELECT DISTINCT ON (shop_account) {_RESUMO_EXPORT_COLUNAS}
-        FROM {RUN_EXPORT} WHERE channel = :canal AND shop_account = ANY(:contas)
+        SELECT DISTINCT ON (shop_account) {_RESUMO_EXPORT_COLUNAS}, {COLUNAS_ATRASO_7D}
+        FROM {RUN_EXPORT} r WHERE channel = :canal AND shop_account = ANY(:contas)
         ORDER BY shop_account, observed_at DESC
     """, {"canal": canal.slug, "contas": contas})
     cabecalhos = {str(c["shop_account"]): c for c in _linhas(db, f"""
@@ -647,6 +688,26 @@ def _juntar_export(db, canal: Canal, snap: dict) -> None:
     PROPRIA (`observed_at`) e os lotes delas em `lotes_export`.
     """
     extra = _fotografia_export(db, canal, {str(r["shop_account"]) for r in snap["resumos"]})
+    extra = [_normalizar_atraso_7d(dict(r)) for r in extra]
+    for r in extra:
+        r["origem"] = "export"
+    # EXPEDICAO-ATRASO-7D: o bot da Kokeshi grava direto no Neon e nao calcula
+    # o atraso de 7 dias; a API calcula do historico do export, com a regra da
+    # Shopee (`expedicao_atraso_7d_export`). Falha vira "sem %", nunca 500.
+    # Completa SO' o que veio vazio: o bot pode rodar uma versao do codigo que
+    # grava parte das colunas (03/11/2026: gravava o atraso e nao +48 h nem
+    # travados). O que o resumo trouxe preenchido prevalece.
+    for r in extra:
+        if any(r.get(c) is None for c in _ATRASO_7D_INTEIROS):
+            try:
+                calculado = atraso_7d_export.calcular(
+                    db, str(r["shop_account"]), r.get("source_watermark_at"),
+                    snap["effective_at"])
+            except Exception:  # noqa: BLE001 — metrica auxiliar
+                calculado = None
+            for chave, valor in (calculado or {}).items():
+                if r.get(chave) is None:
+                    r[chave] = valor
     snap["lotes_export"] = tuple(str(r["refresh_batch_id"]) for r in extra)
     snap["cobertas"] = frozenset(str(r["brand"]) for r in extra)
     # Frescor da conta do export: idade do watermark contra o instante mais
@@ -1007,7 +1068,24 @@ def get_expedicao(
     # contas com o calculo publicado.
     atraso_7d = _somar_atraso_7d(resumos)
     totais.update(due_7d_count=atraso_7d["due_7d_count"],
-                  late_7d_count=atraso_7d["late_7d_count"])
+                  late_7d_count=atraso_7d["late_7d_count"],
+                  over_48h_7d_count=atraso_7d["over_48h_7d_count"],
+                  stalled_7d_count=atraso_7d["stalled_7d_count"])
+    # EXPEDICAO-ABA-7D: pedidos feitos nos 7 dias (o numero do Gerencial). Por
+    # conta so' quando a marca tem UMA conta no lote: o Gerencial e' por marca.
+    pedidos_7d = _pedidos_7d(db, canal, effective_at)
+    contas_por_marca: dict[str, int] = {}
+    for r in resumos:
+        m = str(r["brand"]).lower()
+        contas_por_marca[m] = contas_por_marca.get(m, 0) + 1
+    marcas_com_total = [m for m in contas_por_marca if m in pedidos_7d]
+    totais["orders_7d_count"] = (sum(pedidos_7d[m] for m in marcas_com_total)
+                                 if marcas_com_total else None)
+
+    def _pedidos_da_conta(r) -> Optional[int]:
+        m = str(r["brand"]).lower()
+        return pedidos_7d.get(m) if contas_por_marca.get(m) == 1 else None
+    janela_pedidos = janela_7d(effective_at)
 
     # Perto de vencer (hoje + proximo dia de prazo): contado AQUI sobre o mesmo
     # lote (nao e' materializado). Canal sem prazo: nulo por ausencia, nunca zero.
@@ -1066,6 +1144,8 @@ def get_expedicao(
             "deadline_published": tem_prazo,
             "late_7d_window_start": atraso_7d["late_7d_window_start"],
             "late_7d_window_end": atraso_7d["late_7d_window_end"],
+            "orders_7d_window_start": janela_pedidos[0],
+            "orders_7d_window_end": janela_pedidos[1],
         },
         "totals": totais,
         "accounts": [
@@ -1073,6 +1153,12 @@ def get_expedicao(
              **_perto_da_conta(str(r["shop_account"])),
              "due_7d_count": r.get("due_7d_count"),
              "late_7d_count": r.get("late_7d_count"),
+             "over_48h_7d_count": r.get("over_48h_7d_count"),
+             "stalled_7d_count": r.get("stalled_7d_count"),
+             "orders_7d_count": _pedidos_da_conta(r),
+             # Conta carregada pelo export do Seller Centre (bot, a cada 2 h)
+             # ou pela publicacao agendada (a cada hora).
+             "origem": r.get("origem", "agendada"),
              "shop_account": r["shop_account"], "brand": r["brand"],
              "run_status": r["run_status"],
              "source_watermark_at": r["source_watermark_at"],

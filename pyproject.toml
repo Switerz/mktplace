@@ -21,8 +21,9 @@
 # O QUE ENTRA NA DISTRIBUICAO
 # ---------------------------
 # Somente modulos Python sob `pipelines/`, e dentro dela apenas `expedicao` —
-# 22 modulos, nao a arvore inteira (ver a nota em `packages.find`). Nao ha
-# `package-data`, entao nenhum arquivo que nao seja `.py` e' embarcado: nem
+# 22 modulos, nao a arvore inteira (ver a nota em `packages.find`). O unico
+# `package-data` e' um CSV nominal (T-0063, no fim do arquivo); fora ele,
+# nenhum arquivo que nao seja `.py` e' embarcado: nem
 # `.env`, nem fixture, nem CSV, nem nada de `apps/`, `frontend/`, `docs/` ou
 # `logs/`. `pipelines.tests` fica de fora — codigo de teste nao pertence ao
 # artefato de runtime.
@@ -150,3 +151,10 @@ include = [
     "pipelines.quality", "pipelines.reconciliation", "pipelines.transforms",
 ]
 exclude = ["pipelines.tests", "pipelines.tests.*"]
+
+# T-0063: UNICO arquivo nao-`.py` da wheel. O de-para versionado dos
+# componentes de kit da Avoe e' lido por `pipelines.avoe_kits_source` ao lado
+# do modulo, e a DAG `marketplace_tower_kit_reference_publish` roda da wheel.
+# Lista nominal, nao glob: CSV novo em `pipelines/` nao entra por inercia.
+[tool.setuptools.package-data]
+pipelines = ["avoe_de_para_componentes.csv"]

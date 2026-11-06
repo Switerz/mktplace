@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { DM_Sans, Inter } from "next/font/google";
 import "./globals.css";
+import LoginGate from "@/components/auth/LoginGate";
 import AppShell from "@/components/shell/AppShell";
 import ThemeProvider from "@/components/theme/ThemeProvider";
 import { scriptDeTema } from "@/lib/theme";
@@ -40,7 +41,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body className="min-h-screen bg-canvas text-ink antialiased">
         <ThemeProvider>
-          <AppShell>{children}</AppShell>
+          <LoginGate>
+            <AppShell>{children}</AppShell>
+          </LoginGate>
         </ThemeProvider>
       </body>
     </html>

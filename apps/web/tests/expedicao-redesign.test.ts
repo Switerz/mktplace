@@ -876,3 +876,74 @@ test("demo jornadaCoorteAusente: a pagina fica ok e a fila Shopee continua com a
   assert.match(html, /Indisponível agora: a tabela ainda não foi publicada nesta base\./);
   assert.doesNotMatch(html, /Jornada indisponível/);
 });
+
+// ===========================================================================
+// T-0029 — fixtures da fila por etapa alinhadas ao payload REAL da API
+// ===========================================================================
+type FilaFixture = {
+  status: string;
+  reason: string | null;
+  fila_aberta: { base: number; etapas: { key: string; count: number }[]; limitacoes: string[] };
+};
+const filaDaFixture = (canal: "shopee" | "mercadolivre", c: Parameters<typeof respostaFicticia>[1]) => {
+  const corpo = respostaFicticia(`/api/v1/expedicao/jornada?channel=${canal}`, c)!.corpo;
+  const p = lerJornada(corpo, canal);
+  assert.ok(p.ok, `${c}/${canal}: ${p.ok ? "" : p.erro}`);
+  return corpo as FilaFixture;
+};
+const SEM_ETAPA_REAL = new Set(["aguardando_expedicao", "nao_publicada"]);
+const SERVICO = readFileSync(join(RAIZ, "../api/app/services/expedicao_service.py"), "utf8");
+
+test("T-0029 fixtures: Shopee de jornadaEtapas/jornadaEtapaParcial com etapa REAL", () => {
+  const etapas = filaDaFixture("shopee", "jornadaEtapas");
+  assert.deepEqual(etapas.fila_aberta.etapas.map((e) => e.key), ["a_preparar", "aguardando_coleta"]);
+  assert.equal(etapas.status, "ok");
+  assert.deepEqual(etapas.fila_aberta.limitacoes, ["FBS não separado na fila aberta"], "a limitacao de etapa sai");
+
+  const parcial = filaDaFixture("shopee", "jornadaEtapaParcial");
+  assert.deepEqual(parcial.fila_aberta.etapas.map((e) => e.key), ["a_preparar", "aguardando_coleta", "nao_publicada"]);
+  assert.ok(parcial.fila_aberta.etapas.every((e) => e.count > 0));
+  assert.equal(parcial.status, "partial");
+  assert.equal(parcial.reason, "fila_aberta: etapa_parcial");
+  assert.equal(parcial.fila_aberta.limitacoes.length, 2, "no parcial a limitacao de etapa fica");
+});
+
+test("T-0029 fixtures: ML por etapa traz as limitacoes que a API manda, com o texto EXATO", () => {
+  const etapas = filaDaFixture("mercadolivre", "jornadaEtapas");
+  assert.deepEqual(etapas.fila_aberta.limitacoes, [
+    "Full (fulfillment) fora da fila por contrato",
+    "envios 'entregue à transportadora' ainda contam no backlog: o Mercado Livre mantém o status ready_to_ship",
+  ]);
+  const parcial = filaDaFixture("mercadolivre", "jornadaEtapaParcial");
+  assert.equal(parcial.fila_aberta.limitacoes[0], "substatus do shipment não publicado na fila");
+  // EXPEDICAO-ML-COLETADOS (main): a do "entregue" so' vem quando a fotografia
+  // ainda tem essa etapa; o parcial e a etapa unica nao tem.
+  assert.equal(parcial.fila_aberta.limitacoes.length, 2);
+  assert.ok(!parcial.fila_aberta.limitacoes.some((l) => l.includes("entregue")));
+  const unica = filaDaFixture("mercadolivre", "jornadaEtapaUnica");
+  assert.deepEqual(unica.fila_aberta.limitacoes, ["Full (fulfillment) fora da fila por contrato"]);
+  const semEtapa = filaDaFixture("mercadolivre", "ok");
+  assert.deepEqual(semEtapa.fila_aberta.etapas.map((e) => e.key), ["aguardando_expedicao"]);
+  assert.ok(!semEtapa.fila_aberta.limitacoes.some((l) => l.includes("entregue")), "sem etapa real, sem a do entregue");
+  // o texto e' o do servico (a API e' a fonte; a fixture nao inventa)
+  for (const fx of [etapas, parcial, semEtapa, filaDaFixture("shopee", "jornadaEtapaParcial")]) {
+    for (const l of fx.fila_aberta.limitacoes) {
+      const noServico = SERVICO.includes(l) || SERVICO.replace(/"\s*\n\s*"/g, "").includes(l);
+      assert.ok(noServico, l);
+    }
+  }
+});
+
+test("T-0029 fixtures: jornadaEtapaUnica (Shopee e ML) = UMA etapa real igual a' base", () => {
+  assert.ok(CENARIOS_DEMO.includes("jornadaEtapaUnica"));
+  assert.equal(lerCenario("jornadaEtapaUnica"), "jornadaEtapaUnica");
+  assert.equal(respostaFicticia("/api/v1/expedicao?channel=shopee", "jornadaEtapaUnica")!.status, 200, "pagina em ok");
+  for (const canal of ["shopee", "mercadolivre"] as const) {
+    const f = filaDaFixture(canal, "jornadaEtapaUnica");
+    assert.equal(f.fila_aberta.etapas.length, 1, canal);
+    assert.ok(!SEM_ETAPA_REAL.has(f.fila_aberta.etapas[0].key), canal);
+    assert.equal(f.fila_aberta.etapas[0].count, f.fila_aberta.base, canal);
+    assert.ok(f.fila_aberta.base > 0, canal);
+    assert.equal(f.status, "ok", canal);
+  }
+});

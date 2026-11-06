@@ -20,6 +20,18 @@ INDISPONIVEL NAO E' ZERO
   - quantidade `None`             -> inventario SEM_LEITURA, ou marca sem
                                      inventario Full lido: "nao sabemos"
   - quantidade `0`                -> medimos e deu zero
+
+ESTADO DA MARCA (T-0051)
+------------------------
+  - `estado = None`               -> marca sem fotografia no dia (ausencia;
+                                     esta' em `cobertura.marcas_sem_fotografia`
+                                     e o total e' PARCIAL)
+  - `estado = "com_inventario"`   -> ha' inventario na fotografia. Disponivel
+                                     0 aqui e' "saldo disponivel 0"
+  - `estado = "sem_estoque_full"` -> a fotografia foi publicada com 0
+                                     inventarios: enumeracao completa e zero.
+                                     Quantidades 0, conta como coberta e NAO
+                                     torna o total parcial
 """
 from __future__ import annotations
 
@@ -35,6 +47,9 @@ MotivoIndisponivel = Literal[
     "sem_fotografia_publicada",
     "sem_fotografia_na_data",
 ]
+
+#: Dominio FECHADO. Ausencia NAO e' um valor daqui: e' `None`.
+EstadoMarca = Literal["com_inventario", "sem_estoque_full"]
 
 
 class InventarioEstoque(BaseModel):
@@ -73,6 +88,18 @@ class InventarioEstoque(BaseModel):
     vinculo_vendas: str
     ref_date: date
 
+    #: IDENTIFICACAO do anuncio-ancora (T-0018). Atributo da linha: nunca
+    #: multiplica nem soma estoque. `None` = sem ancora, sem match na 014 ou
+    #: 038 nao aplicada -- "sem identificacao", nunca string vazia.
+    sku: Optional[str] = None
+    titulo: Optional[str] = None
+    #: Anuncios distintos do inventario alem do ancora. `None` = linha
+    #: publicada antes da 038 (ou 038 nao aplicada).
+    anuncios_extras: Optional[int] = Field(default=None, ge=0)
+    #: TRUE = o ancora e' uma variacao e o SKU/titulo vem do ITEM (a 014 nao
+    #: tem variacao): ambiguo. `None` = sem ancora.
+    ancora_e_variacao: Optional[bool] = None
+
 
 class StatusNaoDisponivel(BaseModel):
     """Detalhe do nao disponivel por status cru do ML, somado POR INVENTARIO
@@ -96,6 +123,8 @@ class MarcaEstoque(BaseModel):
 
     brand: str
     tem_fotografia_no_dia: bool
+    #: `None` = sem fotografia no dia (ausencia). Ver o docstring do modulo.
+    estado: Optional[EstadoMarca] = None
     #: Ultima fotografia da marca ate' a data exibida (pode ser anterior).
     ultima_fotografia: Optional[date] = None
     published_at: Optional[datetime] = None
@@ -104,7 +133,8 @@ class MarcaEstoque(BaseModel):
     inventarios_full_lidos: Optional[int] = None
     inventarios_compartilhados: Optional[int] = None
     leitura: Optional[Leitura] = None
-    #: `None` quando nenhum inventario Full foi lido (CHECK da 029).
+    #: `None` quando ha' inventario mas nenhum Full foi lido (CHECK da 029).
+    #: `0` em `sem_estoque_full`: nao ha' inventario nenhum.
     disponivel_full: Optional[int] = None
     nao_disponivel_full: Optional[int] = None
     transfer_full: Optional[int] = None
@@ -125,7 +155,8 @@ class Indicadores(BaseModel):
     """Escopo inteiro (marcas filtradas, data exibida). Nao segue o limite da
     listagem."""
 
-    #: Soma das marcas COM disponivel medido. `None` se nenhuma tem.
+    #: Soma das marcas COM disponivel medido (`sem_estoque_full` conta 0).
+    #: `None` se nenhuma tem.
     disponivel_full: Optional[int] = None
     nao_disponivel_full: Optional[int] = None
     transfer_full: Optional[int] = None

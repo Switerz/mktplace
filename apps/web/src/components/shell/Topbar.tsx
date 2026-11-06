@@ -4,7 +4,9 @@ import { usePathname } from "next/navigation";
 import type { RefObject } from "react";
 import { Menu } from "lucide-react";
 import ThemeToggle from "@/components/theme/ThemeToggle";
+import ContaUsuario from "@/components/auth/ContaUsuario";
 import { getRouteTitle } from "./nav-config";
+import MarcaTorre from "./MarcaTorre";
 
 interface TopbarProps {
   open: boolean;
@@ -33,7 +35,7 @@ export default function Topbar({ open, onToggleMenu, menuButtonRef }: TopbarProp
   const routeTitle = getRouteTitle(pathname);
 
   return (
-    <header className="border-b border-shell-line bg-shell md:hidden">
+    <header className="tc-shell-fundo border-b border-shell-line bg-shell md:hidden">
       <div className="flex items-center gap-2.5 px-2 py-1">
         <button
           ref={menuButtonRef}
@@ -47,9 +49,7 @@ export default function Topbar({ open, onToggleMenu, menuButtonRef }: TopbarProp
           <Menu aria-hidden="true" className="h-5 w-5" strokeWidth={1.75} />
         </button>
 
-        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent">
-          <span className="text-xs font-bold tracking-tight text-accent-on">TC</span>
-        </div>
+        <MarcaTorre tamanho={28} className="h-7 w-7 rounded-md" />
 
         <div className="flex min-w-0 items-baseline gap-2">
           <h1 className="truncate text-sm font-semibold leading-none text-shell-ink">
@@ -61,8 +61,9 @@ export default function Topbar({ open, onToggleMenu, menuButtonRef }: TopbarProp
           <p className="truncate text-xs text-shell-muted">{routeTitle}</p>
         </div>
 
-        <div className="ml-auto flex shrink-0 items-center">
+        <div className="ml-auto flex shrink-0 items-center gap-1">
           <ThemeToggle variante="shell" ciclico />
+          <ContaUsuario compacto />
         </div>
       </div>
     </header>

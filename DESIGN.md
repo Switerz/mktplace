@@ -8,7 +8,7 @@ colors:
   shell-ink: "#f0eefc"
   shell-muted: "#aaa6ce"
   shell-accent: "#a78bfa"
-  canvas: "#f7f6fb"
+  canvas: "#f1edfc"
   surface: "#ffffff"
   raised: "#f4f2fb"
   line: "#e7e3f5"
@@ -74,7 +74,7 @@ typography:
     letterSpacing: "-0.02em"
 rounded:
   control: "8px"
-  panel: "12px"
+  panel: "16px"
   full: "9999px"
 spacing:
   xs: "6px"
@@ -87,11 +87,11 @@ components:
     textColor: "{colors.shell-muted}"
     width: "240px expanded / 64px rail"
   nav-item-active:
-    backgroundColor: "#2c2260"
+    backgroundColor: "linear-gradient(90deg, #8b5cf6, #a78bfa)"
     textColor: "{colors.shell-ink}"
     indicator: "{colors.shell-accent}"
   panel:
-    backgroundColor: "{colors.surface}"
+    backgroundColor: "rgb(255 255 255 / .74) + blur 18px"
     rounded: "{rounded.panel}"
     border: "{colors.line}"
   kpi-card:
@@ -111,6 +111,14 @@ components:
 > **navy operational shell** around a light data canvas. That decision replaces
 > the old rule "never a dark sidebar". The benchmark audit lives in
 > `docs/ux_torre_b2b_benchmark.md`.
+>
+> Revised again in **UX-VIDRO-1** (03/11/2026). Gabriel approved the "violet
+> glass" direction from an interactive proposal: three light halos on the
+> canvas, frosted-glass cards (16px radius), a navy shell with a violet glow,
+> a gradient pill for the active nav item, a gradient brand mark and a
+> violet-to-magenta page title, in both themes. Gradient and glow are allowed
+> **only** on what is selected or identifies the screen (active nav, brand
+> mark, page title, hover shadow). Data never gets a gradient. See §4.
 
 ## 1. Overview
 
@@ -165,7 +173,7 @@ never the signal.
 
 ### Canvas and surfaces
 
-The light canvas is lavender-white (`#f7f6fb`). Panels are white with a 1px
+The light canvas is lavender (`#f1edfc`, under three light halos). Panels are white glass with a 1px
 `line` border. `raised` is the inset tone used for table heads, totals and
 skeletons. The dark theme keeps its deep violet field. See §7 for every value.
 
@@ -228,16 +236,34 @@ nav group labels and badges. Panel titles are mixed-case title weight.
 **Tabular numerals** are on for every table and every KPI value
 (`tabular-nums`, or the global `table, .tabular` rule).
 
-## 4. Elevation
+## 4. Elevation and glass (UX-VIDRO-1)
 
-The system is tonal first. Depth comes from canvas → surface → raised, then the
-1px border. Shadow appears only:
+Three layers, defined once in `app/globals.css` (block "UX-VIDRO-1"):
 
-- on hover of an interactive card or row: a soft offset with a violet cast,
-  `0 4px 14px -4px rgb(accent / .18)`;
-- on floating layers (popovers and dialogs): `0 8px 24px -6px rgb(ink / .18)`.
+1. **Background** (`.tc-fundo`, on the app shell root, and `.tc-tema-claro`):
+   the canvas plus three radial halos (`--tc-brilho-1..3`), fixed to the
+   viewport. Lavender in light, deep violet in dark.
+2. **Glass cards**: every `.rounded-xl.border.bg-surface` (Panel, StatCard,
+   KpiTile, the Gerencial cards) becomes `rgb(--tc-vidro / .74)` (`.62` in
+   dark) with an 18px backdrop blur, a 16px radius, a 1px inner highlight and
+   a soft violet drop. Only a NEUTRAL border becomes the glass border
+   (`--tc-vidro-borda`); KPI identity and status borders stay. Floating menus
+   and dialogs stay almost opaque (`surface / .96`) because they are read over
+   content. Without `backdrop-filter` support the card falls back to opaque.
+3. **Frame**: `.tc-shell-fundo` gives the navy shell a top-to-bottom step and a
+   violet halo at the brand corner; `.tc-marca` is the brand mark, the lighthouse tower of `app/icon.png` (`MarcaTorre`), with the violet glow;
+   `.tc-nav-ativo` is the active nav pill (gradient + glow, white ink), and the
+   3px left bar stays.
 
-Static panels never cast a shadow.
+Sticky bars (`PageBar`, the PageHeader filter bar) use `.tc-barra-vidro`, a thin
+glass that lets the halo through. Page titles get the violet-to-magenta
+gradient through `.tc-titulo-pagina h2` (solid fallback and `forced-colors`
+fallback included). Segmented controls are pills (`rounded-full`).
+
+Shadow appears on hover of an interactive card (`.card-hover`: violet glow on a
+black base, never the ink colour) and on floating layers. The rules live
+outside `@layer` on purpose: they must beat the utilities the components
+already declare, without rewriting fifty files.
 
 ## 5. Components
 
@@ -298,15 +324,27 @@ each channel shows only what its source sustains.
    "Vence amanhã", or "Vence ter 03/11" on a Friday —, acima de 48 h,
    travados, marcas em alerta). ML: the Shopee tiles when the photo carries
    the ML dispatch SLA (`snapshot.deadline_published`), labelled "prazo
-   Mercado Livre"; without it, four — no deadline tiles at all. TikTok:
-   pendentes vencidos, vencem hoje/amanhã, pendentes no prazo, lojas acima da
-   meta. Every tile with a count carries its ⓘ next to the label (never in the
+   Mercado Livre"; without it, four — no deadline tiles at all. TikTok
+   (EXPEDICAO-TIKTOK-PADRAO, 05/11/2026): the same hero layout as Shopee,
+   from the live open orders — Vencidos in the hero ("de N em fila", the
+   stage split and "Onde agir"), then Vence hoje, Vence no próximo dia útil
+   and Acima de 48 h. Every tile with a count carries its ⓘ next to the label (never in the
    footer), its share of the queue ("0,7% da fila") and "ver quais", which
    opens the same order list (number, stage, CSV) filtered by that tile.
 3. **Prazo** — Shopee: backlog partitioned by deadline status (ship_by_date),
    plus the sentence that LDR is not computed yet. ML with SLA: the same
    partition; without it, "indisponível" and queue ageing. TikTok: LDR, with collection and dispatch as
-   separate events.
+   separate events, plus the window's pending counts (vencem hoje/amanhã,
+   pendentes no prazo, lojas acima da meta) — they measure the LDR window,
+   not the live queue, so they never sit next to the Risco atual tiles.
+   The reconstructed-deadline caveat is a short chip ("Prazo reconstruído ·
+   medição interna") with the full text in its ⓘ, not a banner.
+
+TikTok controls share the single controls row: Profundidade · Marca · Evento
+(short labels "Coleta" / "Despacho") · Período. Jornada is the compact one, as
+on the queue. "Backlog por marca" (open orders by brand, with "Não coletados
+no prazo" in its footer) sits where the queue's table sits; the evolution
+chart and the LDR by shop share the next row.
 4. **Evolução** — queue: a compact table, one row per account titled by
    brand (Backlog atual · Variação · Acima de 48 h · Travados · Tendência).
    Sparklines in neutral ink, no written scale; a constant series reads
@@ -405,10 +443,10 @@ role's value is defined once per theme in `apps/web/app/globals.css`.
 
 | Role | Token | Light | Dark |
 |---|---|---|---|
-| Page field | `--tc-canvas` | `#f7f6fb` | `#0e0b18` |
-| Card | `--tc-surface` | `#ffffff` | `#171327` |
-| Elevated / inset | `--tc-raised` | `#f4f2fb` | `#1f1a33` |
-| Border | `--tc-line` / `--tc-line-strong` | `#e7e3f5` / `#d6d0ec` | `#2c2544` / `#3d3459` |
+| Page field | `--tc-canvas` | `#f1edfc` | `#0d0822` |
+| Card | `--tc-surface` | `#ffffff` | `#1e1540` |
+| Elevated / inset | `--tc-raised` | `#f4f2fb` | `#291e52` |
+| Border | `--tc-line` / `--tc-line-strong` | `#e7e3f5` / `#d6d0ec` | `#382c62` / `#4c3e80` |
 | Text | `--tc-ink` / `--tc-muted` / `--tc-faint` | `#171226` / `#524c67` / `#6c6582` | `#f2effa` / `#b8b0d0` / `#968db2` |
 | Accent | `--tc-accent` (+ `-soft`, `-ink`, `-on`) | `#6d28d9` | `#a78bfa` |
 | Success / Warn / Critical | `--tc-ok` / `--tc-warn` / `--tc-crit` (+ `-soft`, `-ink`) | `#059669` / `#d97706` / `#e11d48` | `#34d399` / `#fbbf24` / `#fb7185` |

@@ -54,12 +54,15 @@ export const TEXTO_ESTADO = {
 
 export default function LayoutExpedicao({
   cabecalho,
+  destaque,
   avisos,
   qualidade,
   estado,
   children,
 }: {
   cabecalho: ReactNode;
+  /** CX-MKT-3: faixa de LDR logo abaixo do cabecalho, igual nos tres canais. */
+  destaque?: ReactNode;
   avisos?: ReactNode;
   qualidade?: ReactNode;
   estado?: ReactNode;
@@ -68,6 +71,7 @@ export default function LayoutExpedicao({
   return (
     <>
       {cabecalho}
+      {destaque}
       {avisos}
       {qualidade}
       {estado}
@@ -82,6 +86,7 @@ export default function LayoutExpedicao({
  */
 export function CorpoGestor({
   risco,
+  ldr,
   prazo,
   jornada,
   evolucao,
@@ -89,6 +94,8 @@ export function CorpoGestor({
   convite,
 }: {
   risco: ReactNode;
+  /** CX-MKT-3: LDR de 7 dias por marca, logo abaixo de "Risco atual". */
+  ldr?: ReactNode;
   prazo: ReactNode;
   jornada?: ReactNode;
   evolucao: ReactNode;
@@ -99,6 +106,7 @@ export function CorpoGestor({
   return (
     <>
       {risco}
+      {ldr}
       {prazo}
       {jornada}
       {evolucao}

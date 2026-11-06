@@ -772,8 +772,9 @@ test("jornada ML: fila aberta com etapas e coorte indisponivel com a limitacao",
   assert.match(html, /Pedidos aguardando expedição/);
   assert.match(html, /Aguardando expedição/);
   assert.match(html, /100,0%/);
-  assert.match(html, /Vencidos: indisponível — o Mercado Livre não publica prazo de despacho/);
-  assert.match(html, /Pedidos dos últimos dias<\/h3>[\s\S]*Indisponível neste canal: o Mercado Livre não publica prazo de despacho/);
+  // EXPEDICAO-SEM-TEXTAO: a ressalva sai da tela e fica no hover.
+  assert.doesNotMatch(html, /data-sobreposicao|Vencidos: indisponível/);
+  assert.match(html, /Pedidos dos últimos dias<\/h3>[\s\S]*title="[^"]*o Mercado Livre não publica prazo de despacho[^"]*"[^>]*>\s*Indisponível neste canal\./);
   assert.match(html, /substatus do shipment não publicado na fila/);
 });
 
@@ -794,7 +795,7 @@ test("jornada TikTok: coorte rotulada, so' o selo 'Desatualizada' (publicacao no
   assert.match(html, />Desatualizada</);
   assert.match(html, /Parcial:/);
   assert.match(html, /1 dia\(s\) sem publicação na janela/);
-  assert.match(html, /Indisponível neste canal: o TikTok não publica fila aberta/);
+  assert.match(html, /title="[^"]*o TikTok não publica fila aberta[^"]*"[^>]*>\s*Indisponível neste canal\./);
 });
 
 // ===========================================================================
@@ -1068,4 +1069,159 @@ test("demo jornadaEtapas e jornadaEtapaParcial: fila do ML por etapa, coerente c
   const htmlParcial = render(200, parcial, "mercadolivre");
   assert.match(htmlParcial, /parte da fila ainda não tem a etapa publicada/);
   assert.match(htmlParcial, />Etapa ainda não publicada<\/span>/);
+});
+
+// ===========================================================================
+// T-0029 — modo compacto (fila Shopee/ML): a Jornada nao some calada
+// ===========================================================================
+function renderCompacto(
+  carga: { http: number | null; json?: unknown; erroDeRede?: boolean; carregando?: boolean },
+  canal: "shopee" | "mercadolivre",
+  marca: string | null = null,
+) {
+  return htmlDe(
+    hj(JornadaPedidos, {
+      carga: {
+        carregando: carga.carregando ?? false,
+        http: carga.http,
+        erroDeRede: carga.erroDeRede ?? false,
+        resultado: carga.json === undefined ? null : lerJornada(carga.json, canal),
+      },
+      aoTentarDeNovo: () => {},
+      marca,
+      compacta: true,
+    }),
+  );
+}
+
+const SEM_ETAPA = "Etapas da fila ainda não publicadas neste canal.";
+
+test("T-0029 compacta: coluna ausente -> linha 'não publicadas', SEM numero e sem 'Aguardando expedição'", () => {
+  // ML (coorte nula): antes a secao sumia calada.
+  const ml = renderCompacto({ http: 200, json: JORNADA_ML }, "mercadolivre");
+  assert.ok(ml.includes(SEM_ETAPA), ml);
+  assert.match(ml, /<p role="status"[^>]*data-testid="exp-jornada-fila-sem-etapa"/);
+  assert.doesNotMatch(ml, /%/, "nem barra nem percentual");
+  assert.doesNotMatch(ml, /Aguardando expedição|10 de 10|Pedidos aguardando expedição|tc-barra/);
+  assert.doesNotMatch(ml, /role="alert"/);
+  // Shopee com coorte: a linha + a coorte; a fila nao repete o "Risco atual".
+  const corpo = ficticiaT0021("/api/v1/expedicao/jornada?channel=shopee", "ok")!.corpo;
+  const sh = renderCompacto({ http: 200, json: corpo }, "shopee");
+  assert.ok(sh.includes(SEM_ETAPA), sh);
+  assert.match(sh, /Pedidos com vencimento/);
+  assert.doesNotMatch(sh, /Aguardando expedição|Pedidos aguardando expedição|agora, por etapa/);
+  assert.doesNotMatch(sh, /data-sobreposicao="vencido"/);
+});
+
+test("T-0029 compacta: UMA etapa real (= base) aparece com 100%", () => {
+  const html = renderCompacto(
+    { http: 200, json: jornadaMlComEtapas([{ key: "aguardando_coleta", label: "Aguardando coleta", count: 120 }]) },
+    "mercadolivre",
+  );
+  assert.match(html, /Pedidos aguardando expedição/);
+  assert.match(html, />Aguardando coleta<\/span>/);
+  // Formato da main (EXPEDICAO-PERTO-DE-VENCER): "120 · 100,0%", sem "de 120".
+  assert.match(html, />120<\/span> · 100,0%/);
+  assert.doesNotMatch(html, /ainda não publicadas neste canal/);
+  assert.doesNotMatch(html, /data-sobreposicao/, "compacta sem sobreposicoes");
+});
+
+test("T-0029 compacta: parcial -> motivo traduzido UMA vez, com a linha 'Etapa ainda não publicada'", () => {
+  const html = renderCompacto(
+    {
+      http: 200,
+      json: jornadaMlComEtapas(
+        [
+          { key: "a_faturar", label: "A faturar", count: 60 },
+          { key: "nao_publicada", label: "Etapa ainda não publicada", count: 60 },
+        ],
+        { status: "partial", reason: "fila_aberta: etapa_parcial" },
+      ),
+    },
+    "mercadolivre",
+  );
+  const frase = "parte da fila ainda não tem a etapa publicada";
+  assert.equal(html.split(frase).length - 1, 1, html);
+  assert.match(html, />Etapa ainda não publicada<\/span>/);
+  assert.doesNotMatch(html, /etapa_parcial|ainda não publicadas neste canal/);
+});
+
+test("T-0029 compacta: base 0 e' vazio e prevalece, sem 'não publicadas' e sem zero inventado", () => {
+  for (const canal of ["shopee", "mercadolivre"] as const) {
+    const corpo = ficticiaT0021(`/api/v1/expedicao/jornada?channel=${canal}`, "jornadaVazia")!.corpo;
+    const html = renderCompacto({ http: 200, json: corpo }, canal);
+    assert.match(html, /Nenhum pedido nesta leitura\./, canal);
+    assert.doesNotMatch(html, /ainda não publicadas/, canal);
+    assert.doesNotMatch(html, /0 de 0|0 pedidos pagos|0 envios|Aguardando expedição/, canal);
+  }
+});
+
+test("T-0029 compacta: erro 500 e payload fora do contrato -> 'Tentar novamente'", () => {
+  for (const html of [
+    renderCompacto({ http: 500 }, "shopee"),
+    renderCompacto({ http: 200, json: { channel: "shopee" } }, "shopee"),
+  ]) {
+    assert.match(html, /Não foi possível carregar a jornada\./);
+    assert.match(html, /Tentar novamente/);
+    assert.match(html, /role="alert"/);
+  }
+});
+
+test("T-0029 compacta: 404, rede e disabled -> 'Jornada indisponível.' discreto, sem alerta", () => {
+  for (const [nome, html] of [
+    ["404", renderCompacto({ http: 404 }, "mercadolivre")],
+    ["rede", renderCompacto({ http: null, erroDeRede: true }, "mercadolivre")],
+    ["disabled", renderCompacto({ http: 200, json: { channel: "shopee", status: "disabled" } }, "shopee")],
+  ] as const) {
+    assert.match(html, /Jornada indisponível\./, nome);
+    assert.doesNotMatch(html, /role="alert"|crit/, nome);
+    assert.doesNotMatch(html, /ainda não publicadas/, nome);
+  }
+});
+
+test("T-0029 compacta: carregando aparece", () => {
+  const html = renderCompacto({ http: null, carregando: true }, "shopee");
+  assert.match(html, /Carregando a jornada…/);
+  assert.match(html, /aria-busy="true"/);
+});
+
+test("T-0029 compacta: fila nula com motivo + coorte -> linha de indisponivel ao lado da coorte, nunca zero", () => {
+  const corpo = ficticiaT0021("/api/v1/expedicao/jornada?channel=shopee", "ok")!.corpo as Record<string, unknown>;
+  const html = renderCompacto(
+    { http: 200, json: { ...corpo, status: "unavailable", reason: "fila_aberta: no_snapshot_published", fila_aberta: null } },
+    "shopee",
+  );
+  assert.match(html, /data-testid="exp-jornada-fila-indisponivel"/);
+  assert.match(html, /Fila por etapa indisponível agora: nenhuma fotografia publicada ainda\./);
+  assert.match(html, /Pedidos com vencimento/);
+  assert.doesNotMatch(html, /no_snapshot_published|ainda não publicadas neste canal/);
+  assert.doesNotMatch(html, /Fila por etapa[^<]*\b0\b/, "nunca zero");
+});
+
+test("EXPEDICAO-TIKTOK-PADRAO: o TikTok usa a Jornada compacta, como a fila", () => {
+  // Antes (T-0029) o TikTok ficava no modo completo e meia secao dizia
+  // "Indisponível neste canal". Agora a Jornada e' a mesma da Shopee/ML: so'
+  // a coorte, na largura toda, sem a metade vazia.
+  const tk = readFileSync(join(RAIZ, "src/components/expedicao/TikTokDispatchPanel.tsx"), "utf8");
+  const uso = tk.match(/<JornadaPedidos [^>]*\/>/)?.[0] ?? "";
+  assert.ok(uso, "o painel do TikTok usa a Jornada");
+  assert.match(uso, /\bcompacta\b/);
+  const html = htmlDe(
+    hj(JornadaPedidos, {
+      carga: { carregando: false, http: 200, erroDeRede: false, resultado: lerJornada(jornadaTikTok(), "tiktok") },
+      aoTentarDeNovo: () => {},
+      compacta: true,
+    }),
+  );
+  assert.doesNotMatch(html, /Pedidos aguardando expedição<\/h3>/);
+  assert.doesNotMatch(html, /Fila por etapa[^<]*\b0\b/, "nunca zero");
+});
+
+test("EXPEDICAO-SEM-TEXTAO: a Jornada nao tem paragrafo de ressalva na tela", () => {
+  const corpo = ficticiaT0021("/api/v1/expedicao/jornada?channel=shopee", "ok")!.corpo;
+  const html = renderCompacto({ http: 200, json: corpo }, "shopee");
+  assert.doesNotMatch(html, /Dentro dessas etapas|aparecem abaixo|ainda mudando|dia\(s\) fechado|>Fora da contagem|aria-label="Limitações"|data-sobreposicao/);
+  const fonte = readFileSync(join(process.cwd(), "src/components/expedicao/JornadaPedidos.tsx"), "utf8");
+  assert.doesNotMatch(fonte, /<Sobreposicoes|<Limitacoes|ainda mudando\./);
+  assert.match(fonte, /extras=\{\[\.\.\.c\.limitacoes, \.\.\.foraDaContagem\(c\)\]\}/);
 });

@@ -52,12 +52,6 @@ import {
   type ProdutoEstoque,
 } from "../src/lib/estoque-full.ts";
 import {
-  ESTOQUE_FULL_FLAG,
-  MOTIVO_DESLIGADA,
-  VALOR_QUE_LIGA,
-  estoqueFullEnabled,
-} from "../src/lib/estoque-full-flag.ts";
-import {
   ESTOQUE_FULL_NAV,
   navSections,
 } from "../src/components/shell/nav-config.ts";
@@ -370,33 +364,12 @@ test("SKU ausente vira travessao, nao string vazia", () => {
 // Flag
 // ---------------------------------------------------------------------------
 
-test("flag e' fail-closed: so' a string exata liga", () => {
-  const liga = (v: string | undefined) =>
-    estoqueFullEnabled({ NEXT_PUBLIC_SHOPEE_FBS_STOCK_ENABLED: v } as NodeJS.ProcessEnv);
-  assert.equal(liga("true"), true);
-  for (const v of ["", "1", "TRUE", "True", "yes", "false", undefined]) {
-    assert.equal(liga(v), false, `"${v}" nao pode ligar a tela`);
-  }
-});
-
-test("flag de estoque e' NOME diferente da flag de desempenho", () => {
-  // A do desempenho ja' esta LIGADA em producao. Compartilhar faria esta tela
-  // nascer visivel sobre fatos que nao existem no banco.
-  assert.equal(ESTOQUE_FULL_FLAG, "NEXT_PUBLIC_SHOPEE_FBS_STOCK_ENABLED");
-  assert.notEqual(ESTOQUE_FULL_FLAG, "NEXT_PUBLIC_SHOPEE_FBS_ENABLED");
-  assert.equal(VALOR_QUE_LIGA, "true");
-  // Ligar a de desempenho nao pode ligar esta.
-  assert.equal(
-    estoqueFullEnabled({
-      NEXT_PUBLIC_SHOPEE_FBS_ENABLED: "true",
-    } as NodeJS.ProcessEnv),
-    false,
-  );
-});
-
-test("a rota tem guard no servidor, nao so' no menu", () => {
-  assert.match(PAGE_SRC, /estoqueFullEnabled\(\)/);
-  assert.match(PAGE_SRC, /notFound\(\)/);
+test("a rota nao depende de flag de build: quem decide e' a API", () => {
+  // Uma flag NEXT_PUBLIC_ faltando num projeto novo da Vercel sumia com a aba
+  // em silencio (04/11/2026). A API desligada ja' vira "indisponivel".
+  assert.doesNotMatch(PAGE_SRC, /notFound\(\)/);
+  assert.doesNotMatch(PAGE_SRC, /process\.env/);
+  assert.match(PAGE_SRC, /<EstoqueFullClient \/>/);
 });
 
 test("o item de menu responde so' a propria flag", () => {
@@ -416,14 +389,6 @@ test("o rotulo do menu nao colide com as outras telas Full", () => {
     expedicao: true,
   }).flatMap((s) => s.pages.map((p) => p.label));
   assert.equal(new Set(todos).size, todos.length, "rotulo duplicado no menu");
-});
-
-test("motivo de desligada diz que nada foi publicado", () => {
-  // A mensagem precisa afirmar as DUAS coisas: a tela nao esta habilitada E a
-  // fotografia nao foi publicada. So' a primeira deixaria o leitor supor que o
-  // dado existe e esta' apenas escondido.
-  assert.match(MOTIVO_DESLIGADA, /n[ãa]o habilitada/i);
-  assert.match(MOTIVO_DESLIGADA, /n[ãa]o foi publicada/i);
 });
 
 // ---------------------------------------------------------------------------

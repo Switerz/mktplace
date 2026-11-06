@@ -102,6 +102,8 @@ export type QueryParams = Record<
 
 export type TorreClientOptions = {
   baseUrl: string;
+  /** Chave de servico; enviada em `x-torre-service-key`. Vazia = ausente. */
+  serviceKey?: string | undefined;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   maxBytes?: number;
@@ -132,6 +134,7 @@ export class TorreClient {
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
   private readonly maxBytes: number;
+  private readonly serviceKey: string | undefined;
 
   constructor(opts: TorreClientOptions) {
     // Validacao estrita e unica da base: https, sem credencial, sem query,
@@ -144,6 +147,7 @@ export class TorreClient {
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
+    this.serviceKey = opts.serviceKey?.trim() || undefined;
   }
 
   /**
@@ -193,8 +197,11 @@ export class TorreClient {
         res = await this.fetchImpl(url.toString(), {
           method: "GET",
           signal: controller.signal,
-          headers: { accept: "application/json" },
-          // Sem credenciais: a API e' publica hoje e o MCP nao guarda segredo.
+          headers: this.serviceKey
+            ? { accept: "application/json", "x-torre-service-key": this.serviceKey }
+            : { accept: "application/json" },
+          // Sem cookie de usuario: a identidade e' a chave de servico (se houver),
+          // que nunca e' propagada a erro, log ou resposta ao modelo.
           cache: "no-store",
         });
       } catch (err) {

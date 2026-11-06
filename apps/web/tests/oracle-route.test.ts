@@ -1502,3 +1502,13 @@ test("f1-f4: schema segue com nove campos e so' http_status aceita null", async 
     assert.match(e.correlation_id, /^[0-9a-f-]{36}$/);
   }
 });
+
+// Regressao (revisao final): currentEnv() da rota omitia a chave de servico, e
+// o Oraculo tomava 401 da API sob enforce. Teste de fiacao por texto-fonte.
+test("rota /api/mcp: currentEnv repassa MCP_BACKEND_SERVICE_KEY de process.env", async () => {
+  const { readFileSync } = await import("node:fs");
+  const src = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../app/api/mcp/route.ts"), "utf8");
+  const fn = src.slice(src.indexOf("function currentEnv()"), src.indexOf("export async function POST"));
+  assert.match(fn, /MCP_BACKEND_SERVICE_KEY:\s*process\.env\.MCP_BACKEND_SERVICE_KEY/);
+  assert.match(fn, /MCP_BACKEND_API_URL:\s*process\.env\.MCP_BACKEND_API_URL/);
+});

@@ -37,6 +37,7 @@ test("resumo: tudo selecionado le como 'todos/todas', com o periodo real", () =>
 test("resumo: canais parciais na ordem canonica, nunca na ordem do clique", () => {
   assert.equal(resumoCanais(["shopee", "tiktok"]), "TikTok Shop + Shopee");
   assert.equal(resumoCanais(["ml"]), "Mercado Livre");
+  assert.equal(resumoCanais(["shopee", "ml"]), "Consolidado (ML + Shopee)");
 });
 
 test("resumo: marca vazia e' TODAS (sem filtro), nunca 'nenhuma'", () => {

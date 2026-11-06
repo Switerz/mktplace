@@ -62,13 +62,22 @@ FILA_EXPORT_TABLE = "marts.expedicao_fila_export"
 RUN_EXPORT_TABLE = "marts.expedicao_refresh_run_export"
 
 #: Atraso de 7 dias por conta (regra oficial da Shopee, migration 035). Colunas
-#: NULLABLE de `RUN_TABLE`, nesta ordem; a API le estes nomes. NULL nas quatro
-#: = nao calculado. Calculo em `pipelines.expedicao.atraso_7d`.
+#: NULLABLE de `RUN_TABLE` (e de `RUN_EXPORT_TABLE`), nesta ordem; a API le
+#: estes nomes. NULL em todas = nao calculado. Calculo em
+#: `pipelines.expedicao.atraso_7d`.
+#:
+#: As duas ultimas (aba "Ultimos 7 dias", 03/11/2026) contam sobre a MESMA base
+#: de `due_7d_count`: `over_48h_7d_count` = duracao (coleta, ou `effective_at`
+#: se nao coletado, menos o marco da fila) acima de `OPERATIONAL_AGE_LIMIT`;
+#: `stalled_7d_count` = duracao acima de `SLOW_BASELINE_FACTOR` x p50 da conta,
+#: NULL sem baseline suficiente (sempre NULL no ML, que nao tem baseline).
 ATRASO_7D_COLUMNS = (
     "due_7d_count",
     "late_7d_count",
     "late_7d_window_start",
     "late_7d_window_end",
+    "over_48h_7d_count",
+    "stalled_7d_count",
 )
 #: Registry das contas alimentadas por export. NAO e' `dim_seller_account`: la',
 #: a conta passaria a ser esperada no Data Mart e bloquearia a Shopee inteira.

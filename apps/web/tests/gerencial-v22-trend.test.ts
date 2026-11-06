@@ -29,6 +29,7 @@ import {
 import { buildChannelSeriesKey, buildGerencialRequestKey, type GerencialKeyInput } from "../src/lib/gerencial/request-key.ts";
 import type { TrendPoint } from "../src/lib/api-client.ts";
 import type { Marketplace } from "../src/lib/mock-data.ts";
+import { bucketDeHoje, diaAnterior, mostrarHojeNoGrafico } from "../src/lib/gerencial/dia-em-andamento.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 const read = (p: string) => readFileSync(join(ROOT, p), "utf-8");
@@ -705,4 +706,56 @@ test("V22-24. compare=false nao renderiza nada de comparacao", () => {
   assert.match(card, /\{showComparison && \(/, "a legenda anterior fica atrás de showComparison");
   // e a linha do grafico so' e' pedida quando a comparacao esta completa
   assert.match(card, /showComparisonTotal=\{showComparison\}/);
+});
+
+
+// ---------------------------------------------------------------------------
+// GERENCIAL-D0 — o dia de hoje no grafico de evolucao
+// ---------------------------------------------------------------------------
+const pontoHoje = (date: string, gmv: number, orders = 1): TrendPoint => ({ date, label: "05/11", gmv, orders } as TrendPoint);
+
+test("GERENCIAL-D0: hoje entra so' quando o periodo termina ontem", () => {
+  assert.equal(diaAnterior("2026-11-01"), "2026-10-31");
+  assert.equal(diaAnterior("2026-01-01"), "2025-12-31");
+  assert.equal(mostrarHojeNoGrafico("2026-11-01", "2026-11-04", "2026-11-05"), true);
+  assert.equal(mostrarHojeNoGrafico("2026-10-01", "2026-10-31", "2026-11-05"), false);
+  // O proprio "Hoje" ja' e' o dia inteiro.
+  assert.equal(mostrarHojeNoGrafico("2026-11-05", "2026-11-05", "2026-11-05"), false);
+});
+
+test("GERENCIAL-D0: bucket de hoje soma os canais e sai rotulado, sem par anterior", () => {
+  const canais: Marketplace[] = ["ml", "shopee"] as Marketplace[];
+  const series = canais.map((channel, i) => ({
+    channel,
+    status: "fresh" as const,
+    granularity: "day" as const,
+    points: [pontoHoje("2026-11-05", 100 + i * 50)],
+  }));
+  const b = bucketDeHoje(series, canais, "gmv", "2026-11-05");
+  assert.ok(b);
+  assert.equal(b.label, "Hoje");
+  assert.equal(b.total, 250);
+  assert.equal(b.comparison, null);
+});
+
+test("GERENCIAL-D0: canal fora do ar nao vira total parcial de hoje", () => {
+  const canais: Marketplace[] = ["ml", "shopee"] as Marketplace[];
+  const series = [
+    { channel: canais[0], status: "fresh" as const, granularity: "day" as const, points: [pontoHoje("2026-11-05", 100)] },
+    { channel: canais[1], status: "error" as const, granularity: "day" as const, points: [] },
+  ];
+  assert.equal(bucketDeHoje(series, canais, "gmv", "2026-11-05"), null);
+  assert.equal(bucketDeHoje([], canais, "gmv", "2026-11-05"), null);
+});
+
+test("GERENCIAL-D0: hoje fica fora de merged (soma, reconciliacao, meta) e so' no grafico diario", () => {
+  const page = readFileSync(join(process.cwd(), "app", "page.tsx"), "utf8");
+  assert.match(page, /bucketDeHoje\(sources\.seriesHoje/);
+  assert.match(page, /bucketHoje=\{hojeNoGrafico\}/);
+  assert.doesNotMatch(page, /mergeChannelSeries\(sources\.seriesHoje/);
+  const card = readFileSync(join(process.cwd(), "src", "components", "gerencial", "EvolutionCard.tsx"), "utf8");
+  assert.match(card, /merged\.granularity === "day"/);
+  assert.match(card, /buckets=\{buckets\}/);
+  const hook = readFileSync(join(process.cwd(), "src", "hooks", "useGerencialSources.ts"), "utf8");
+  assert.match(hook, /dateFrom: hoje, dateTo: hoje, compare: false/);
 });

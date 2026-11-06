@@ -23,15 +23,24 @@ def esperado(canal="ml", marca="kokeshi", gmv=1_000_000, mes=JUL):
     return {"competencia": mes, "marketplace_id": P.MKT_ID[canal], "marca": marca, "gmv": Decimal(gmv)}
 
 
-def cmv(canal="ml", marca="kokeshi", receita=1_000_000, custo=300_000, prov=0, rcc=None, mes=JUL):
-    return {"competencia": mes, "marca": marca, "plataforma": P.PLATAFORMA_FISCAL[canal],
-            "receita_fiscal": Decimal(receita), "custo": None if custo is None else Decimal(custo),
-            "custo_provisorio": Decimal(prov), "receita_com_custo": Decimal(rcc if rcc is not None else receita),
-            "ultima_emissao": date(2026, 7, 31), "linhas": 10}
+def cmv(canal="ml", marca="kokeshi", receita=1_000_000, custo=300_000, prov=0, rcc=None, mes=JUL,
+        emissao=date(2026, 7, 31)):
+    """Uma linha da leitura do CMV, ja' agregada para `competencia x marca x plataforma`.
+
+    `custo=None` e' o que o `SUM(custo)` devolve quando nenhum item da celula
+    tem custo; ai' o `SUM ... FILTER (custo IS NOT NULL)` tambem e' NULL.
+    """
+    sem_custo = custo is None
+    return {"competencia": mes, "marca": marca, "plataforma": P.PLATAFORMA_FISCAL.get(canal, canal),
+            "receita_fiscal": Decimal(receita), "custo": None if sem_custo else Decimal(custo),
+            "custo_provisorio": None if sem_custo else Decimal(prov),
+            "receita_com_custo": None if sem_custo else Decimal(rcc if rcc is not None else receita),
+            "ultima_emissao": emissao, "linhas": 10}
 
 
-def cp(c):
-    return {k: c[k] for k in ("competencia", "marca", "plataforma", "receita_fiscal", "custo")}
+def cp(c, **over):
+    """Linha da contraprova (agregado gold) igual a' do CMV, salvo `over`."""
+    return {k: c[k] for k in ("competencia", "marca", "plataforma", "receita_fiscal", "custo", "ultima_emissao")} | over
 
 
 def repasse(marca="kokeshi", taxa=-290_000, frete=-12_000, afiliado=-90_000, residuo=0, viol=0, mes=JUL):
@@ -113,8 +122,170 @@ def test_contraprova_divergente_recusa_tudo():
 
 
 def test_chave_so_numa_tabela_fiscal_recusa():
-    lt = lote([esperado()], [cmv()], contraprova=[])
+    lt = lote([esperado()], [cmv()], contraprova=[cp(cmv(marca="apice"))])
     assert any("so' em uma" in m for m in lt.recusas)
+
+
+# ---------------------------------------------------------------------------
+# T-0055 C2 — contraprova contra o agregado gold que anda atras da base de item
+# ---------------------------------------------------------------------------
+
+D27, D31 = date(2026, 7, 27), date(2026, 7, 31)
+
+
+def test_contraprova_completa_e_igual_publica_sem_observacao():
+    lt = lote([esperado()], [cmv()])
+    assert lt.recusas == [] and lt.observacoes == []
+    assert "contraprova" not in linha(lt, "ml", "kokeshi", "cmv")["motivo"]
+
+
+def test_contraprova_completa_e_divergente_recusa_mesmo_com_a_base_de_item_maior():
+    c = cmv(receita=1_000_000)
+    lt = lote([esperado()], [c], contraprova=[cp(c, receita_fiscal=Decimal(900_000))])
+    assert any("receita_fiscal" in m and "diverge do agregado mensal" in m for m in lt.recusas)
+
+
+def test_agregado_defasado_nao_recusa_e_deixa_observacao_no_motivo():
+    """O caso de out/26: agregado parado em 27/10 com ~85% da receita."""
+    c = cmv(receita=1_000_000, custo=300_000, emissao=D31)
+    lt = lote([esperado()], [c],
+              contraprova=[cp(c, receita_fiscal=Decimal(850_000), custo=Decimal(240_000), ultima_emissao=D27)])
+    assert lt.recusas == []
+    r = linha(lt, "ml", "kokeshi", "cmv")
+    assert r["valor"] == Decimal(300_000)  # publica a base de item, nao o agregado
+    assert r["status_reconciliacao"] == "reconciliado"  # a razao com o GMV segue a regra de sempre
+    assert r["motivo"].startswith("receita fiscal / GMV = 1.0000; ")
+    assert "contraprova nao bloqueante: agregado gold ate 27/07, base de item ate 31/07" in r["motivo"]
+    assert lt.observacoes == ["2026-07: contraprova nao bloqueante: agregado gold ate 27/07, base de item ate 31/07"]
+
+
+def test_agregado_defasado_sem_a_chave_nao_recusa():
+    """Marca que so' vendeu depois do corte do agregado: a defasagem explica."""
+    c, outra = cmv(marca="kokeshi"), cmv(marca="apice")
+    lt = lote([esperado(marca="kokeshi"), esperado(marca="apice")], [c, outra],
+              contraprova=[cp(c, ultima_emissao=D27)])
+    assert lt.recusas == []
+    assert "agregado gold ate 27/07" in linha(lt, "ml", "apice", "cmv")["motivo"]
+
+
+def test_agregado_sem_a_competencia_nao_recusa():
+    lt = lote([esperado()], [cmv()], contraprova=[])
+    assert lt.recusas == []
+    assert "agregado gold sem a competencia" in linha(lt, "ml", "kokeshi", "cmv")["motivo"]
+
+
+def test_agregado_defasado_com_mais_receita_que_a_base_de_item_recusa():
+    """A defasagem explica o agregado ter MENOS; ter MAIS e' a base de item que regrediu."""
+    c = cmv(receita=1_000_000, emissao=D31)
+    lt = lote([esperado()], [c], contraprova=[cp(c, receita_fiscal=Decimal(1_000_002), ultima_emissao=D27)])
+    assert any("abaixo do agregado gold defasado" in m for m in lt.recusas)
+
+
+def test_agregado_defasado_com_chave_que_a_base_de_item_perdeu_recusa():
+    c = cmv(marca="kokeshi")
+    lt = lote([esperado()], [c],
+              contraprova=[cp(c, ultima_emissao=D27), cp(cmv(marca="apice"), ultima_emissao=D27)])
+    assert any("a base de item perdeu a chave" in m for m in lt.recusas)
+
+
+def test_agregado_a_frente_da_base_de_item_e_completo_e_bloqueia():
+    c = cmv(emissao=D27)
+    lt = lote([esperado()], [c], contraprova=[cp(c, custo=Decimal(310_000), ultima_emissao=D31)])
+    assert any("custo" in m and "diverge do agregado mensal" in m for m in lt.recusas)
+
+
+def test_completude_da_contraprova_e_por_competencia():
+    """Agosto alcancado e divergente recusa; julho defasado so' observa."""
+    ago = date(2026, 8, 1)
+    cj, ca = cmv(mes=JUL, emissao=D31), cmv(mes=ago, emissao=date(2026, 8, 31))
+    lt = lote([esperado(mes=JUL), esperado(mes=ago)], [cj, ca], comps=(JUL, ago),
+              contraprova=[cp(cj, receita_fiscal=Decimal(800_000), ultima_emissao=D27),
+                           cp(ca, custo=Decimal(1))])
+    assert len(lt.recusas) == 1 and "2026, 8, 1" in lt.recusas[0]
+    assert lt.observacoes == ["2026-07: contraprova nao bloqueante: agregado gold ate 27/07, base de item ate 31/07"]
+
+
+def test_contraprova_aceita_emissao_como_datetime():
+    c = cmv(emissao=datetime(2026, 7, 31, 15, 0))
+    lt = lote([esperado()], [c], contraprova=[cp(c, ultima_emissao=D31)])
+    assert lt.recusas == [] and lt.observacoes == []
+
+
+# ---------------------------------------------------------------------------
+# T-0055 C1 — fonte de item: forma, nulo, cobertura, plataforma, grao
+# ---------------------------------------------------------------------------
+
+def _sql(t) -> str:
+    return " ".join(str(t).split())
+
+
+def test_sql_do_cmv_le_a_base_de_item_com_os_filtros_da_query_do_fpa():
+    sql = _sql(P.SQL_CMV)
+    assert "FROM gold.nf_vendas_unificada_v2" in sql
+    assert "canal = 'marketplace'" in sql and "plataforma = ANY(:plataformas)" in sql
+    assert "marca = ANY(:marcas)" in sql and "data_mes = ANY(:competencias)" in sql
+    # o default da query do FP&A: intercompany NULL conta como 'normal'
+    assert "intercompany IS NOT TRUE" in sql and "NOT intercompany" not in sql.replace("IS NOT TRUE", "")
+    # ausencia != zero: nenhum COALESCE no custo
+    assert "COALESCE" not in sql.upper()
+    assert "SUM(receita_produto) FILTER (WHERE custo IS NOT NULL) AS receita_com_custo" in sql
+    assert "{{" not in sql and "[[" not in sql  # nada de template do Metabase
+
+
+def test_sql_do_cmv_nao_tem_join_e_agrupa_na_chave_inteira_da_saida():
+    for t in (P.SQL_CMV, P.SQL_CMV_CONTRAPROVA):
+        sql = _sql(t).upper()
+        assert " JOIN " not in sql and sql.count(" FROM ") == 1
+        assert sql.endswith("GROUP BY DATA_MES, MARCA, PLATAFORMA")
+    assert "FROM gold.nf_vendas_plataforma_sku_mensal" in _sql(P.SQL_CMV_CONTRAPROVA)
+
+
+def test_leitura_da_fonte_mantem_read_only_e_timeout():
+    fonte = (REPO / "pipelines" / "dre" / "insumo_publisher.py").read_text(encoding="utf-8")
+    trecho = fonte[fonte.index("def ler_fonte"):fonte.index("def _esperado")]
+    assert trecho.index("SET TRANSACTION READ ONLY") < trecho.index("statement_timeout = '600s'") \
+        < trecho.index("SQL_CMV,")
+
+
+def test_procedencia_nomeia_a_base_de_item():
+    lt = lote([esperado()], [cmv()])
+    assert {linha(lt, "ml", "kokeshi", c)["procedencia"] for c in ("cmv", "cmv_receita_fiscal")} == {P.PROC_CMV}
+    assert P.PROC_CMV.startswith("gold.nf_vendas_unificada_v2")
+
+
+def test_celula_sem_custo_nenhum_fica_nula_nunca_zero():
+    lt = lote([esperado()], [cmv(custo=None)])
+    r = linha(lt, "ml", "kokeshi", "cmv")
+    assert r["valor"] is None and r["status_reconciliacao"] == "ausente_na_origem"
+    assert r["cobertura"] is None and r["provisorio_share"] is None
+    assert linha(lt, "ml", "kokeshi", "cmv_receita_fiscal")["valor"] == Decimal(1_000_000)
+    assert lt.recusas == []
+
+
+def test_cmv_e_so_o_custo_da_receita_coberta_sem_extrapolar():
+    """90% da receita com custo: o CMV e' o custo medido, e a cobertura diz quanto falta."""
+    lt = lote([esperado()], [cmv(receita=1_000_000, custo=270_000, rcc=900_000)])
+    r = linha(lt, "ml", "kokeshi", "cmv")
+    assert r["valor"] == Decimal(270_000) and r["cobertura"] == Decimal("0.9")
+
+
+def test_mapeamento_de_plataforma_e_o_da_torre():
+    assert P.PLATAFORMA_FISCAL == {"tiktok": "tiktokshop", "ml": "mercadolivre", "shopee": "shopee"}
+
+
+def test_plataforma_fora_da_torre_nao_e_publicada_nem_redistribuida():
+    amazon = cmv("amazon", receita=777_777, custo=111_111)
+    lt = lote([esperado("ml")], [cmv("ml"), amazon])
+    assert lt.recusas == []
+    assert {(r["canal"], r["marca"]) for r in lt.linhas} == {("ml", "kokeshi")}
+    assert linha(lt, "ml", "kokeshi", "cmv")["valor"] == Decimal(300_000)  # nada da amazon entrou
+    assert ("cmv", JUL, None, "kokeshi") in lt.fora_do_escopo
+
+
+def test_mesma_entrada_mesmo_lote():
+    entrada = dict(esp=[esperado("tiktok"), esperado("ml")], cmvs=[cmv("tiktok"), cmv("ml", custo=None)],
+                   reps=[repasse()])
+    assert lote(**entrada).linhas == lote(**entrada).linhas
 
 
 def test_identidade_do_repasse_violada_recusa():
@@ -268,8 +439,8 @@ def test_cli_canais_validos_sao_normalizados_na_ordem_canonica():
 # Contrato com o serving e com a migration
 # ---------------------------------------------------------------------------
 
-def carregar_migration_025():
-    """Constantes da migration 025 SEM importar `alembic`.
+def _carregar_migration(arquivo: str):
+    """Constantes de uma migration SEM importar `alembic`.
 
     Executa o fonte num namespace isolado, com `op = None`. Injetar um
     `alembic` falso em `sys.modules` contaminaria qualquer outro teste da
@@ -277,7 +448,7 @@ def carregar_migration_025():
     """
     import types
 
-    caminho = REPO / "apps" / "api" / "alembic" / "versions" / "025_create_fact_dre_insumo_mensal.py"
+    caminho = REPO / "apps" / "api" / "alembic" / "versions" / arquivo
     fonte = caminho.read_text(encoding="utf-8")
     assert fonte.count("from alembic import op") == 1
     ns: dict = {}
@@ -285,29 +456,62 @@ def carregar_migration_025():
     return types.SimpleNamespace(**{k: v for k, v in ns.items() if not k.startswith("__")})
 
 
+def carregar_migration_025():
+    return _carregar_migration("025_create_fact_dre_insumo_mensal.py")
+
+
+def carregar_migration_037():
+    """T-0059: estende o CHECK de componentes da 025 com `shopee_taxa_escrow`."""
+    return _carregar_migration("037_dre_insumo_taxa_shopee_escrow.py")
+
+
 _migration = carregar_migration_025
 
 
+def _lista_do_check(sql: str, nome: str) -> tuple:
+    import re
+
+    bloco = re.search(nome + r" CHECK \((?:\w+) IN \((.*?)\)\)", sql, re.DOTALL).group(1)
+    return tuple(re.findall(r"'([a-z_]+)'", bloco))
+
+
 def test_componentes_publicados_existem_no_check_da_migration():
-    lt = lote([esperado("tiktok"), esperado("ml")], [cmv("tiktok"), cmv("ml")], reps=[repasse()])
-    m = _migration()
-    assert {r["componente"] for r in lt.linhas} <= set(m.COMPONENTES)
-    assert {r["status_reconciliacao"] for r in lt.linhas} <= set(m.STATUS)
-    assert m.down_revision == "024" and m.revision == "025"
+    """Lista EFETIVA no head: a da 025 estendida pela 037 (T-0059)."""
+    lt = lote([esperado("tiktok"), esperado("ml"), esperado("shopee", "barbours")],
+              [cmv("tiktok"), cmv("ml")], reps=[repasse()])
+    lt_tx = P.montar_lote(
+        esperado=[esperado("shopee", "barbours")], cmv=[], contraprova=[], repasse=[], canais=["shopee"],
+        comps=[JUL], taxa_shopee=[{"competencia": JUL, "marca": "barbours", "pedidos": 10, "pedidos_com_escrow": 9,
+                                   "taxa": Decimal(100), "parcelas_negativas": 0, "atualizado_em": None}])
+    m025, m037 = _migration(), carregar_migration_037()
+    efetiva = set(m037.COMPONENTES)
+    assert {r["componente"] for r in lt.linhas + lt_tx.linhas} <= efetiva
+    assert P.TAXA_SHOPEE in {r["componente"] for r in lt_tx.linhas}
+    # A 037 so' acrescenta: a lista da 025 continua inteira, na mesma ordem.
+    assert m037.COMPONENTES == m025.COMPONENTES + (P.TAXA_SHOPEE,)
+    assert {r["status_reconciliacao"] for r in lt.linhas + lt_tx.linhas} <= set(m025.STATUS)
+    assert m025.down_revision == "024" and m025.revision == "025"
+    assert m037.down_revision == "036" and m037.revision == "037"
+
+
+def test_037_troca_so_o_check_de_componentes_e_o_downgrade_restaura_a_025():
+    m025, m037 = carregar_migration_025(), carregar_migration_037()
+    (up,) = m037.UPGRADE_SQL
+    apaga, restaura = m037.DOWNGRADE_SQL
+    assert _lista_do_check(up, "ck_fdim_componente") == m037.COMPONENTES
+    assert _lista_do_check(restaura, "ck_fdim_componente") == m025.COMPONENTES
+    for sql in (up, restaura):
+        assert sql.count("CONSTRAINT") == 2 and "DROP CONSTRAINT ck_fdim_componente," in sql
+        assert m037.TABELA in sql
+    # Downgrade apaga SO' o componente novo, com WHERE, antes de restaurar o CHECK.
+    assert apaga.strip() == f"DELETE FROM {m037.TABELA} WHERE componente = '{P.TAXA_SHOPEE}'"
 
 
 def test_check_literal_da_migration_lista_exatamente_as_tuplas():
-    import re
-
     m = carregar_migration_025()
     sql = m.UPGRADE_SQL[0]
-
-    def lista(nome):
-        bloco = re.search(nome + r" CHECK \((?:\w+) IN \((.*?)\)\)", sql, re.DOTALL).group(1)
-        return tuple(re.findall(r"'([a-z_]+)'", bloco))
-
-    assert lista("ck_fdim_componente") == m.COMPONENTES
-    assert lista("ck_fdim_status") == m.STATUS
+    assert _lista_do_check(sql, "ck_fdim_componente") == m.COMPONENTES
+    assert _lista_do_check(sql, "ck_fdim_status") == m.STATUS
 
 
 def test_faixa_do_cmv_e_a_mesma_do_serving():

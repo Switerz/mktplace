@@ -25,8 +25,6 @@ import {
 } from "lucide-react";
 import { expedicaoHabilitado } from "@/lib/expedicao-contract";
 import { shopeeFbsEnabled } from "@/lib/shopee-fbs-flag";
-import { estoqueFullEnabled } from "@/lib/estoque-full-flag";
-import { mlFullEstoqueEnabled } from "@/lib/ml-full-estoque-flag";
 import { habilitado as performanceContasHabilitado } from "@/lib/performance-contas";
 
 import { isNavItemActive, navSections } from "./nav-config";
@@ -107,9 +105,10 @@ export default function NavList({ pathname, hrefFor, alvoAmplo = false, recolhid
           `undefined` no browser. */}
       {navSections({
         expedicao: expedicaoHabilitado(process.env.NEXT_PUBLIC_EXPEDICAO_ENABLED),
+        cx: true,
         shopeeFbs: shopeeFbsEnabled(),
-        estoqueFull: estoqueFullEnabled(),
-        mlFullEstoque: mlFullEstoqueEnabled(),
+        estoqueFull: true,
+        mlFullEstoque: true,
         performanceContas: performanceContasHabilitado(),
       }).map((section, idx) => (
         <div key={section.label} className="flex flex-col gap-0.5">
@@ -152,7 +151,7 @@ export default function NavList({ pathname, hrefFor, alvoAmplo = false, recolhid
                   recolhido ? "justify-center px-0" : "gap-2.5 px-2.5"
                 } ${
                   active
-                    ? "bg-shell-active text-shell-ink"
+                    ? "tc-nav-ativo bg-shell-active text-shell-ink"
                     : "text-shell-muted hover:bg-shell-raised hover:text-shell-ink"
                 }`}
               >

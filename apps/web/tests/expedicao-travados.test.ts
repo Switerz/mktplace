@@ -119,7 +119,8 @@ test("revisao #124: popup sem coluna inutil, remonta por alvo e diz quando inclu
   // revisao #127: o modo compacto mantem o aviso de marca e as limitacoes
   const compacto = JORNADA.slice(JORNADA.indexOf("if (compacta) {"));
   assert.match(compacto, /avisoDeMarcaNaoAplicada\(marca, resposta\)/);
-  assert.match(JORNADA, /\{compacta \? null : \(\s*<Sobreposicoes[^]*?\)\}\s*\{\/\*[^]*?\*\/\}\s*<Limitacoes itens=\{f\.limitacoes\} \/>/);
+  // EXPEDICAO-SEM-TEXTAO: as limitacoes da fila seguem acessiveis, no "ⓘ".
+  assert.match(JORNADA, /<AjudaMetrica chave="jornada\.fila_aberta" extras=\{f\.limitacoes\} \/>/);
 });
 
 

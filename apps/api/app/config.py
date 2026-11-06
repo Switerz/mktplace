@@ -183,6 +183,21 @@ class Settings(BaseSettings):
     # (`NEXT_PUBLIC_PERFORMANCE_CONTAS_ENABLED`).
     performance_contas_api_enabled: bool = Field(default=False)
 
+    # CX-MKT-2 — secao "Performance" da Expedicao (`/api/v1/expedicao/performance`):
+    # nota OFICIAL de cada conta (reputacao ML, Saude da Conta Shopee), lida das
+    # fotografias diarias no Data Mart. Nasce desligada (404 antes de consultar).
+    expedicao_performance_api_enabled: bool = Field(default=False)
+
+    # EXPEDICAO-TIKTOK-ABERTOS (`/api/v1/expedicao/tiktok/abertos`): pedidos do
+    # TikTok em aberto agora, lidos do Data Mart. So' leitura, nasce LIGADA.
+    expedicao_tiktok_abertos_api_enabled: bool = Field(default=True)
+
+    # Aba CX (`/api/v1/cx/*`, menu principal, 04/11/2026): chat da Saude da
+    # Conta + cancelamentos e devolucoes da Shopee. So' leitura do Data Mart
+    # (pelo `datamart_leitura`), entao nasce LIGADA; desligar = 404 antes de
+    # consultar. Contrato: docs/cx_atendimento_contrato.md.
+    cx_api_enabled: bool = Field(default=True)
+
     # ------------------------------------------------------------------
     # Gate TORRE-B2B-OCTAPRICE — revendedores B2B x PMA do OctaPrice
     # ------------------------------------------------------------------
@@ -233,6 +248,36 @@ class Settings(BaseSettings):
     b2b_revenda_access_mode: str = "authenticated"
     b2b_revenda_rate_limit_per_minute: int = Field(default=60, ge=1, le=600)
     b2b_revenda_rate_limit_global_per_minute: int = Field(default=600, ge=10, le=6000)
+
+    # ------------------------------------------------------------------
+    # Alerta de vencidos da Shopee (EXPEDICAO-ALERTA-VENCIDOS-1)
+    # ------------------------------------------------------------------
+    # `POST /api/v1/alertas/expedicao-vencidos` (app/routers/alertas.py), chamada
+    # a cada 15 min pelo app `torre-alerta-gatilho` no GoDeploy.
+    # `alerta_webhook_secret`: segredo que o gatilho manda em `X-Alerta-Token`;
+    #   vazio = rota desligada (503).
+    # `slack_bot_token`: `xoxb-` do bot "Torre" (infra/slack/torre-bot).
+    # `expedicao_alerta_destinatarios`: e-mails do Slack, separados por virgula.
+    alerta_webhook_secret: SecretStr = SecretStr("")
+    slack_bot_token: SecretStr = SecretStr("")
+    expedicao_alerta_destinatarios: str = ""
+
+    # ------------------------------------------------------------------
+    # Login Google (AUTH-GOOGLE-2) — gate de sessao (app/gate_sessao.py)
+    # ------------------------------------------------------------------
+    # off (padrao: nao muda nada) | report (so' loga o que negaria) | enforce (401).
+    # Valor desconhecido vale enforce (fail-closed).
+    torre_auth_mode: str = "off"
+    # Mesmo valor da Vercel; >= 32 caracteres, senao conta como nao configurado (503).
+    auth_secret: SecretStr = SecretStr("")
+    # Dominios de e-mail aceitos na sessao (CSV, match exato).
+    allowed_email_domains: str = "gocase.com,gobeaute.com.br"
+    # Chave do Oraculo MCP (header x-torre-service-key); >= 32 caracteres, vazia = desligada.
+    torre_service_key: SecretStr = SecretStr("")
+
+    @property
+    def expedicao_alerta_destinatarios_list(self) -> list[str]:
+        return [e.strip() for e in self.expedicao_alerta_destinatarios.split(",") if e.strip()]
 
     @property
     def b2b_revenda_canais_kpi_list(self) -> list[str]:

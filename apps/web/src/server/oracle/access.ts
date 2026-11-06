@@ -31,6 +31,8 @@ export type AccessEnv = {
   ORACLE_MCP_ENABLED?: string | undefined;
   /** Base allowlisted do FastAPI. Sem ela nao ha o que servir. */
   MCP_BACKEND_API_URL?: string | undefined;
+  /** Chave de servico enviada ao backend (header `x-torre-service-key`). Opcional. */
+  MCP_BACKEND_SERVICE_KEY?: string | undefined;
   /** Issuer do authorization server (Auth0). Ver `oauth.ts`. */
   ORACLE_AUTH_ISSUER?: string | undefined;
   /** Audience exigida — precisa ser o resource canonico da rota. */
@@ -58,6 +60,8 @@ export type AccessDecision =
       allowed: true;
       mode: "development" | "test" | "production";
       backendBaseUrl: string;
+      /** Chave de servico do backend; `undefined` quando vazia. Nunca logar. */
+      backendServiceKey?: string | undefined;
       /**
        * Configuracao OAuth em vigor. Quando presente, o handler DEVE exigir e
        * validar o bearer antes de qualquer outra coisa.
@@ -227,6 +231,12 @@ export function isUsableBackendUrl(raw: string | undefined): raw is string {
  * A ordem importa: hospedagem e configuracao OAuth sao avaliadas ANTES de
  * qualquer coisa, para que nenhuma flag isolada destrave um deployment.
  */
+/** Chave de servico aparada; vazia ou so espacos conta como ausente. */
+function serviceKeyOf(env: AccessEnv): string | undefined {
+  const k = env.MCP_BACKEND_SERVICE_KEY?.trim();
+  return k ? k : undefined;
+}
+
 export function evaluateAccess(env: AccessEnv, opts: EvaluateOptions = {}): AccessDecision {
   const isTest = env.NODE_ENV === "test";
   const oauth = parseOAuthConfig(env);
@@ -264,6 +274,7 @@ export function evaluateAccess(env: AccessEnv, opts: EvaluateOptions = {}): Acce
       allowed: true,
       mode: "production",
       backendBaseUrl: env.MCP_BACKEND_API_URL,
+      backendServiceKey: serviceKeyOf(env),
       // Em producao `auth` e' SEMPRE non-null: garantido pelo check acima.
       auth: oauth,
     };
@@ -290,6 +301,7 @@ export function evaluateAccess(env: AccessEnv, opts: EvaluateOptions = {}): Acce
     allowed: true,
     mode: isTest ? "test" : "development",
     backendBaseUrl: env.MCP_BACKEND_API_URL,
+    backendServiceKey: serviceKeyOf(env),
     // Localmente, OAuth e' OPCIONAL: configurado, passa a ser exigido; ausente,
     // mantem o modo de desenvolvimento do OM1 (que nunca alcanca hospedagem).
     auth: oauth,

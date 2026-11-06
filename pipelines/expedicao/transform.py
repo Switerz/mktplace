@@ -622,12 +622,12 @@ def build_account_summaries(
 
     ATRASO DE 7 DIAS (regra oficial da Shopee, migration 035)
     ---------------------------------------------------------
-    `atraso_7d` mapeia `external_seller_id -> as quatro chaves` de
-    `contract.ATRASO_7D_COLUMNS`, calculadas fora daqui (modulo `atraso_7d`):
-    a base e' outra (7 dias de vencimentos), nao a fila. Toda linha recebe as
-    quatro chaves; conta fora do mapa (ou mapa ausente) recebe NULL nas quatro
-    — "nao calculado", nunca zero. O publicador so' as grava se a 035 existir
-    no destino.
+    `atraso_7d` mapeia `external_seller_id -> as seis chaves` de
+    `contract.ATRASO_7D_COLUMNS` (atraso, janela, acima de 48 h e travados),
+    calculadas fora daqui (modulo `atraso_7d`): a base e' outra (7 dias de
+    vencimentos), nao a fila. Toda linha recebe as seis chaves; conta fora do
+    mapa (ou mapa ausente) recebe NULL em todas — "nao calculado", nunca zero.
+    O publicador so' as grava se as seis colunas existirem no destino.
     """
     _require_aware(effective_at, "effective_at")
     hora = snapshot_hour(effective_at)

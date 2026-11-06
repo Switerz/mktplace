@@ -211,3 +211,33 @@ test("progressoMeta sem curva: plano linear, mesma projecao de antes", () => {
   assert.ok(Math.abs(p.planoAteData - (20_000_000 * 28) / 31) < 1e-6);
   assert.ok(Math.abs(p.projecao! - 21_708_613.6) < 1);
 });
+
+test("porDiaNecessario pela curva = falta / peso dos dias restantes (Nova meta dia normal)", async () => {
+  const { fracaoDoEscopo, metaDiaNormalDoEscopo } = await import("../src/lib/metas-curva.ts");
+  // Meta ficticia, so' Shopee. Pesos da aba Curva: total 39,26; 01–05/11 = 4,99.
+  const celulas = [{ brand: "apice", channel: "shopee", meta_gmv: 1_000_000 }];
+  const p = progressoMeta({
+    meta: 1_000_000,
+    realizado: 100_000,
+    mes: "2026-11",
+    hoje: "2026-11-06",
+    ultimoDia: "2026-11-05",
+    fracaoAte: fracaoDoEscopo(celulas, "2026-11"),
+    metaDiaNormal: metaDiaNormalDoEscopo(celulas, "2026-11"),
+  })!;
+  assert.ok(Math.abs(p.porDiaNecessario! - 900_000 / (39.26 - 4.99)) < 1e-6);
+  assert.ok(Math.abs(metaDiaNormalDoEscopo(celulas, "2026-11") - 1_000_000 / 39.26) < 1e-6);
+});
+
+test("divisaoFull: aplica a proporcao Full de cada canal ao GMV do overview; TikTok fica em normal", async () => {
+  const { divisaoFull } = await import("../src/lib/gerencial/divisao-full.ts");
+  assert.deepEqual(
+    divisaoFull({ total: 1500, ml: 1000, shopee: 400 }, { ml: 0.5, shopee: 0.25 }),
+    { full: 600, normal: 900 },
+  );
+  // canal com venda sem proporcao medida: nao inventa divisao
+  assert.equal(divisaoFull({ total: 1400, ml: 1000, shopee: 400 }, { ml: 0.5, shopee: null }), null);
+  // canal sem venda nao precisa de proporcao
+  assert.deepEqual(divisaoFull({ total: 1000, ml: 1000, shopee: null }, { ml: 0.3, shopee: null }), { full: 300, normal: 700 });
+  assert.equal(divisaoFull({ total: 1000, ml: 1000, shopee: null }, { ml: 0, shopee: null }), null);
+});

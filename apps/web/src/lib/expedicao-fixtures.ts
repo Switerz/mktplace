@@ -21,10 +21,17 @@
  *   jornadaVazia  pagina ok; a Jornada responde com base 0
  *   jornadaCoorteAusente  pagina ok; Shopee com a fila valida e a coorte
  *                 nula (`coorte: table_not_migrated`) — R21: a fila continua
- *   jornadaEtapas pagina ok; fila do ML em varias etapas (a faturar, a
- *                 imprimir, ..., entregue a' transportadora), que fecham a base
- *   jornadaEtapaParcial  pagina ok; fila do ML `partial` com
+ *   jornadaEtapas pagina ok; fila por etapa REAL que fecha a base: ML em
+ *                 varias etapas (a faturar, ..., entregue a' transportadora);
+ *                 Shopee em a preparar + aguardando coleta
+ *   jornadaEtapaUnica  pagina ok; Shopee e ML com UMA etapa real (= base)
+ *   jornadaEtapaParcial  pagina ok; Shopee e ML `partial` com
  *                 `fila_aberta: etapa_parcial` e parte em `nao_publicada`
+ *
+ * T-0029: a fila aberta segue o payload REAL de `_fila_aberta`
+ * (`expedicao_service.py`). Sem etapa real: UMA etapa `aguardando_expedicao`
+ * e a limitacao "... não publicada na fila". Com etapa real: essa limitacao
+ * sai (no parcial ela fica) e o ML ganha a do "entregue à transportadora".
  *
  * Com `&marca=`, a Jornada recorta pela marca e devolve `brands_applied`.
  */
@@ -52,6 +59,7 @@ export const CENARIOS_DEMO = [
   "jornadaVazia",
   "jornadaCoorteAusente",
   "jornadaEtapas",
+  "jornadaEtapaUnica",
   "jornadaEtapaParcial",
 ] as const;
 export type CenarioDemo = (typeof CENARIOS_DEMO)[number];
@@ -393,6 +401,66 @@ function etapasQueFecham(base: number, modelo: { key: string; label: string; par
   });
 }
 
+/** Textos EXATOS de `expedicao_service.py` (`LIMITACOES_FILA`, `LIMITACAO_ML_ENTREGUE_NO_BACKLOG`). */
+const LIMITACOES_FILA = {
+  shopee: ["etapa interna (a preparar × envio organizado) não publicada na fila", "FBS não separado na fila aberta"],
+  mercadolivre: ["substatus do shipment não publicado na fila", "Full (fulfillment) fora da fila por contrato"],
+};
+const LIMITACAO_ML_ENTREGUE_NO_BACKLOG =
+  "envios 'entregue à transportadora' ainda contam no backlog: o Mercado Livre mantém o status ready_to_ship";
+
+/**
+ * As limitacoes da fila como a API manda: com etapa real a primeira ("...
+ * não publicada na fila") sai, no parcial ela fica; no ML entra a do
+ * "entregue à transportadora" SO' quando a fotografia ainda tem essa etapa
+ * (EXPEDICAO-ML-COLETADOS: o pipeline novo tira o envio coletado da fila).
+ */
+function limitacoesDaFila(
+  canal: "shopee" | "mercadolivre",
+  etapa: "sem" | "reais" | "parcial",
+  etapas: { key: string; count: number }[] = [],
+): string[] {
+  const lista = etapa === "reais" ? LIMITACOES_FILA[canal].slice(1) : [...LIMITACOES_FILA[canal]];
+  const comEntregue = etapas.some((e) => e.key === "entregue_transportadora" && e.count > 0);
+  return canal === "mercadolivre" && etapa !== "sem" && comEntregue ? [...lista, LIMITACAO_ML_ENTREGUE_NO_BACKLOG] : lista;
+}
+
+type ModeloEtapa = { key: string; label: string; parte: number }[];
+
+/** T-0015/T-0029: a fila por etapa REAL de cada cenario (labels da API). */
+const ETAPAS_DEMO: Record<"shopee" | "mercadolivre", Partial<Record<CenarioDemo, ModeloEtapa>>> = {
+  mercadolivre: {
+    jornadaEtapas: [
+      { key: "a_faturar", label: "A faturar", parte: 0.1 },
+      { key: "a_imprimir", label: "A imprimir", parte: 0.18 },
+      { key: "em_separacao", label: "Em separação", parte: 0.15 },
+      { key: "aguardando_coleta", label: "Aguardando coleta", parte: 0.27 },
+      { key: "entregue_transportadora", label: "Entregue à transportadora", parte: 0.2 },
+      { key: "sinalizado_ml", label: "Sinalizado pelo Mercado Livre", parte: 0.04 },
+      { key: "outro", label: "Outro status da fonte", parte: 1 },
+    ],
+    jornadaEtapaUnica: [{ key: "aguardando_coleta", label: "Aguardando coleta", parte: 1 }],
+    jornadaEtapaParcial: [
+      { key: "a_faturar", label: "A faturar", parte: 0.12 },
+      { key: "a_imprimir", label: "A imprimir", parte: 0.2 },
+      { key: "aguardando_coleta", label: "Aguardando coleta", parte: 0.3 },
+      { key: "nao_publicada", label: "Etapa ainda não publicada", parte: 1 },
+    ],
+  },
+  shopee: {
+    jornadaEtapas: [
+      { key: "a_preparar", label: "A preparar", parte: 0.5 },
+      { key: "aguardando_coleta", label: "Aguardando coleta", parte: 1 },
+    ],
+    jornadaEtapaUnica: [{ key: "a_preparar", label: "A preparar", parte: 1 }],
+    jornadaEtapaParcial: [
+      { key: "a_preparar", label: "A preparar", parte: 0.5 },
+      { key: "aguardando_coleta", label: "Aguardando coleta", parte: 0.25 },
+      { key: "nao_publicada", label: "Etapa ainda não publicada", parte: 1 },
+    ],
+  },
+};
+
 function jornada(canal: string, marca: string | null, c: CenarioDemo): { status: number; corpo: unknown } {
   if (c === "indisponivel" || c === "jornada404") return { status: 404, corpo: { detail: "Not Found" } };
   if (c === "jornadaErro") return { status: 500, corpo: { detail: "erro fictício de demonstração" } };
@@ -465,25 +533,11 @@ function jornada(canal: string, marca: string | null, c: CenarioDemo): { status:
     ];
     // T-0021: a fila do ML por etapa, com as chaves e os `label` que a API
     // publica. As etapas FECHAM a base (a ultima leva o resto); no cenario
-    // parcial, o resto fica em `nao_publicada`.
-    if (c === "jornadaEtapas" || c === "jornadaEtapaParcial") {
+    // parcial, o resto fica em `nao_publicada`. Base 0 nao tem etapa (API).
+    const modelo = base > 0 ? ETAPAS_DEMO.mercadolivre[c] : undefined;
+    if (modelo) {
       const parcialEtapa = c === "jornadaEtapaParcial";
-      const modelo = parcialEtapa
-        ? [
-            { key: "a_faturar", label: "A faturar", parte: 0.12 },
-            { key: "a_imprimir", label: "A imprimir", parte: 0.2 },
-            { key: "aguardando_coleta", label: "Aguardando coleta", parte: 0.3 },
-            { key: "nao_publicada", label: "Etapa ainda não publicada", parte: 1 },
-          ]
-        : [
-            { key: "a_faturar", label: "A faturar", parte: 0.1 },
-            { key: "a_imprimir", label: "A imprimir", parte: 0.18 },
-            { key: "em_separacao", label: "Em separação", parte: 0.15 },
-            { key: "aguardando_coleta", label: "Aguardando coleta", parte: 0.27 },
-            { key: "entregue_transportadora", label: "Entregue à transportadora", parte: 0.2 },
-            { key: "sinalizado_ml", label: "Sinalizado pelo Mercado Livre", parte: 0.04 },
-            { key: "outro", label: "Outro status da fonte", parte: 1 },
-          ];
+      const etapas = etapasQueFecham(base, modelo);
       return {
         status: 200,
         corpo: {
@@ -492,8 +546,8 @@ function jornada(canal: string, marca: string | null, c: CenarioDemo): { status:
           status: parcialEtapa ? "partial" : "ok",
           reason: parcialEtapa ? "fila_aberta: etapa_parcial" : null,
           fila_aberta: {
-            ...filaAberta("shipment", base, sobreML, []),
-            etapas: etapasQueFecham(base, modelo),
+            ...filaAberta("shipment", base, sobreML, limitacoesDaFila("mercadolivre", parcialEtapa ? "parcial" : "reais", etapas)),
+            etapas,
             etapas_fecham: true,
           },
           coorte: null,
@@ -508,7 +562,7 @@ function jornada(canal: string, marca: string | null, c: CenarioDemo): { status:
         channel: "mercadolivre",
         status: c === "parcial" && base > 3 ? "partial" : "ok",
         reason: c === "parcial" && base > 3 ? "fila_aberta: etapas_nao_fecham" : null,
-        fila_aberta: filaAberta("shipment", base, sobreML, ["substatus do shipment não publicado na fila"]),
+        fila_aberta: filaAberta("shipment", base, sobreML, limitacoesDaFila("mercadolivre", "sem")),
         coorte: null,
         limitacoes: ["o Mercado Livre não publica prazo de despacho"],
       },
@@ -517,30 +571,40 @@ function jornada(canal: string, marca: string | null, c: CenarioDemo): { status:
   const base = escala(1820);
   // R21: a coorte nula (migration ausente) nao pode apagar a fila valida.
   const semCoorte = c === "jornadaCoorteAusente";
+  // T-0029: etapa REAL da Shopee (a preparar, aguardando coleta), como a API.
+  const modelo = base > 0 ? ETAPAS_DEMO.shopee[c] : undefined;
+  const parcialEtapa = modelo !== undefined && c === "jornadaEtapaParcial";
+  const filaShopee = filaAberta(
+    "pedido",
+    base,
+    [
+      { key: "vencido", count: Math.floor(base * 0.034) },
+      { key: "vence_24h", count: Math.floor(base * 0.2) },
+      { key: "acima_48h", count: Math.floor(base * 0.08) },
+      { key: "travado", count: Math.floor(base * 0.02) },
+    ],
+    limitacoesDaFila("shopee", modelo ? (parcialEtapa ? "parcial" : "reais") : "sem"),
+  );
   return {
     status: 200,
     corpo: {
       ...comum,
       channel: "shopee",
-      status: semCoorte ? "unavailable" : (c === "parcial" && base > 3) || c === "desatualizado" ? "partial" : "ok",
+      status: semCoorte
+        ? "unavailable"
+        : parcialEtapa || (c === "parcial" && base > 3) || c === "desatualizado"
+          ? "partial"
+          : "ok",
       reason: semCoorte
         ? "coorte: table_not_migrated"
-        : c === "parcial" && base > 3
-          ? "fila_aberta: etapas_nao_fecham"
-          : c === "desatualizado"
-            ? "coorte: desatualizada"
-            : null,
-      fila_aberta: filaAberta(
-        "pedido",
-        base,
-        [
-          { key: "vencido", count: Math.floor(base * 0.034) },
-          { key: "vence_24h", count: Math.floor(base * 0.2) },
-          { key: "acima_48h", count: Math.floor(base * 0.08) },
-          { key: "travado", count: Math.floor(base * 0.02) },
-        ],
-        ["etapa interna (a preparar × envio organizado) não publicada na fila", "FBS não separado na fila aberta"],
-      ),
+        : parcialEtapa
+          ? "fila_aberta: etapa_parcial"
+          : c === "parcial" && base > 3
+            ? "fila_aberta: etapas_nao_fecham"
+            : c === "desatualizado"
+              ? "coorte: desatualizada"
+              : null,
+      fila_aberta: modelo ? { ...filaShopee, etapas: etapasQueFecham(base, modelo), etapas_fecham: true } : filaShopee,
       coorte: semCoorte
         ? null
         : coorte("deadline_date", escala(4310), [
@@ -576,6 +640,107 @@ export function respostaFicticia(url: string, cenarioPedido: CenarioDemo): { sta
   if (caminho === "/api/v1/expedicao") return { status: 200, corpo: fila(filaCanal, cenario) };
   if (caminho === "/api/v1/expedicao/trend") return { status: 200, corpo: tendencia(filaCanal, cenario) };
   if (caminho === "/api/v1/expedicao/tiktok") return { status: 200, corpo: tiktok(cenario) };
+  if (caminho === "/api/v1/expedicao/tiktok/coleta-perdida")
+    return {
+      status: 200,
+      corpo: tiktokColetaPerdida(
+        u.searchParams.get("vencimento"),
+        Number(u.searchParams.get("page") ?? "1"),
+        u.searchParams.get("brands"),
+        u.searchParams.get("status"),
+        u.searchParams.get("status_dia"),
+      ),
+    };
+  if (caminho === "/api/v1/expedicao/tiktok/abertos")
+    return {
+      status: 200,
+      corpo: tiktokAbertos(u.searchParams.get("brands"), u.searchParams.get("lista"), Number(u.searchParams.get("page") ?? "1")),
+    };
   if (caminho === "/api/v1/expedicao/shopee/ldr") return { status: 200, corpo: ldrShopee(cenario) };
   return null;
+}
+
+// EXPEDICAO-TIKTOK-ABERTOS — pedidos em aberto (formato real, numeros ficticios).
+function tiktokAbertos(marca: string | null, lista: string | null, pagina: number): unknown {
+  const base = [
+    ["kokeshi", 9087, 216, 8871, 19, 1732, 8, 1724, 2950, 3614, 2334],
+    ["apice", 3421, 64, 3357, 8, 1294, 0, 1294, 739, 1188, 1430],
+    ["lescent", 3070, 77, 2993, 5, 541, 8, 533, 1076, 1207, 698],
+    ["barbours", 3488, 156, 3332, 5, 207, 9, 198, 1305, 1680, 381],
+    ["rituaria", 444, 0, 444, 3, 2, 0, 2, 0, 358, 2],
+  ] as const;
+  const marcas = base
+    .filter((b) => !marca || b[0] === marca)
+    .map((b) => ({
+      brand: b[0], open: b[1], awaiting_shipment: b[2], awaiting_collection: b[3], on_hold: b[4],
+      overdue: b[5], overdue_shipment: b[6], overdue_collection: b[7], due_today: b[8],
+      due_next_day: b[9], on_time: b[1] - b[5] - b[8] - b[9], over_48h: b[10], oldest_paid_at: "2026-10-30T00:43:11",
+    }));
+  const chaves = ["open", "awaiting_shipment", "awaiting_collection", "on_hold", "overdue", "overdue_shipment",
+    "overdue_collection", "due_today", "due_next_day", "on_time", "over_48h"] as const;
+  const totals = Object.fromEntries(chaves.map((k) => [k, marcas.reduce((s, m) => s + m[k], 0)]));
+  // 450 pedidos ficticios por lista: 3 paginas de 200 para testar a paginacao.
+  const todos = lista
+    ? Array.from({ length: 450 }, (_, k) => {
+        const m = marcas[k % Math.max(marcas.length, 1)];
+        return {
+          brand: m?.brand ?? "kokeshi", order_id: `58${String(k).padStart(4, "0")}0412345678`, shop_name: m?.brand ?? "kokeshi",
+          stage: k % 5 === 0 ? "despacho" : "coleta", paid_at: `2026-11-0${2 + (k % 2)}T1${k % 10}:2${k % 6}:00`,
+          deadline: lista === "due_today" ? "2026-11-05" : lista === "due_next_day" ? "2026-11-06" : "2026-11-04",
+          situation: lista === "due_today" || lista === "due_next_day" ? lista : "overdue",
+          over_48h: true, hours_open: 72 - (k % 40),
+        };
+      })
+    : [];
+  const campo: Record<string, (typeof chaves)[number]> = {
+    overdue: "overdue", due_today: "due_today", due_next_day: "due_next_day", over_48h: "over_48h",
+    awaiting_shipment: "awaiting_shipment", awaiting_collection: "awaiting_collection", all: "open",
+  };
+  const tamanho = 200;
+  const ini = (Math.max(1, pagina) - 1) * tamanho;
+  const orders = todos.slice(ini, ini + tamanho);
+  return {
+    channel: "tiktokshop", availability: "available", effective_at: "2026-11-05T13:00:00+00:00",
+    today: "2026-11-05", next_business_day: "2026-11-06", cohort_days: 30, excluded_brands: ["gocase"],
+    deadline_reconstructed: true, totals, brands: marcas, list: lista, orders,
+    page: Math.max(1, pagina), page_size: tamanho, has_more: ini + tamanho < todos.length,
+    list_total: lista ? Math.min(totals[campo[lista]] ?? 0, todos.length) : 0,
+  };
+}
+
+// EXPEDICAO-TIKTOK-COLETA-PERDIDA — 430 pedidos ficticios (3 paginas).
+function tiktokColetaPerdida(
+  vencimento: string | null,
+  pagina: number,
+  marca: string | null = null,
+  status: string | null = null,
+  statusDia: string | null = null,
+): unknown {
+  const dia = vencimento ?? "2026-11-04";
+  const marcas = ["kokeshi", "apice", "barbours", "lescent"];
+  const todos = Array.from({ length: 430 }, (_, k) => ({
+    brand: marcas[k % 4], order_id: `58${String(k).padStart(4, "0")}9912345678`, shop_name: marcas[k % 4],
+    status: k % 3 === 0 ? "AWAITING_COLLECTION" : "IN_TRANSIT", paid_at: "2026-10-31T10:12:00",
+    status_on_day: k % 5 === 0 ? "AWAITING_SHIPMENT" : "AWAITING_COLLECTION",
+    ready_at: "2026-11-03T16:40:00", collected_at: k % 3 === 0 ? null : "2026-11-05T09:15:00",
+    hours_late: k % 3 === 0 ? 13 : 9.3,
+  }));
+  const daMarca = todos.filter((t) => !marca || t.brand === marca);
+  const okHoje = daMarca.filter((t) => !status || t.status === status);
+  const okDia = daMarca.filter((t) => !statusDia || t.status_on_day === statusDia);
+  const statusCounts: Record<string, number> = {};
+  for (const t of okDia) statusCounts[t.status] = (statusCounts[t.status] ?? 0) + 1;
+  const statusDiaCounts: Record<string, number> = {};
+  for (const t of okHoje) statusDiaCounts[t.status_on_day] = (statusDiaCounts[t.status_on_day] ?? 0) + 1;
+  const filtrados = okHoje.filter((t) => !statusDia || t.status_on_day === statusDia);
+  const ini = (Math.max(1, pagina) - 1) * 200;
+  return {
+    channel: "tiktokshop", availability: "available", deadline: dia, paid_from: "2026-10-30", paid_to: "2026-11-02",
+    deadline_days: ["2026-11-05", "2026-11-04", "2026-11-03", "2026-10-30", "2026-10-29"],
+    brands: marcas.filter((m) => !marca || m === marca).map((m) => ({ brand: m, missed: filtrados.filter((t) => t.brand === m).length,
+      still_waiting: filtrados.filter((t) => t.brand === m && !t.collected_at).length })),
+    all_brands: marcas, status_counts: statusCounts, status_on_day_counts: statusDiaCounts,
+    list_total: filtrados.length, still_waiting: filtrados.filter((t) => !t.collected_at).length,
+    orders: filtrados.slice(ini, ini + 200), page: Math.max(1, pagina), page_size: 200, has_more: ini + 200 < filtrados.length,
+  };
 }

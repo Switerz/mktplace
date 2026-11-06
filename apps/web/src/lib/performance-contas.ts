@@ -314,7 +314,7 @@ export function formatarInstante(iso: string | null): string | null {
 // Validacao minima do payload e fetch do servidor
 // ---------------------------------------------------------------------------
 
-function ehObjeto(v: unknown): v is Record<string, unknown> {
+export function ehObjeto(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
@@ -345,7 +345,7 @@ function problemaNoLimiar(l: unknown): string | null {
   return null;
 }
 
-function problemaNoIndicador(i: unknown): string | null {
+export function problemaNoIndicador(i: unknown): string | null {
   if (!ehObjeto(i)) return "indicador não é objeto";
   if (typeof i.codigo !== "string") return "indicador.codigo inválido";
   if (typeof i.rotulo !== "string") return "indicador.rotulo inválido";
@@ -363,7 +363,7 @@ function problemaNoIndicador(i: unknown): string | null {
   return problemaNoLimiar(i.limiar);
 }
 
-function problemaNaCobertura(c: unknown): string | null {
+export function problemaNaCobertura(c: unknown): string | null {
   if (!ehObjeto(c)) return "cobertura não é objeto";
   if (!Array.isArray(c.marcas) || !c.marcas.every((m) => typeof m === "string")) {
     return "cobertura.marcas inválida";
@@ -488,6 +488,11 @@ export function montarCanais(
  * `b2b-revenda.ts`): `NEXT_PUBLIC_API_URL`, com o mesmo fallback local.
  * `api-client.ts` nao exporta a constante, por isso ela e' repetida aqui.
  */
+// LIMITACAO: este fetch roda em server component. Com NEXT_PUBLIC_API_URL=/torre-api
+// (caminho relativo) nao resolve no servidor, e sob TORRE_AUTH_MODE=enforce a API
+// responderia 401 (sem cookie de sessao). Nao dar chave de servico ao SSR: isso
+// deixaria render anonimo ler dados. Manter a flag desligada ate a pagina buscar
+// pelo navegador (torreFetch) ou repassar o cookie de sessao.
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
 
 export const ROTA_API = "/api/v1/performance-contas";
@@ -502,31 +507,56 @@ export type ResultadoPerformanceContas =
   | { ok: false; motivo: string };
 
 /**
- * Fetch no SERVIDOR. Nunca lanca: falha de rede, status nao-2xx, JSON
- * quebrado ou forma invalida voltam como `{ ok: false }` e a tela inteira
- * mostra erro — nenhum numero.
+ * Teto da espera pela API, em ms (T-0039 D2). A busca roda no servidor antes
+ * do render: sem teto, uma API travada deixa a pagina pendurada (medido: o
+ * fetch so' desistia no timeout interno do Node, ~300 s). 15 s cobre a API
+ * lenta medida (~4 s) com folga. Vale para cabecalho E corpo da resposta.
+ */
+export const TIMEOUT_API_MS = 15_000;
+
+export const MOTIVO_TIMEOUT = "A API não respondeu a tempo.";
+
+/**
+ * Fetch no SERVIDOR. Nunca lanca: falha de rede, timeout, status nao-2xx,
+ * JSON quebrado ou forma invalida voltam como `{ ok: false }` e a tela
+ * inteira mostra erro — nenhum numero.
+ *
+ * `timeoutMs` so' existe para o teste nao esperar 15 s.
  */
 export async function carregarPerformanceContas(
   filtros: Pick<FiltrosPerformanceContas, "marca">,
   fetchImpl: typeof fetch = fetch,
   base: string = API_URL,
+  timeoutMs: number = TIMEOUT_API_MS,
 ): Promise<ResultadoPerformanceContas> {
-  let res: Response;
+  const controle = new AbortController();
+  const timer = setTimeout(() => controle.abort(), timeoutMs);
   try {
-    res = await fetchImpl(urlPerformanceContas(base, filtros), { cache: "no-store" });
-  } catch {
-    return { ok: false, motivo: "Não foi possível contatar a API." };
+    let res: Response;
+    try {
+      res = await fetchImpl(urlPerformanceContas(base, filtros), {
+        cache: "no-store",
+        signal: controle.signal,
+      });
+    } catch {
+      if (controle.signal.aborted) return { ok: false, motivo: MOTIVO_TIMEOUT };
+      return { ok: false, motivo: "Não foi possível contatar a API." };
+    }
+    if (!res.ok) {
+      return { ok: false, motivo: `A API respondeu ${res.status}.` };
+    }
+    let json: unknown;
+    try {
+      json = await res.json();
+    } catch {
+      if (controle.signal.aborted) return { ok: false, motivo: MOTIVO_TIMEOUT };
+      return { ok: false, motivo: "Resposta inválida da API (o corpo não é JSON)." };
+    }
+    const problema = problemaNoPayload(json);
+    if (problema) return { ok: false, motivo: `Resposta inválida da API (${problema}).` };
+    return { ok: true, dados: json as PerformanceContasResponse };
+  } finally {
+    // Respondeu (ou falhou) antes do teto: o timer nao fica pendurado.
+    clearTimeout(timer);
   }
-  if (!res.ok) {
-    return { ok: false, motivo: `A API respondeu ${res.status}.` };
-  }
-  let json: unknown;
-  try {
-    json = await res.json();
-  } catch {
-    return { ok: false, motivo: "Resposta inválida da API (o corpo não é JSON)." };
-  }
-  const problema = problemaNoPayload(json);
-  if (problema) return { ok: false, motivo: `Resposta inválida da API (${problema}).` };
-  return { ok: true, dados: json as PerformanceContasResponse };
 }

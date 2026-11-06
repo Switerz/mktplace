@@ -150,8 +150,8 @@ test("tendencia e' so' o mini grafico com ponto final, sem texto visivel", () =>
   // o leitor de tela ainda ouve a direcao; o mouse ve' a conta no title
   assert.match(card, /<span className="sr-only">Tendência: \{DIRECAO_FALADA\[t\.direcao\]\}\.<\/span>/);
   assert.match(card, /title=\{detalhe\}/);
-  // ponto final do grafico
-  assert.match(card, /rounded-\[1px\] bg-current/);
+  // ponto final do grafico (UX-VIDRO-3: redondo, com anel da superficie)
+  assert.match(card, /rounded-full bg-current ring-2 ring-surface/);
 });
 
 test("DM Sans no corpo e Inter so' nas tabelas (DM Sans nao tem tnum)", () => {

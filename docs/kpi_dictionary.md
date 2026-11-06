@@ -442,7 +442,11 @@ unidades.
 ### Limitacoes declaradas no payload
 
 - Cobertura PARCIAL: quatro contas; **Kokeshi fora da API**.
-- Carga **manual**, sem DAG nem agenda.
+- Atualizacao **diaria** (T-0041, 2026-11-03): o step `shopee_fbs_daily` da DAG
+  `marketplace_tower_daily_chain` publica a fato as **10:15 BRT**, dias fechados
+  ate' D-1 (`load_mode = scheduled_daily`, `no_automation = false`). E' o REGIME
+  configurado, nao a origem de cada lote (que nao e' registrada). Limiares de
+  frescor seguem em **48 h** (inalterados).
 - `closed_day`: D0 nao materializado, projetado nem fabricado.
 - Serie a partir de **2026-01-01**.
 - Handling vai ate' a **coleta**; sem entrega e sem devolucao.

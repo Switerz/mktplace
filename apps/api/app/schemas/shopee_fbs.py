@@ -214,8 +214,8 @@ class Freshness(BaseModel):
     #: Dias entre `source_max_date` e o ultimo dia fechado. > 0 = a serie esta
     #: atrasada em relacao ao que ja' poderia estar publicado.
     closed_days_behind: Optional[int] = None
-    load_mode: Literal["manual_snapshot"] = "manual_snapshot"
-    no_automation: bool = True
+    load_mode: Literal["manual_snapshot", "scheduled_daily"] = "scheduled_daily"
+    no_automation: bool = False
 
 
 class Meta(BaseModel):

@@ -530,7 +530,7 @@ test("PF1 escopo: apiFetch nao foi alterado", () => {
   assert.ok(
     CLIENT_SRC.includes(`async function apiFetch<T>(path: string): Promise<T | null> {
   try {
-    const res = await fetch(\`\${API_URL}\${path}\`);
+    const res = await torreFetch(\`\${API_URL}\${path}\`);
     if (!res.ok) return null;`),
     "apiFetch deve continuar capturando todo erro e devolvendo null",
   );

@@ -146,11 +146,18 @@ export default function LdrShopeePanel({ ldr, marca }: { ldr: EstadoLdr; marca: 
   );
 }
 
+const AVISOS_DE_FILA = new Set(["pendentes_vencidos", "em_risco"]);
+
 function Conteudo({ r }: { r: RespostaLdrShopee }) {
   const l = r.ldr!;
   const motivo = motivoDaTaxaAusente(r);
   const exclusoes = montarExclusoes(r);
-  const alertas = r.alerts.filter((a) => a.severity !== "info");
+  // Os avisos de fila ("passaram do prazo", "vencem hoje ou amanha") ficam de
+  // fora: pedido do usuario em 04/11/2026, poluiam o painel. Os de qualidade
+  // do dado (fonte vencida, cobertura) continuam.
+  const alertas = r.alerts.filter(
+    (a) => a.severity !== "info" && !AVISOS_DE_FILA.has(a.code),
+  );
   // A API ja' manda o alerta de cobertura com o texto pronto; repeti-lo aqui
   // dizia a mesma coisa duas vezes. A frase local so' cobre resposta sem ele.
   const cobertura = alertas.some((a) => a.code.startsWith("cobertura_"))

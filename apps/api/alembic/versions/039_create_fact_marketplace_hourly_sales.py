@@ -19,10 +19,10 @@ e' zero, e nao atraso.
 
 APLICACAO
 ---------
-Manual no Neon (`alembic upgrade 036`), e SO' DEPOIS que o Airflow estiver com
+Manual no Neon (`alembic upgrade 039`), e SO' DEPOIS que o Airflow estiver com
 a imagem cujo pin de `mktplace-pipelines` ja' contem esta migration: o PMA
 recusa rodar quando a cabeca do Neon nao existe no grafo do pin. Reversivel por
-`alembic downgrade 035`, que derruba so' estas duas tabelas. Nao insere dados.
+`alembic downgrade 038`, que derruba so' estas duas tabelas. Nao insere dados.
 
 PERMISSAO
 ---------
@@ -33,8 +33,8 @@ perfil nao e' versionado (ver `docs/vendas_por_hora.md`).
 """
 from alembic import op
 
-revision = "036"
-down_revision = "035"
+revision = "039"
+down_revision = "038"
 branch_labels = None
 depends_on = None
 

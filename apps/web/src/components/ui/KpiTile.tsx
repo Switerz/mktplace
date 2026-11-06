@@ -38,7 +38,7 @@ export default function KpiTile({
   return (
     <div
       title={contexto}
-      className={`flex min-w-0 flex-col justify-between rounded-lg border px-3.5 py-3 ${TOM_SUPERFICIE[tom]}`}
+      className={`flex min-w-0 flex-col justify-between rounded-xl border px-3.5 py-3 ${TOM_SUPERFICIE[tom]}`}
     >
       <div className="flex items-start justify-between gap-2">
         <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">

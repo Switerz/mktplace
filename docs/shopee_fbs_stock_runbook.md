@@ -134,7 +134,8 @@ não volta. A linha de auditoria do run fica como estava.
 
 ## Flags
 
-Já ligadas em produção (medido em 21/10/2026): `SHOPEE_FBS_STOCK_ENABLED` no Render
-(`/api/v1/performance/shopee-fbs-estoque` responde `status: ok`) e
-`NEXT_PUBLIC_SHOPEE_FBS_STOCK_ENABLED` na Vercel (`/estoque-full` renderiza). Desligar a
-tela: a flag da Vercel é de build, exige rebuild.
+Só a do backend: `SHOPEE_FBS_STOCK_ENABLED` no Render (ligada; em 04/11/2026
+`/api/v1/performance/shopee-fbs-estoque` responde `status: ok`). Desde 04/11/2026 a tela
+`/estoque-full` não tem flag de web: a antiga `NEXT_PUBLIC_SHOPEE_FBS_STOCK_ENABLED` sumia
+com a aba quando faltava num projeto novo da Vercel. Desligar a tela: desligue a flag do
+Render, e ela passa a mostrar "indisponível" com o motivo.

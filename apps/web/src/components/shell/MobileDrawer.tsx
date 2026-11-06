@@ -109,7 +109,7 @@ function MobileDrawerInner({ open, onClose, openerRef }: MobileDrawerProps) {
         aria-modal="true"
         aria-label="Navegação principal"
         aria-hidden={!open}
-        className="absolute inset-y-0 left-0 flex w-[min(82vw,300px)] flex-col overflow-y-auto border-r border-shell-line bg-shell shadow-xl"
+        className="absolute inset-y-0 left-0 flex w-[min(82vw,300px)] flex-col overflow-y-auto border-r border-shell-line bg-shell shadow-xl tc-shell-fundo"
       >
         <div className="flex items-center justify-between border-b border-shell-line px-4 py-1">
           <span className="text-sm font-semibold text-shell-ink">Navegação</span>

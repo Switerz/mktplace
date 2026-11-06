@@ -29,10 +29,10 @@ import InfoDica from "@/components/ui/InfoDica";
 import { fetchShopeeFbs, ShopeeFbsError } from "@/lib/api-client";
 import { MOTIVO_DESLIGADA } from "@/lib/shopee-fbs-flag";
 import {
-  AVISO_CARGA_MANUAL,
   AVISO_COBERTURA,
   AVISO_DIVERGENCIA,
   AVISO_GMV_BRUTO,
+  AVISO_REGIME_CARGA,
   CLASS_LABEL,
   FRESHNESS_LABEL,
   PERIOD_PRESETS,
@@ -239,8 +239,8 @@ function FullShopeeInner() {
                   ? "bg-emerald-50 text-emerald-800 border-emerald-200"
                   : "bg-amber-50 text-amber-900 border-amber-300")
               }>
-                {FRESHNESS_LABEL[frescor.freshness_status]} · carga manual
-                <InfoDica texto={AVISO_CARGA_MANUAL} />
+                {FRESHNESS_LABEL[frescor.freshness_status]} · atualização diária
+                <InfoDica texto={AVISO_REGIME_CARGA} />
               </span>
               <span>Fonte até <strong>{frescor.source_max_date ?? SEM_DADO}</strong></span>
             </>

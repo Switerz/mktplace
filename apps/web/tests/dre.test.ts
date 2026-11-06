@@ -441,7 +441,7 @@ test("a pagina usa a MESMA serializacao para a URL e para o fetch", () => {
   assert.match(cliente, /const q = dreUrlQuery\(\{ \.\.\.filtros, \.\.\.parcial \}\);/);
   assert.match(cliente, /fetchDre\(parseDreFiltros\(new URLSearchParams\(chave\)\)/);
   const api = semComentarios(fonte("src/lib/dre-api.ts"));
-  assert.match(api, /fetch\(dreApiUrl\(API_URL, filtros\)/);
+  assert.match(api, /torreFetch\(dreApiUrl\(API_URL, filtros\)/);
   // Sem modo demonstracao: nenhum dado de exemplo pode virar DRE.
   assert.doesNotMatch(api, /mock/i);
 });
@@ -614,3 +614,59 @@ test("/dre esta na navegacao, com titulo proprio, e e' rota tematizada", () => {
   assert.ok(rotaTematizada("/dre"));
   assert.match(fonte("src/components/shell/NavList.tsx"), /"\/dre": Calculator/);
 });
+
+// ===========================================================================
+// T-0055 C3 — cobertura do CMV e CMV % sobre a receita com custo
+// ===========================================================================
+{
+  const lib = await import("../src/lib/dre.ts");
+  const fxc = await import("./dre-fixtures.ts");
+  const celulaCmv = (cmv: Parameters<typeof fxc.comp>[2] & { status?: "disponivel" | "parcial" }, valor: number | null = 30_000) =>
+    fxc.celula({
+      classificacao: "PARCIAL",
+      comps: {
+        receita: fxc.comp(100_000, "disponivel", { somavel: false }),
+        taxas: fxc.comp(15_000, "disponivel"),
+        ads: fxc.comp(4_000, "disponivel"),
+        frete: fxc.comp(10_000, "disponivel"),
+        cmv: fxc.comp(valor, cmv.status ?? "disponivel", cmv),
+      },
+      margem: 41_000,
+      usados: ["taxas", "ads", "frete", "cmv"],
+      faltam: ["devolucoes", "impostos"],
+    });
+
+  test("C3: resumo traz cobertura com 2 casas e CMV % sobre receita com custo", () => {
+    const r = lib.resumoCoberturaCmv(celulaCmv({ cobertura: 0.9988, cmv_pct_receita_coberta: 24.02 }));
+    assert.ok(r);
+    assert.equal(r.cobertura, "99,88%");
+    assert.equal(r.pctCoberto, "24,0%");
+    assert.equal(r.parcial, false);
+    assert.equal(r.texto, "CMV 24,0% s/ receita com custo · cobertura 99,88%");
+  });
+
+  test("C3: CMV parcial por cobertura e' sinalizado", () => {
+    const r = lib.resumoCoberturaCmv(celulaCmv({ status: "parcial", cobertura: 0.9467, cmv_pct_receita_coberta: 25.06 }));
+    assert.equal(r?.parcial, true);
+    assert.match(r?.texto ?? "", /cobertura 94,67%/);
+  });
+
+  test("C3: cobertura nula nao vira 100% nem 0%", () => {
+    const r = lib.resumoCoberturaCmv(celulaCmv({ cobertura: null, cmv_pct_receita_coberta: null }));
+    assert.equal(r?.cobertura, null);
+    assert.equal(r?.pctCoberto, null);
+    assert.equal(r?.texto, "CMV % s/ receita com custo indisponível · cobertura não publicada");
+  });
+
+  test("C3: API anterior (sem os campos) ou CMV sem valor nao gera resumo", () => {
+    assert.equal(lib.resumoCoberturaCmv(celulaCmv({})), null);
+    assert.equal(lib.resumoCoberturaCmv(celulaCmv({ cobertura: 0.99 }, null)), null);
+  });
+
+  test("C3: texto de ajuda tem formula, fonte e o outro denominador", () => {
+    assert.match(lib.FORMULA_CMV_COBERTO, /CMV ÷ receita com custo/);
+    assert.match(lib.FORMULA_CMV_COBERTO, /NF fiscal, base de item/);
+    assert.match(lib.FORMULA_CMV_COBERTO, /cobertura = receita com custo \/ receita fiscal/);
+    assert.match(lib.FORMULA_CMV_COBERTO, /CMV ÷ receita da DRE/);
+  });
+}

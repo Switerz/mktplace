@@ -58,9 +58,15 @@ DDL_PATH = REPO / "db" / "sql" / "marts" / "pma_listing_price_serving_ddl.sql"
 #: alimentada pelo export do Seller Centre), encadeada SOBRE a 033.
 #: Avancado para 035 pelo atraso de 7 dias da Expedicao (quatro colunas
 #: NULLABLE em marts.expedicao_refresh_run), encadeada SOBRE a 034.
-#: Avancado para 036 pelo VENDAS-POR-HORA-1 (duas tabelas novas, nenhuma
-#: alterada), encadeada SOBRE a 035.
-HEAD_ESPERADO = "036"
+#: Avancado para 036 pelo CX-KOKESHI-BOT (Saude da Conta, chat e devolucoes
+#: da Kokeshi gravados pelo bot no Neon), encadeada SOBRE a 035.
+#: Avancado para 037 pela T-0059 (CHECK de componentes da
+#: marts.fact_dre_insumo_mensal aceita `shopee_taxa_escrow`), encadeada SOBRE a 036.
+#: Avancado para 038 pela T-0018 (anuncio-ancora do estoque Full ML), encadeada
+#: SOBRE a 037 (nasceu 034 na branch antiga e foi renumerada para 037 e 038).
+#: Avancado para 039 pelo VENDAS-POR-HORA-1 (duas tabelas novas, nenhuma
+#: alterada), encadeada SOBRE a 038 (nasceu 036 na branch antiga).
+HEAD_ESPERADO = "039"
 
 #: Mapa OFICIAL de propriedade das revisoes. Existe para que uma frente nao
 #: ocupe o numero de outra: 016 e' do Full, 017 e' do PMA e a 018 esta

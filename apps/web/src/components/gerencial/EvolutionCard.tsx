@@ -18,7 +18,7 @@
 import dynamic from "next/dynamic";
 import InfoDica from "@/components/ui/InfoDica";
 import type { Marketplace } from "@/lib/mock-data";
-import type { MergedSeries, Reconciliation } from "@/lib/gerencial/trend-series";
+import type { MergedBucket, MergedSeries, Reconciliation } from "@/lib/gerencial/trend-series";
 import type { TrendMetric } from "@/lib/gerencial/request-key";
 import type { TrendGranularity, TrendGranularityRequest } from "@/lib/api-client";
 import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
@@ -75,6 +75,9 @@ interface Props {
   compareActive: boolean;
   loading: boolean;
   onSelectBucket: (date: string) => void;
+  /** GERENCIAL-D0: o dia em andamento, desenhado DEPOIS da serie do periodo
+   * (listrado, sem par anterior). Nao entra em nenhum total. */
+  bucketHoje?: MergedBucket | null;
   onOpenChannelSeries: (channel: Marketplace) => void;
   highlightedChannel: Marketplace | null;
 }
@@ -104,9 +107,16 @@ export default function EvolutionCard({
   compareActive,
   loading,
   onSelectBucket,
+  bucketHoje = null,
   onOpenChannelSeries,
   highlightedChannel,
 }: Props) {
+  // Hoje so' faz sentido no grao diario: numa semana ou num mes ele ja' estaria
+  // dentro do ultimo bucket, e somar ali mudaria o total do periodo.
+  const buckets =
+    bucketHoje && merged.granularity === "day" && !merged.granularityIssue && merged.buckets.length > 0
+      ? [...merged.buckets, bucketHoje]
+      : merged.buckets;
   const showTotal = merged.everyBucketComplete && merged.availableChannels.length > 1;
   const mismatch = reconciliation.status === "mismatch";
   const hasSomething = merged.availableChannels.length > 0 && merged.buckets.length > 0;
@@ -285,7 +295,7 @@ export default function EvolutionCard({
           </div>
         ) : hasSomething ? (
           <EvolutionChart
-            buckets={merged.buckets}
+            buckets={buckets}
             channels={merged.availableChannels}
             metric={metric}
             showTotal={showTotal}

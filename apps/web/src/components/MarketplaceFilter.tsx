@@ -2,8 +2,10 @@
 
 import type { Marketplace } from "@/lib/mock-data";
 import {
-  DEFAULT_MARKETPLACE_SELECTION,
+  ALL_MARKETPLACE_SELECTION,
+  CONSOLIDADO_SELECTION,
   isAllSelected,
+  isConsolidadoSelected,
   isMarketplaceSelected,
   toggleMarketplace,
   type MarketplaceSelection,
@@ -21,7 +23,7 @@ interface Props {
 }
 
 /**
- * `min-h-11 min-w-11` fecha o contrato de 44x44px do V3 — os quatro botoes
+ * `min-h-11 min-w-11` fecha o contrato de 44x44px do V3 — os botoes
  * mediam 36px de altura, e este filtro aparece em sete rotas.
  *
  * `shrink-0` e' obrigatorio junto: sem ele o botao encolhe dentro do flex do
@@ -42,6 +44,7 @@ const INACTIVE_BTN = "text-ink-muted hover:bg-surface/70 hover:text-ink";
 
 export default function MarketplaceFilter({ value, onChange }: Props) {
   const allActive = isAllSelected(value);
+  const consolidadoActive = isConsolidadoSelected(value);
 
   return (
     <div
@@ -52,10 +55,26 @@ export default function MarketplaceFilter({ value, onChange }: Props) {
       <button
         type="button"
         aria-pressed={allActive}
-        onClick={() => onChange([...DEFAULT_MARKETPLACE_SELECTION])}
+        onClick={() => onChange([...ALL_MARKETPLACE_SELECTION])}
         className={`${BASE_BTN} ${allActive ? ACTIVE_BTN : INACTIVE_BTN}`}
       >
         Todos
+      </button>
+      {/* Consolidado = ML + Shopee, sem TikTok. E' o padrao das telas; os dois
+          pontos repetem a cor de identidade dos canais que ele soma. */}
+      <button
+        type="button"
+        aria-pressed={consolidadoActive}
+        title="Mercado Livre + Shopee (sem TikTok Shop)"
+        onClick={() => onChange([...CONSOLIDADO_SELECTION])}
+        className={`${BASE_BTN} gap-1.5 ${consolidadoActive ? ACTIVE_BTN : INACTIVE_BTN}`}
+      >
+        <span aria-hidden="true" className="flex shrink-0 -space-x-0.5">
+          <span className="h-2 w-2 rounded-full bg-canal-ml ring-1 ring-surface" />
+          <span className="h-2 w-2 rounded-full bg-canal-shopee ring-1 ring-surface" />
+        </span>
+        Consolidado
+        <span className="sr-only"> (Mercado Livre + Shopee)</span>
       </button>
       {CHANNEL_OPTIONS.map((opt) => {
         const active = isMarketplaceSelected(value, opt.value);

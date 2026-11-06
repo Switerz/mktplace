@@ -65,7 +65,7 @@ export interface Freshness {
   source_age_hours: number | null;
   snapshot_age_hours: number | null;
   closed_days_behind: number | null;
-  load_mode: "manual_snapshot";
+  load_mode: "manual_snapshot" | "scheduled_daily";
   no_automation: boolean;
 }
 
@@ -352,9 +352,11 @@ export function handlingPoucaCobertura(h: HandlingStat | null | undefined): bool
 // Avisos permanentes — verdades da fonte, nao estado da requisicao
 // ---------------------------------------------------------------------------
 
-export const AVISO_CARGA_MANUAL =
-  "A carga ainda e manual (manual_snapshot): nao existe DAG nem agenda, e o " +
-  "dado so avanca quando alguem executa o sync. Esta tela nao e tempo real.";
+// REGIME, nao origem: diz a rotina configurada, nunca de onde veio cada lote.
+export const AVISO_REGIME_CARGA =
+  "Atualização diária: a rotina da Torre publica os pedidos às 10:15 (BRT), " +
+  "com dias fechados até ontem. Se o último dia publicado for anterior a " +
+  "ontem, a publicação do dia ainda não ocorreu. Esta tela não é tempo real.";
 
 export const AVISO_COBERTURA =
   "Cobertura PARCIAL da Shopee. A esteira de API cobre quatro contas; " +

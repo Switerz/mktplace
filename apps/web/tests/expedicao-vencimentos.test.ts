@@ -329,7 +329,10 @@ test("atraso 7 dias: % so' com o calculo publicado e base positiva", async () =>
   assert.equal(percentualAtraso7d(null, 1000), null);
   assert.equal(percentualAtraso7d(3, null), null);
   assert.equal(percentualAtraso7d(0, 0), null, "base zero: sem %");
-  assert.match(CLIENTE, /pctVencidos: temPrazo \? percentualAtraso7d\(a\.late_7d_count, a\.due_7d_count\) : null/);
+  // EXPEDICAO-ABA-7D: na aba "Agora" o % dos vencidos e' a fatia da fila; o
+  // destaque usa atrasados ÷ pedidos do Gerencial (7 dias).
+  assert.match(CLIENTE, /pctVencidos: temPrazo \? percentualDaFila\(a\.overdue_count, a\.backlog_count\) : null/);
+  assert.match(CLIENTE, /percentualAtraso7d\(recorte\.totais\?\.late_7d_count, recorte\.totais\?\.due_7d_count\)/);
   assert.match(CLIENTE, /taxaAtraso7d=\{taxaAtraso7d\}/);
 });
 
@@ -434,7 +437,9 @@ test("balao: nome em negrito, frase em tamanho de leitura e ressalva separada", 
 test("ⓘ da metrica: nome no balao, mas o leitor de tela le' so' definicao + ressalva", () => {
   const FONTE = fonte("src/components/expedicao/AjudaMetrica.tsx");
   assert.match(FONTE, /titulo=\{def\.nome\}/);
-  assert.match(FONTE, /nota=\{def\.limitacoes\}/);
+  // EXPEDICAO-SEM-TEXTAO: a nota e' a ressalva do catalogo + as da resposta.
+  assert.match(FONTE, /const nota = \[def\.limitacoes, \.\.\.extras/);
+  assert.match(FONTE, /nota=\{nota\}/);
   const def = definicaoDe("shopee.over48h");
   const html = renderToStaticMarkup(h(AjudaMetrica, { chave: "shopee.over48h" }));
   assert.match(html, new RegExp(`aria-label="${def.definicao} ${def.limitacoes}"`));
@@ -449,4 +454,89 @@ test("textos objetivos: as classificacoes do Risco atual cabem numa leitura", ()
     assert.ok(d.definicao.length <= 110, `${c}.definicao: ${d.definicao.length}`);
     assert.ok(d.limitacoes.length <= 90, `${c}.limitacoes: ${d.limitacoes.length}`);
   }
+});
+
+test("tabela por marca: zero vencidos agora ainda mostra a taxa de 7 dias", () => {
+  // EXPEDICAO-ATRASO-7D (03/11/2026): "todos os casos devem ter %".
+  const html = renderToStaticMarkup(
+    h(EvolucaoPorMarca, {
+      resposta: null,
+      fila: [{
+        conta: "barbours", titulo: "BARBOURS", apelido: null, backlog: 302, vencidos: 0, acima48h: 32,
+        travados: 49, pctTravados: "16,2%", pctVencidos: "0,9%", barra: null,
+      }],
+    }),
+  );
+  assert.match(html, /0,9%/);
+});
+
+
+test("aba Ultimos 7 dias: % de cada medida sobre a base do LDR, nao sobre os pedidos", async () => {
+  // EXPEDICAO-ABA-7D (03/11/2026); base do LDR desde 04/11/2026.
+  const { default: TabelaSeteDias } = await import("../src/components/expedicao/TabelaSeteDias.tsx");
+  const html = renderToStaticMarkup(
+    h(TabelaSeteDias, {
+      linhas: [
+        { conta: "apice", titulo: "ÁPICE", pedidos: 3205, baseLdr: 1187, vencidos: 18, acima48h: 30, travados: 60 },
+        { conta: "x", titulo: "X", pedidos: null, baseLdr: null, vencidos: 2, acima48h: null, travados: null },
+      ],
+      total: { conta: "total", titulo: "Total do canal", pedidos: 3205, baseLdr: 1187, vencidos: 18, acima48h: 30, travados: 60 },
+      janela: "27/10 a 02/11",
+      comTravados: true,
+    }),
+  );
+  assert.match(html, /Pedidos feitos de 27\/10 a 02\/11/);
+  assert.match(html, /3\.205/);
+  assert.match(html, /1\.187/);
+  assert.match(html, /Prazo vencido/);
+  assert.match(html, /1,5%/, "18 de 1.187, o mesmo do LDR");
+  assert.doesNotMatch(html, /0,6%/, "18 de 3.205 nao aparece mais");
+  assert.match(html, /2,5%/, "30 de 1.187");
+  assert.doesNotMatch(html, /Perto de vencer/i);
+  assert.match(html, /Total do canal/);
+  const semTravados = renderToStaticMarkup(
+    h(TabelaSeteDias, { linhas: [], total: null, janela: null, comTravados: false }),
+  );
+  assert.match(semTravados, /Travados não é medido neste canal/);
+  assert.match(CLIENTE, /\{ valor: "7d", texto: "Últimos 7 dias" \}/);
+});
+
+test("serie parcial ignora a conta do export (bot a cada 2 h)", async () => {
+  const { estadoDaTendencia } = await import("../src/lib/expedicao-contract.ts");
+  const serie = (conta: string, horas: string[]) => ({
+    shopAccount: conta, brand: conta, pontos: horas.map((hora) => ({ hora, backlog: 1, over48h: 0, stalled: 0 })),
+  });
+  const horas = ["10", "11", "12", "13"];
+  const series = [serie("a", horas), serie("b", horas), serie("kokeshi", ["10", "12"])];
+  assert.equal(estadoDaTendencia(false, false, series, 3), "parcial");
+  assert.equal(estadoDaTendencia(false, false, series, 3, new Set(["kokeshi"])), "ok");
+  const faltaRegular = [serie("a", horas), serie("b", ["10"]), serie("kokeshi", ["10"])];
+  assert.equal(estadoDaTendencia(false, false, faltaRegular, 3, new Set(["kokeshi"])), "parcial");
+});
+
+// EXPEDICAO-PERTO-DE-VENCER-FILTRO — filtro rapido "vence hoje / amanha" no popup.
+test("perto de vencer: filtro por dia do prazo usa o dia de Brasilia da fotografia", async () => {
+  const { filtrarPorVencimento, diaBrtDe } = await import("../src/lib/expedicao-travados.ts");
+  // 23:59 BRT = 02:59Z do dia seguinte: o dia tem de ser o de Brasilia.
+  const linhas = [
+    { id: "a", dispatch_deadline: "2026-11-06T02:59:00Z" },
+    { id: "b", dispatch_deadline: "2026-11-07T02:59:00Z" },
+    { id: "c", dispatch_deadline: null },
+  ];
+  const hoje = diaBrtDe("2026-11-05T15:00:00Z");
+  assert.equal(hoje, "2026-11-05");
+  assert.deepEqual(filtrarPorVencimento(linhas, "hoje", hoje, "2026-11-06").map((l) => l.id), ["a"]);
+  assert.deepEqual(filtrarPorVencimento(linhas, "proximo", hoje, "2026-11-06").map((l) => l.id), ["b"]);
+  assert.equal(filtrarPorVencimento(linhas, "todos", hoje, null).length, 3);
+  // Sem proximo dia publicado, o recorte e' vazio — nunca a lista inteira.
+  assert.deepEqual(filtrarPorVencimento(linhas, "proximo", hoje, null), []);
+});
+
+test("popup perto de vencer: filtro rapido so' nessa lista, recortando etapa, tabela e CSV", () => {
+  const POPUP = fonte("src/components/expedicao/TravadosDialog.tsx");
+  assert.match(POPUP, /lista === "perto_de_vencer"/);
+  assert.match(POPUP, /Vence hoje/);
+  assert.match(POPUP, /travadosPorEtapa\(linhas\)/);
+  assert.match(POPUP, /csvDaLista\(linhas,/);
+  assert.match(POPUP, /\{linhas\.map\(/);
 });

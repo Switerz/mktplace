@@ -34,7 +34,7 @@ permanentemente `fail`/`high`. Ver a secao propria mais abaixo.
 | MCP | nao iniciado |
 | ML / TikTok / calendario | fora deste gate |
 | Airflow | **ATIVO desde 21/10/2026** — DAG `marketplace_tower_expedicao_refresh`, a cada 2 h, tres canais (a API ainda nao reflete: ver pendencia do modo de publicacao) |
-| Alerta de vencidos da Shopee no Slack | **implementado** (EXPEDICAO-ALERTA-VENCIDOS-1), falta o agendamento no Airflow — ver a secao propria |
+| Alerta de vencidos da Shopee no Slack | **implementado** (EXPEDICAO-ALERTA-VENCIDOS-1): rota na API + gatilho no GoDeploy a cada 15 min, sem Airflow — ver a secao propria |
 
 A `018` e' a proxima revisao linear depois da `017` (PMA). Cadeia: `001 -> ... ->
 016 -> 017 -> 018`, raiz unica, head unico.
@@ -1606,7 +1606,11 @@ consultar o banco.
 - Etapas da coorte por canal: TikTok `fora_amostra`, `cancelado_antes`,
   `aguardando`, `concluido`; Shopee `fora_fbs`, `cancelado_antes`,
   `enviado_sem_registro`, `aguardando`, `concluido`. A fila aberta tem uma
-  etapa só (`aguardando_expedicao`) até a etapa interna ser publicada.
+  etapa só (`aguardando_expedicao`) até a etapa interna ser publicada (coluna
+  `etapa` da migration **033**, T-0015); depois, uma entrada por etapa real
+  (`a_faturar` … `outro`, ordem de `ETAPAS_FILA`) e, no lote misto,
+  `nao_publicada` com `status: partial` e `reason: "fila_aberta: etapa_parcial"`.
+  Coluna ausente e lote todo `nao_publicada` são indistinguíveis no payload.
 
 ### Ausência ≠ zero
 
@@ -1618,6 +1622,26 @@ consultar o banco.
 - Na tela: 404, erro de rede e `disabled` → "Jornada indisponível" discreto
   (a rota ainda não está em produção); 5xx ou payload fora do contrato →
   erro com "Tentar novamente".
+
+### Modo compacto (fila Shopee/ML) — regra por estado (T-0029)
+
+Na visão da fila (Shopee e Mercado Livre), `JornadaPedidos compacta` mostra só
+o que o "Risco atual" não diz: **nunca** as sobreposições (vencidos, travados
+etc.), e sem etapa real **nenhum** número da fila (base, barra, % ou
+"Aguardando expedição", que repetiriam o Risco atual). A seção não some calada.
+O TikTok usa o modo completo e não muda.
+
+| Estado | Mostra |
+|---|---|
+| etapa real (inclusive UMA, = base) | painel "Pedidos aguardando expedição" com as etapas (`n · x%`) e as `limitacoes`, sem sobreposições |
+| parcial (`etapa_parcial`) | o mesmo painel com a linha "Etapa ainda não publicada" e o motivo traduzido **uma vez** (aviso "Parcial" do topo) |
+| sem etapa real, base > 0 (coluna ausente ou tudo `nao_publicada`) | linha discreta `role="status"`, sem número: "Etapas da fila ainda não publicadas neste canal." |
+| base 0 | "Nenhum pedido nesta leitura." (vazio prevalece sobre "não publicadas") |
+| `fila_aberta: null` com motivo | "Fila por etapa indisponível agora: <motivo traduzido>." — nunca zero |
+| coorte presente (Shopee com LDR) | bloco da coorte, ao lado do painel de etapas (`lg:grid-cols-2`) ou abaixo da linha |
+| coorte ausente / ML | sem bloco de coorte |
+| carregando / erro / indisponível (404, rede, `disabled`) / fora do ar | os mesmos estados do modo completo (`EstadosDaJornada`): erro com "Tentar novamente"; indisponível discreto, sem alerta |
+| marca pedida e não aplicada | aviso `exp-jornada-marca-nao-aplicada` |
 
 ### Limitações por canal
 
@@ -1631,45 +1655,99 @@ consultar o banco.
 
 ## Alerta de vencidos da Shopee no Slack (EXPEDICAO-ALERTA-VENCIDOS-1, 03/11/2026)
 
-`python -m pipelines.expedicao.alerta_vencidos --enviar` le a fila servida no
-Neon (read-only) e manda, por DM do bot "Torre" (app do Slack em
-`infra/slack/torre-bot`), um aviso quando a razao
-`overdue_count / backlog_count` da **Shopee** passa de **3%** — a mesma razao
-do "% vencidos" da tabela por marca, sobre o resumo por conta do lote servido.
-A mensagem traz o %, "N de M", o instante da fotografia, as marcas acima de 3%
-e o link da aba.
+A API avisa, por DM do bot "Torre" (app do Slack em `infra/slack/torre-bot`),
+quando a razao `overdue_count / backlog_count` da **Shopee** passa de **3%** —
+a mesma razao do "% vencidos" da tabela por marca, sobre o resumo por conta do
+lote servido. A mensagem traz o %, "N de M", o instante da fotografia, as
+marcas acima de 3% e o link da aba.
 
 Substitui o alerta de travados (EXPEDICAO-ALERTA-TRAVADOS-1, 29/10/2026, nunca
 agendado): os travados ficaram acima de 3% em todas as leituras de 21 a
 29/10/2026 e o alerta viraria ruido. **So' a Shopee**: o Mercado Livre nao
 publica prazo de despacho (`vencido` = `null`), entao precisa de regra propria.
 
+### Como roda (sem Airflow)
+
+```
+GoDeploy, app torre-alerta-gatilho: cron */15 * * * * (UTC)
+  -> POST /cron/alerta-vencidos   (confere a assinatura X-Godeploy-Cron)
+  -> POST https://mktplace-api.onrender.com/api/v1/alertas/expedicao-vencidos
+       header X-Alerta-Token
+  -> app/services/alerta_vencidos.py (regra) + app/services/slack_dm.py (DM)
+```
+
+O agendamento ficou fora do Airflow de proposito: a DAG vive em outro
+repositorio (`goca-se/airflow`), e o alerta nao precisa de nada da publicacao
+alem do que ja' esta' no Neon. A regra era um CLI em `pipelines/` e mudou para
+`apps/api` porque a API do Render sobe so' `apps/api`. O gatilho
+(`infra/godeploy/torre-alerta-gatilho`) nao tem regra nenhuma: so' repassa.
+
+### Regra
+
 - **Quando avisa:** ao passar de 3% ("entrou"); enquanto continua acima, um
   lembrete quando o relogio de Brasilia atravessa 9h, 13h ou 17h desde a
-  fotografia anterior; UM aviso quando volta para 3% ou menos. Sem estado
-  gravado: a fotografia anterior vem do proprio resumo.
+  fotografia anterior; UM aviso quando volta para 3% ou menos. A fotografia
+  anterior vem do proprio resumo.
 - **Volume medido** (regra aplicada ao resumo de 25/10 a 03/11/2026): 15
   mensagens em 9 dias, em 4 episodios (25, 28, 29 e 30/10). Os episodios
   comecam a meia-noite, quando os pedidos com prazo 23:59 viram vencidos.
-- **Fotografia velha nao avisa:** mais velha que `--max-idade-min` (padrao 45),
-  o canal nao e' avaliado. Sem isso, uma publicacao que falhou repetiria o
-  aviso da hora anterior.
+- **Fotografia velha nao avisa:** mais velha que **60 min**
+  (`MAX_IDADE_MIN`), o canal nao e' avaliado. Era 45 quando o alerta rodaria
+  logo depois da publicacao; com o cron a cada 15 min, a idade maxima precisa
+  ser >= atraso da publicacao + cadencia, senao uma fotografia passaria
+  inteira entre dois disparos.
 - **Shopee inclui FBS** na base, como a tabela por marca.
-- **Sem `--enviar`**, so' imprime o que enviaria. Exit `1` em falha de leitura,
-  token ou destinatarios ausentes, ou Slack recusando; o token nunca aparece
-  na saida. Sem retry automatico: repetir manda a mensagem de novo.
+- **Leitura:** sessao `READ ONLY` + `REPEATABLE READ`; a API nao grava nada.
 
-Configuracao do envio:
+### Uma mensagem por fotografia, sem estado gravado
 
-- `DATABASE_URL`: Neon; basta `SELECT` em `marts.expedicao_fila_atual` e
-  `marts.expedicao_refresh_run` (a sessao e' aberta read-only);
+O cron avalia a mesma fotografia ate' quatro vezes, e o GoDeploy repete o
+disparo apos um 5xx (ate' 3 tentativas, 30 s de intervalo). Cada DM leva
+`metadata` (`event_type = torre_alerta_vencidos`, `event_payload.chave =
+"shopee:<effective_at em UTC>"`); antes de postar, a API le as 20 mensagens
+mais recentes da DM (`conversations.history` com `include_all_metadata`) e
+pula quem ja' tem a chave. Uma nova tentativa depois de envio parcial so' manda
+para quem faltou. Se o historico nao puder ser lido, NADA e' postado para
+aquela pessoa. Cada destinatario e' independente: um e-mail invalido (quem saiu
+da empresa) nao impede os demais; a rota responde 502 e o GoDeploy tenta de
+novo so' para quem faltou. Gatilho quebrado aparece em `listCronJobs` e
+`getAppLogs` do app no GoDeploy.
+
+Nao ha tabela de controle no Neon: uma migration `036` exigiria trocar o pin da
+imagem do Airflow, cuja cadeia do PMA recusa head desconhecido (ver a `035`).
+
+### Rota
+
+`POST /api/v1/alertas/expedicao-vencidos` (`app/routers/alertas.py`, fora do
+router da Expedicao, que e' so' GET). Checagens em ordem; nada e' lido antes:
+
+| Condicao | Status | `detail` |
+|---|---|---|
+| `ALERTA_WEBHOOK_SECRET` vazio | 503 | `Alerta nao configurado.` |
+| `X-Alerta-Token` ausente ou diferente | 401 | `Nao autorizado.` |
+| banco indisponivel | 503 | `Banco de dados indisponivel.` |
+| sem `simular` e sem token do Slack ou destinatarios | 503 | `Envio nao configurado.` |
+| Slack recusou | 502 | `Slack recusou o envio.` |
+| ok | 200 | `{canal, situacao, evento, enviados, ja_tinham}` |
+
+`situacao` e' `sem_fotografia`, `fotografia_velha`, `sem_evento` ou `evento`.
+`?simular=true` avalia, devolve tambem `mensagem` e nao chama o Slack (serve
+para conferir a regra em producao sem mandar nada).
+
+### Configuracao
+
+No Render (`mktplace-api`):
+
+- `ALERTA_WEBHOOK_SECRET`: o mesmo valor do segredo do app no GoDeploy;
 - `SLACK_BOT_TOKEN`: token `xoxb-` do bot, em app settings → OAuth & Permissions;
 - `EXPEDICAO_ALERTA_DESTINATARIOS`: e-mails do Slack, separados por virgula.
-  Cada um recebe a mensagem no privado (`users.lookupByEmail` +
-  `chat.postMessage`).
 
-Agendamento: uma task na DAG `marketplace_tower_expedicao_refresh`, logo
-depois de `publicar_shopee`, para o aviso sair minutos depois da fotografia.
+No GoDeploy (`torre-alerta-gatilho`, `authenticated`): segredo
+`ALERTA_WEBHOOK_SECRET` (`setAppSecret`) e o cron `*/15 * * * *` na rota
+`/cron/alerta-vencidos`.
+
+Escopos do bot usados: `users:read.email`, `im:write`, `im:history`,
+`chat:write` (todos ja' no manifest).
 
 ## Atraso de 7 dias (regra oficial da Shopee)
 
@@ -1677,7 +1755,7 @@ O "% vencidos" da fila e' uma fotografia (`overdue_count / backlog_count`). A
 regra que a Shopee usa e' outra: **atrasados ÷ pedidos com prazo nos ultimos 7
 dias**. A publicacao horaria da fila (`python -m pipelines.expedicao.cli
 --channel shopee|mercadolivre --apply`) passa a gravar, por conta, no resumo
-`marts.expedicao_refresh_run` (migration 035), quatro colunas NULLABLE:
+`marts.expedicao_refresh_run` (migration 035), seis colunas NULLABLE:
 
 | coluna | significado |
 |---|---|
@@ -1685,13 +1763,34 @@ dias**. A publicacao horaria da fila (`python -m pipelines.expedicao.cli
 | `late_7d_count` | quantos da base atrasaram |
 | `late_7d_window_start` | primeiro dia de vencimento (Brasilia) efetivamente usado |
 | `late_7d_window_end` | ultimo dia de vencimento (Brasilia) efetivamente usado |
+| `over_48h_7d_count` | quantos da base passaram de 48 h (ver abaixo) |
+| `stalled_7d_count` | quantos da base passaram de 2 × p50 da conta (travados); NULL sem baseline, sempre NULL no ML |
 
 - **Janela:** os 7 dias FECHADOS antes do dia da fotografia, `[hoje-7, hoje-1]`
   em Brasilia, `hoje` = dia BRT de `effective_at` (nunca o relogio do
   processo). A janela gravada e' a EFETIVAMENTE usada, por conta.
-- **NULL nas quatro = nao calculado** (canal/conta sem base na janela, linha
-  anterior a 035, export da Kokeshi). Nunca zero por ausencia: `late_7d_count
-  = 0` so' existe com `due_7d_count > 0`.
+- **NULL em todas = nao calculado** (canal/conta sem base na janela, linha
+  anterior a 035). Nunca zero por ausencia: uma contagem `= 0` so' existe com
+  `due_7d_count > 0`. `over_48h_7d_count` e `stalled_7d_count` podem ser NULL
+  sozinhas (nao calculadas) com as outras quatro preenchidas.
+- **Acima de 48 h e travados (aba "Ultimos 7 dias", 03/11/2026):** sobre a
+  MESMA base de `due_7d_count` (mesma janela, dias maduros e exclusoes), com
+  `duracao = (coleta, ou effective_at se ainda nao coletado) − marco`. O marco
+  e' o da fila: Shopee `coalesce(pay_time, create_time)` (na base todo pedido
+  e' pago, entao e' o `pay_time`); ML `date_ready_to_ship` (naive −04:00),
+  senao `date_created` do pedido. Coleta: Shopee `pickup_done_time`; ML a
+  primeira entrada de `substatus_history` (jsonb, datas ISO com fuso) com
+  substatus `picked_up`/`dropped_off`/`in_hub` ou status `shipped`/`delivered`,
+  senao `date_shipped` (naive −04:00), senao nao coletado.
+  - `over_48h_7d_count`: duracao estritamente maior que 48 h
+    (`OPERATIONAL_AGE_LIMIT`). No ML vem do MESMO SQL agregado do atraso, sem
+    trazer linhas; historico ilegivel (nao e' array, ou entrada de coleta com
+    data sem fuso) deixa a contagem da conta NULL, com aviso no log.
+  - `stalled_7d_count`: duracao maior que `SLOW_BASELINE_FACTOR` (2) × p50 da
+    conta, so' com amostra ≥ `MIN_BASELINE_SAMPLE` (100) e p50 > 0; senao
+    NULL. Shopee usa o MESMO baseline da fila (`fetch_baselines`, lido uma vez
+    por execucao); Kokeshi, o baseline do export (`shopee_export.baseline`). ML
+    sempre NULL: nao ha baseline do ML.
 - **Shopee:** a base e' a da LDR operacional (`shopee_ldr.classificar`): sem
   FBS, sem cancelado sem coleta, sem "sem prazo" e sem pos-envio sem coleta; so'
   vencimentos MADUROS (`shopee_ldr.madura`). Atrasado = coletado depois do prazo
@@ -1712,11 +1811,16 @@ dias**. A publicacao horaria da fila (`python -m pipelines.expedicao.cli
 - **Nunca segura a fila:** falha no calculo vira aviso no log do run e NULL no
   resumo; a fila da hora publica normalmente. A LDR (`shopee_ldr_cli`) continua
   falhando fechado com as mesmas regras.
-- **Publicador:** grava as quatro colunas (INSERT e `ON CONFLICT ... DO
-  UPDATE`) so' se as QUATRO existirem no resumo do destino; sem a 035 o INSERT
-  e' o de antes. `marts.expedicao_refresh_run_export` nao tem as colunas.
+- **Publicador:** grava as seis colunas (INSERT e `ON CONFLICT ... DO
+  UPDATE`) so' se as SEIS existirem no resumo do destino; sem elas o INSERT
+  e' o de antes (tudo ou nada: um destino so' com as quatro antigas nao grava
+  nenhuma). `marts.expedicao_refresh_run_export` tem as mesmas seis (Kokeshi
+  pelo export, mesma regra da Shopee). `over_48h_7d_count` e
+  `stalled_7d_count` foram criadas a' mao no Neon nas duas tabelas em
+  03/11/2026 e entraram na PROPRIA 035 (nao numa 036, que faria o PMA de
+  ofertas recusar o Neon); o head continua 035.
 - **Diagnostico:** `--diagnose` mostra, por conta, janela usada, base,
-  atrasados e taxa.
+  atrasados, taxa, acima de 48 h e travados (`-` = nao calculado).
 - **Ordem de ativacao:** merge → imagem do Airflow → `alembic upgrade 035` no
   Neon → a proxima publicacao de cada canal preenche. A taxa do canal e' a
   soma de `late_7d_count` sobre a soma de `due_7d_count` das contas

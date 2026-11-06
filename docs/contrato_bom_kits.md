@@ -282,3 +282,154 @@ eligible_offers = active_offers - kit_confirmed - kit_suspected
 "derived_from_kit_components"`, e seis campos de procedência viajam na linha.
 Kit sem referência derivada continua exatamente como antes: `NULL`,
 `kit_composition_missing`, nunca zero.
+
+---
+
+## 10. Segunda fonte de composição: API da Avoe (T-0053)
+
+Implementado em
+[`pipelines/avoe_kits_source.py`](../pipelines/avoe_kits_source.py), ligado ao
+publisher por `--source`, travado em
+[`pipelines/tests/test_avoe_kits_source.py`](../pipelines/tests/test_avoe_kits_source.py).
+
+### Por que existe
+
+As lojas Ápice, Barbour's e Lescent anunciam kit com `seller_sku` no formato
+`KITnnn`. Esse código **não** existe na BOM do Protheus nem tem nó com
+`codigo_protheus` no cadastro, então a oferta fica `UNMAPPED` ou
+`CANDIDATE_REVIEW` e não produz linha. A ferramenta `consultar_kit` da Avoe
+devolve exatamente esse código, por marca, com a lista de componentes.
+
+### O que muda e o que não muda
+
+A Avoe entra **só como origem de linhas**. A validação da BOM, a ponte, a
+promoção, a referência B2B do componente, a faixa de desconto e o vocabulário
+de motivos continuam os das seções 2 a 6, sem exceção.
+
+| `--source` | BOM usada | uso |
+|---|---|---|
+| `protheus` (padrão) | `raw.protheus_kit_components` | comportamento anterior, inalterado |
+| `avoe` | só a da Avoe | diagnóstico isolado da fonte nova |
+| `ambas` | por oferta: a da Avoe se ela resolve a oferta, senão a do Protheus | publicação: Avoe prioritária, Protheus como fallback |
+
+A publicação apaga e regrava o escopo `(marketplace, observed_date)`:
+`--apply --source avoe` **apagaria** as linhas derivadas do Protheus naquele
+escopo, e por isso o CLI a **recusa** (exit 2) antes de abrir conexão. Para
+publicar, o modo é `ambas`; `avoe` sozinho é só diagnóstico.
+
+O publisher **nunca chama a Avoe**: ele lê um snapshot JSON gravado antes por
+`python -m pipelines.avoe_kits_source`. A credencial vem de um **arquivo** cujo
+caminho é passado por `--secret-file` ou `AVOE_API_SECRET_FILE`; o valor nunca
+é logado, impresso nem gravado no snapshot.
+
+### Regras da tradução
+
+| tema | regra |
+|---|---|
+| chave do kit | `AVOE:<MARCA>:<SKU>` — a Avoe numera kit **por marca** (`KIT001` existe em várias); a chave crua colidiria no `KitBomIndex` |
+| ponte oferta → kit | `(marca da oferta, seller_sku)` **exato** → `brand_code_exact` → `EXACT_DIRECT`. Nenhum método novo |
+| marca | allowlist (`MARCAS`). Marca fora dela: kit recusado |
+| componente | `(marca do kit, código)` **exato e único** em `gold.map_produto_codigo_gobeauty` → SKU Protheus. Códigos colidem entre ERPs de marcas diferentes; por isso a marca escopa sempre |
+| componente sem tradução única | entra como `AVOE:<MARCA>:<código>`; o catálogo não o conhece e o kit sai `blocked` com `kit_component_not_in_catalog`. **Nunca descartado** (kit mais barato) **nem inventado** |
+| EAN | nunca é critério. Fica só como evidência na resposta bruta |
+| quantidade | a Avoe não tem coluna de quantidade: o componente vem **repetido**. `qty_per_kit` = número de repetições |
+| vigência | sem datas na fonte: bordas abertas, `active = true` |
+| `sku_kit` inválido (vazio, espaço, apóstrofo) | kit recusado — medido: há kit cujo `sku_kit` é o nome |
+| mesma `(marca, sku_kit)` com composições diferentes | as duas recusadas |
+| de-para versionado (T-0063) | 2ª fonte de tradução do componente: [`pipelines/avoe_de_para_componentes.csv`](../pipelines/avoe_de_para_componentes.csv). Ver "De-para versionado" abaixo |
+| trava de volume (T-0063) | vale para **toda** tradução (map ou de-para). Ver "Trava de volume" abaixo |
+| oferta que alcança kit nas duas fontes | **Avoe vence** (decisão do Mário). A escolha da fonte é feita por oferta em `montar_fontes`, **antes** do contrato, que então vê só uma BOM — nunca `AMBIGUOUS` entre fontes. Sobreposições contadas em `avoe_summary.precedencia` (`sobrepostas`, `identicas`, `divergentes`), com a lista das divergentes. A fonte de cada linha é o prefixo `AVOE:` de `kit_protheus_sku` (sem coluna nova, sem migration) |
+
+### De-para versionado (T-0063)
+
+Há componentes cujo código da Avoe existe no cadastro da marca certa
+(`silver.gobeaute_produto_cadastro.sku_antigo`), mas não em
+`gold.map_produto_codigo_gobeauty` sob essa marca. A ponte por `sku_antigo` do
+publisher é **sem marca** e os códigos colidem entre marcas, então ela não
+serve aqui. Para esses casos existe um de-para mantido à mão, versionado e
+aprovado linha a linha:
+
+| coluna | conteúdo |
+|---|---|
+| `marca` | marca da Torre (`apice`, `barbours`, `lescent`, `denavita`). Fora da allowlist: o arquivo é recusado |
+| `codigo_avoe` | código do componente como a Avoe devolve |
+| `sku_destino` | SKU Protheus |
+| `classe` | `A` = automático com prova (chave do cadastro exata, EAN igual nos três lados, volume igual, destino no catálogo). Das positivas, só a classe A entrou; `NEG` = linha negativa |
+| `evidencia` | texto curto, **sem número de negócio** (o repo é público) |
+| `aprovado_por` | quem aprovou a linha |
+| `ativo` | `true` \| `false`. Qualquer outro valor: o arquivo é recusado |
+| `bloquear` | `true` \| `false`. `true` = linha **negativa** (ver abaixo), com `sku_destino` vazio e classe `NEG` |
+
+Travas, todas fail-closed:
+
+| trava | regra | efeito quando falha |
+|---|---|---|
+| (a) | o de-para só é consultado quando o `map` **não** traduz `(marca, código)`. Com o `map` ambíguo (2+ destinos), o de-para não desempata | segue a decisão do `map` |
+| (b) | `map` traduz para SKU **diferente** do de-para | componente **ambíguo** (`map_diverge_de_para`): nenhum dos dois é escolhido |
+| (c) | `sku_destino` tem de estar no catálogo do contrato (`SQL_CATALOG`) **com a mesma marca** | componente **sem ponte** (`de_para_destino_fora_do_catalogo` / `de_para_destino_de_outra_marca`) |
+| (d) | a chave é `(marca, código)`: a linha só alcança kit da mesma marca | sem efeito em outra marca |
+| (e) | `ativo=false` | linha ignorada |
+| — | duas linhas ativas para a mesma `(marca, código)` com destinos diferentes | **ambíguo** (`de_para_multiplo`) |
+
+**Linha negativa** (`bloquear=true`, `sku_destino` vazio): diz que a tradução de
+`(marca, código)` está **errada**. Vale **mesmo quando o `map` traduz** (exceção à
+trava (a)): o componente fica **ambíguo** com `de_para_bloqueio`, nunca traduzido, e
+o kit sai `blocked`. Fecha o erro que a trava de volume deixa passar (`sem_prova`).
+O carregamento recusa destino vazio sem `bloquear=true`, `bloquear=true` com destino
+e positiva + negativa **ativas** na mesma chave (conflito, não desempate);
+`ativo=false` desliga também a negativa. Contagem em
+`avoe_summary.de_para_bloqueios_ativos`; `de_para_linhas_ativas` conta só positivas.
+
+Arquivo ausente ou malformado levanta `AvoeSourceError`: nunca vira "sem
+de-para" em silêncio. O CSV é o **único** arquivo não-`.py` da wheel
+`mktplace-pipelines` (`[tool.setuptools.package-data]`, lista nominal), porque a
+DAG da Torre roda o publisher a partir da wheel instalada.
+
+Para tirar uma linha do ar: `ativo=false` (ou apagar a linha) e novo deploy.
+Linha de classe B (prova incompleta) só entra com o OK de quem conhece o
+cadastro, registrado em `aprovado_por`.
+
+### Trava de volume (T-0063)
+
+Uma tradução que casa a chave não prova que é o mesmo produto: o cadastro tem
+códigos apontando para produtos de outro tipo e de outro tamanho. Por isso,
+toda tradução aceita (pelo `map` ou pelo de-para) passa por uma comparação de
+volume/peso entre o nome do componente na Avoe e o nome do SKU destino no
+catálogo (`gold.dim_produto_gobeauty.nome`, que entra em `SQL_CATALOG` como
+`name` e que o contrato ignora).
+
+| regra | detalhe |
+|---|---|
+| extração | número + `ml`, `l`/`lt`/`litro`, `g`/`gr`/`grama`, `kg`. O número não pode vir colado a letra ou dígito (`AP3000`, `Q10`, `N20` não são volume) e a unidade não pode continuar em letra (`3 Lescent` não é 3 litros). Acentos e caixa são ignorados |
+| normalização | `1 l = 1000 ml`, `1 kg = 1000 g`; vírgula decimal aceita |
+| nomes da Avoe | os de **todos** os kits em que o código aparece. A tradução `(marca, código) → SKU` é uma só, então um nome que a contradiz bloqueia o código em todos os kits — inclusive naqueles em que a Avoe mandou o componente sem nome |
+| conjuntos iguais | `concorda`: traduz |
+| conjuntos diferentes, mesma dimensão | **ambíguo** (`volume_diverge`) |
+| dimensões diferentes (g × ml) | **ambíguo** (`volume_unidade_incompativel`). Regra conservadora: sem densidade não há conversão, e "500 g" contra "1000 ml" é exatamente o caso que a trava existe para pegar. Custo conhecido: o mesmo produto escrito com unidade trocada também é bloqueado |
+| um dos lados sem volume | **não** bloqueia. O par é contado como `sem_prova` |
+
+"Ambíguo" aqui tem o efeito de sempre: o componente fica como
+`AVOE:<MARCA>:<código>`, o catálogo não o conhece e o contrato bloqueia o kit
+com `kit_component_not_in_catalog`. O vocabulário de motivos do contrato não
+muda (sem migration). O motivo fino de cada componente vai no
+`avoe_summary` que o publisher devolve: `ambiguos_por_motivo`,
+`sem_ponte_por_motivo`, `traduzidos_por_origem`, `volume`
+(`concorda`/`sem_prova`/`diverge`/`unidade_incompativel`) e a lista
+`bloqueios` (kit, código, motivo, destinos do `map` e do de-para, nomes da
+Avoe).
+
+**O que a trava não pega.** Produto de **tipo** diferente com volume ausente
+de um dos lados (por exemplo, uma "Máscara" sem volume na Avoe traduzida para
+um "Condicionador 1L") passa como `sem_prova`. Os casos já provados estão
+fechados por **linha negativa** no de-para (ver acima); uma regra geral de tipo
+de produto continua em aberto.
+
+### O que a Avoe **não** substitui
+
+- `preco_custo`, `preco_venda` e `precos_por_canal` (De/Por) **não** entram em
+  nenhum cálculo. A referência do kit continua derivada da planilha B2B por
+  componente; preço de tabela da Avoe como referência seria regra paralela.
+- O teto da seção 7 continua valendo: sem referência B2B do componente, o kit
+  é publicado `blocked`, com motivo.
+- O nome do kit da Avoe não é usado. Observado: o `nome` vem associado ao SKU
+  sem escopo de marca (um kit de uma marca chega com o nome de outra).

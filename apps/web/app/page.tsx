@@ -53,8 +53,13 @@ import {
   type Movement,
 } from "@/lib/gerencial/brand-matrix";
 import { mergeChannelSeries, reconcileSeriesTotal, type MergedBucket } from "@/lib/gerencial/trend-series";
+import { bucketDeHoje } from "@/lib/gerencial/dia-em-andamento";
 import type { TrendMetric } from "@/lib/gerencial/request-key";
-import type { TrendGranularityRequest } from "@/lib/api-client";
+import { fetchMLFulfillment, fetchShopeeFbs, type TrendGranularityRequest } from "@/lib/api-client";
+import { buildQuery as queryMlFull } from "@/lib/ml-fulfillment";
+import { buildQuery as queryShopeeFbs } from "@/lib/shopee-fbs";
+import { isMarketplaceSelected } from "@/lib/marketplace-filter";
+import { divisaoFull } from "@/lib/gerencial/divisao-full";
 import { KPI_META, type KpiKind } from "@/lib/kpi-drilldown";
 
 import GlobalFilterControls from "@/components/layout/GlobalFilterControls";
@@ -87,7 +92,13 @@ import {
   topComerciais,
   ultimoDiaComDado,
 } from "@/lib/gerencial/meta-progress";
-import { escopoTemCurva, fracaoDoEscopo, progressoDoDia, resumoSemDado } from "@/lib/metas-curva";
+import {
+  escopoTemCurva,
+  fracaoDoEscopo,
+  metaDiaNormalDoEscopo,
+  progressoDoDia,
+  resumoSemDado,
+} from "@/lib/metas-curva";
 import { hojeBrt } from "@/lib/metas";
 import {
   ChannelSeriesDrilldownContent,
@@ -207,6 +218,12 @@ function GerencialInner() {
       ),
     [sources.series, filters.channels, granularity],
   );
+  // GERENCIAL-D0 — hoje no grafico, com o numero do filtro "Hoje". Fica FORA de
+  // `merged`: nao entra na soma, na reconciliacao, nas tendencias nem na meta.
+  const hojeNoGrafico = useMemo(
+    () => bucketDeHoje(sources.seriesHoje, filters.channels, metric, sources.hoje),
+    [sources.seriesHoje, filters.channels, metric, sources.hoje],
+  );
   const reconciliation = useMemo(
     () =>
       reconcileSeriesTotal(
@@ -268,6 +285,37 @@ function GerencialInner() {
   // meta do mes. O realizado so' conta marca x canal que tem meta, e precisa
   // de `/brands` fresco: sem ele, "sem linha" nao quer dizer "sem venda".
   const hoje = useMemo(() => hojeBrt(), []);
+
+  // Receita Full x normal: so' a PROPORCAO vem das fatos de modalidade; o valor
+  // e' o GMV do overview (divisaoFull). Falha em qualquer uma = sem divisao.
+  const [shareFull, setShareFull] = useState<{ ml: number | null; shopee: number | null } | null>(null);
+  useEffect(() => {
+    setShareFull(null);
+    if (sources.demoMode) return;
+    const ac = new AbortController();
+    const { dateFrom: from, dateTo, brands: marcas, channels } = filters;
+    const ontem = new Date(Date.parse(`${hoje}T12:00:00Z`) - 864e5).toISOString().slice(0, 10);
+    // A fato da Shopee so' publica dia fechado (D-1): a proporcao vem ate' ontem.
+    const toShopee = dateTo < ontem ? dateTo : ontem;
+    const ml = isMarketplaceSelected(channels, "ml")
+      ? fetchMLFulfillment(queryMlFull({ from, to: dateTo, brands: marcas }), ac.signal).then((r) => r.share_full_gmv)
+      : null;
+    const shopee =
+      isMarketplaceSelected(channels, "shopee") && from <= toShopee
+        ? fetchShopeeFbs(queryShopeeFbs({ from, to: toShopee, brands: marcas }), ac.signal).then((r) =>
+            "shares" in r ? r.shares.share_fbs_gmv : null,
+          )
+        : null;
+    Promise.all([ml, shopee])
+      .then(([m, sh]) => setShareFull({ ml: m, shopee: sh }))
+      .catch(() => undefined);
+    return () => ac.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- filterIdentity cobre os filtros
+  }, [filterIdentity, hoje, sources.demoMode, sources.retryKey]);
+  const fullNormal =
+    shareFull && overview
+      ? divisaoFull({ total: overview.gmv, ml: overview.ml_gmv, shopee: overview.shopee_gmv }, shareFull)
+      : null;
   const diaMeta = diaDaMeta(filters.dateFrom, filters.dateTo, hoje);
   const mesMeta = diaMeta ? null : mesDaMeta(filters.dateFrom, filters.dateTo, hoje);
   const metas = useMetasDoMes(mesMeta ?? diaMeta?.slice(0, 7) ?? null);
@@ -299,6 +347,7 @@ function GerencialInner() {
             hoje,
             ultimoDia,
             fracaoAte: fracaoDoEscopo(celulasEscopo, mesMeta),
+            metaDiaNormal: metaDiaNormalDoEscopo(celulasEscopo, mesMeta),
           })
         : null,
     [metaAplicavel, mesMeta, metaEscopo.total, realizadoEscopo.total, celulasEscopo, hoje, ultimoDia],
@@ -322,6 +371,10 @@ function GerencialInner() {
         hoje,
         ultimoDia,
         fracaoAte: fracaoDoEscopo(
+          celulasEscopo.filter((c) => c.brand === id),
+          mesMeta,
+        ),
+        metaDiaNormal: metaDiaNormalDoEscopo(
           celulasEscopo.filter((c) => c.brand === id),
           mesMeta,
         ),
@@ -387,6 +440,19 @@ function GerencialInner() {
       : "Dados carregados.";
 
   const openBucket = useCallback((date: string) => setDialog({ kind: "bucket", date }), []);
+  // GERENCIAL-D0: o dia em andamento nao tem detalhe de bucket (esta' fora do
+  // periodo); clicar nele abre a propria visao "Hoje".
+  const selecionarBucket = useCallback(
+    (date: string) => {
+      if (date === sources.hoje) {
+        setDialog(null);
+        setFilters({ dateFrom: date, dateTo: date });
+        return;
+      }
+      openBucket(date);
+    },
+    [openBucket, setFilters, sources.hoje],
+  );
   const pinRange = useCallback(
     (dateFrom: string, dateTo: string) => {
       setDialog(null);
@@ -494,6 +560,7 @@ function GerencialInner() {
         aviso={avisoDeDado ? { texto: avisoDeDado.message, onOpen: () => setDialog({ kind: "confidence" }) } : null}
         metasHref={mesDasMetas ? `/metas?mes=${mesDasMetas}` : "/metas"}
         onOpenGmv={() => setDialog({ kind: "kpi", key: "gmv" })}
+        fullNormal={fullNormal}
       />
 
       {/* VENDAS-POR-HORA-1: com "Hoje", os canais cortados na mesma hora cheia
@@ -533,7 +600,8 @@ function GerencialInner() {
             reconciliation={reconciliation}
             compareActive={comparar}
             loading={merged.loadingChannels.length > 0 && merged.availableChannels.length === 0}
-            onSelectBucket={openBucket}
+            onSelectBucket={selecionarBucket}
+            bucketHoje={hojeNoGrafico}
             onOpenChannelSeries={(channel) => setDialog({ kind: "channelSeries", channel })}
             highlightedChannel={highlightedChannel}
           />
