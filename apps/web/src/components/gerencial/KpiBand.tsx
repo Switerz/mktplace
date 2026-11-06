@@ -52,7 +52,11 @@ function DeltaBadge({ pct, tone = "higher_is_better" }: { pct: number; tone?: De
   const up = pct >= 0;
   const Seta = up ? ArrowUpRight : ArrowDownRight;
   const pele =
-    tone === "neutral" ? "bg-raised text-ink-muted" : up ? "bg-ok-soft text-ok-ink" : "bg-crit-soft text-crit-ink";
+    tone === "neutral"
+      ? "bg-raised text-ink-muted"
+      : up !== (tone === "lower_is_better")
+        ? "bg-ok-soft text-ok-ink"
+        : "bg-crit-soft text-crit-ink";
   return (
     <span
       className={`inline-flex w-fit items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-semibold tabular-nums ${pele}`}
@@ -241,7 +245,11 @@ function KpiCard({
                     {cv.direction && cv.previous && (
                       <span
                         className={`text-xs font-semibold tabular-nums ${
-                          cv.direction === "up" ? "text-ok-ink" : cv.direction === "down" ? "text-crit-ink" : "text-ink-muted"
+                          cv.direction === "flat"
+                            ? "text-ink-muted"
+                            : (cv.direction === "up") !== (kpi.deltaTone === "lower_is_better")
+                              ? "text-ok-ink"
+                              : "text-crit-ink"
                         }`}
                       >
                         {SETA[cv.direction]} de {cv.previous}
@@ -307,7 +315,7 @@ export default function KpiBand({ kpis: todos, loading, error, onOpen, onRetry, 
         <div>
           <h2 className="text-sm font-semibold text-ink-muted">Indicadores do período</h2>
           <p className="text-xs text-ink-faint">
-            O agregado do período não respondeu nesta carga — GMV, Pedidos, Ticket, Investimento e ROAS ficam
+            O agregado do período não respondeu nesta carga — GMV, Pedidos, Ticket, Investimento e ACOS ficam
             indisponíveis. Os demais blocos abaixo seguem com as próprias fontes.
           </p>
         </div>

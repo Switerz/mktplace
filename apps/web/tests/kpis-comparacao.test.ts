@@ -58,8 +58,10 @@ test("ROAS compara por canal, nunca agregado", () => {
   assert.equal(roas.value, null);
   const ml = roas.channelValues!.find((c) => c.channel === "ml")!;
   const sh = roas.channelValues!.find((c) => c.channel === "shopee")!;
-  assert.deepEqual([ml.direction, ml.previous], ["down", "12,6x"]);
-  assert.deepEqual([sh.direction, sh.previous], ["up", "13,6x"]);
+  // ACOS = 100 / ROAS: ROAS do ML caiu (12,6 -> 11,98), entao o ACOS subiu.
+  assert.deepEqual([ml.direction, ml.previous, ml.value], ["up", "7,9%", "8,3%"]);
+  assert.deepEqual([sh.direction, sh.previous], ["down", "7,3%"]);
+  assert.equal(roas.deltaTone, "lower_is_better");
   const tk = roas.channelValues!.find((c) => c.channel === "tiktok")!;
   assert.equal(tk.direction ?? null, null);
 });

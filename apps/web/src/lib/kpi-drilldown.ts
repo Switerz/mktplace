@@ -62,12 +62,12 @@ export const KPI_META: Record<KpiKind, KpiMeta> = {
     nextHref: "/financeiro",
   },
   roas: {
-    label: "ROAS por canal",
+    label: "ACOS por canal",
     definition:
-      "Receita atribuída a anúncios dividida pelo investimento em mídia, apurada por canal — disponível hoje para Mercado Livre e Shopee.",
-    formula: "ROAS = receita atribuída a anúncios / investimento em anúncios",
+      "Percentual investido em anúncios sobre a receita atribuída aos anúncios, apurado por canal — disponível hoje para Mercado Livre e Shopee. Quanto menor, melhor.",
+    formula: "ACOS = investimento em anúncios / receita atribuída a anúncios × 100",
     caveat:
-      "Cada canal tem seu próprio ROAS e nenhum valor consolidado é exibido: somar ou tirar média de ROAS entre canais produziria um número sem significado. TikTok Shop não tem ROAS no contrato atual.",
+      "Cada canal tem seu próprio ACOS e nenhum valor consolidado é exibido: somar ou tirar média de ACOS entre canais produziria um número sem significado. TikTok Shop não tem ACOS no contrato atual.",
     nextLabel: "Ver detalhamento de mídia em Financeiro",
     nextHref: "/financeiro",
   },

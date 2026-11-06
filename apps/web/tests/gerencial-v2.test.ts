@@ -300,7 +300,7 @@ test("9. ROAS nunca agrega: sem valor unico, uma linha por canal, TikTok N/D", (
   assert.match(tiktok.unavailableReason ?? "", /Não disponível nesta fonte/);
   const ml = roas.channelValues!.find((c) => c.channel === "ml")!;
   // UI-DENSIDADE-1: pt-BR (virgula decimal).
-  assert.equal(ml.value, "4,0x");
+  assert.equal(ml.value, "25,0%"); // ACOS = 100 / ROAS 4
 });
 
 test("9b. com um unico canal compativel selecionado, esse canal e' destacado", () => {
