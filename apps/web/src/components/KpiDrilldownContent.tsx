@@ -297,6 +297,11 @@ function AdSpendBreakdown({ overview, brands, channels }: { overview: OverviewDa
                 label={b.label}
                 pct={pct}
                 barra="bg-kpi-ads"
+                // Neutro como o card: investir mais nao e' bom nem ruim por si.
+                delta={(() => {
+                  const d = variacao(b.ad_spend, b.ad_spend_prev);
+                  return d != null ? { pct: d, neutro: true } : null;
+                })()}
                 value={`${fmtBrl(b.ad_spend!)} · ${fmtPct1(pct)}`}
               />
             );

@@ -126,12 +126,25 @@ def test_periodo_customizado_de_10_dias_compara_com_os_10_dias_imediatamente_ant
     assert cmp.days == period.days == 10
 
 
-def test_mes_parcial_nao_e_tratado_como_mes_fechado():
-    # 01-15/06 nao e' o mes inteiro: a regra correta e' a janela deslizante.
+def test_mes_parcial_compara_com_os_mesmos_dias_do_mes_anterior():
+    # 01-15/06 nao e' o mes inteiro, mas comeca no dia 1: mes contra mes
+    # (01-15/05), nao a janela deslizante (17-31/05, fim contra comeco de mes).
     period = resolve_period(date_from=date(2026, 6, 1), date_to=date(2026, 6, 15), today=date(2026, 7, 8))
     assert period.ref_month is None
     cmp = resolve_compare_period(period, compare=True)
-    assert (cmp.start, cmp.end) == (date(2026, 5, 17), date(2026, 5, 31))
+    assert (cmp.start, cmp.end) == (date(2026, 5, 1), date(2026, 5, 15))
+
+
+def test_mes_parcial_limita_o_fim_ao_ultimo_dia_do_mes_anterior():
+    period = resolve_period(date_from=date(2026, 3, 1), date_to=date(2026, 3, 30), today=date(2026, 7, 8))
+    cmp = resolve_compare_period(period, compare=True)
+    assert (cmp.start, cmp.end) == (date(2026, 2, 1), date(2026, 2, 28))
+
+
+def test_mes_atual_em_janeiro_compara_com_dezembro():
+    period = resolve_period(date_from=date(2026, 1, 1), date_to=date(2026, 1, 5), today=date(2026, 1, 6))
+    cmp = resolve_compare_period(period, compare=True)
+    assert (cmp.start, cmp.end) == (date(2025, 12, 1), date(2025, 12, 5))
 
 
 def test_primitivo_deslizante_permanece_disponivel_e_inalterado():

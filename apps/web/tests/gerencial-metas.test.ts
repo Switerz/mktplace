@@ -8,7 +8,6 @@ import {
   avisoQueAfetaOGmv,
   celulasDoEscopo,
   diaDaMeta,
-  topComerciais,
   diasNoMes,
   mesDaMeta,
   metaDoEscopo,
@@ -128,18 +127,6 @@ test("sem meta, meta zero ou sem realizado: nao ha progresso", () => {
   assert.equal(progressoMeta({ ...base, meta: null, realizado: 1 }), null);
   assert.equal(progressoMeta({ ...base, meta: 0, realizado: 1 }), null);
   assert.equal(progressoMeta({ ...base, meta: 1, realizado: null }), null);
-});
-
-test("topComerciais: por severidade, ordem da fila no empate, ate' 3", () => {
-  const c = [
-    { key: "a", severity: "info" as const },
-    { key: "b", severity: "warning" as const },
-    { key: "c", severity: "critical" as const },
-    { key: "d", severity: "warning" as const },
-  ];
-  assert.deepEqual(topComerciais(c).map((x) => x.key), ["c", "b", "d"]);
-  assert.deepEqual(topComerciais(c, 10).map((x) => x.key), ["c", "b", "d", "a"]);
-  assert.deepEqual(topComerciais([]), []);
 });
 
 test("avisoQueAfetaOGmv: so' aviso de atencao da fonte do GMV", () => {

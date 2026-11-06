@@ -27,6 +27,15 @@ export interface CanalVendas {
   semana_passada: BlocoVendas;
 }
 
+/** Tendencia de fechamento do dia por marca (ritmo de ontem ate' a mesma hora). */
+export interface MarcaTendencia {
+  brand: string;
+  hoje: number;
+  ontem_mesma_hora: number;
+  ontem_dia: number;
+  projecao: number | null;
+}
+
 export interface HojePorHora {
   disponivel: boolean;
   motivo?: string | null;
@@ -38,6 +47,8 @@ export interface HojePorHora {
   ontem?: BlocoVendas | null;
   semana_passada?: BlocoVendas | null;
   por_canal: CanalVendas[];
+  /** Ausente em respostas antigas da API. */
+  por_marca?: MarcaTendencia[];
 }
 
 /** "até 13h"; `null` quando ainda nao fechou nenhuma hora. */

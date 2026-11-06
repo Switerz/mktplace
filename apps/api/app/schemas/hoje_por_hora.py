@@ -33,6 +33,16 @@ class CanalVendas(BaseModel):
     semana_passada: BlocoVendas
 
 
+class MarcaTendencia(BaseModel):
+    brand: str
+    #: GMV de hoje ate' o corte.
+    hoje: float
+    ontem_mesma_hora: float
+    ontem_dia: float
+    #: Fechamento provavel pelo ritmo de ontem; `None` sem venda ontem ate' o corte.
+    projecao: Optional[float] = None
+
+
 class HojePorHoraResponse(BaseModel):
     disponivel: bool
     motivo: Optional[str] = None
@@ -45,3 +55,4 @@ class HojePorHoraResponse(BaseModel):
     ontem: Optional[BlocoVendas] = None
     semana_passada: Optional[BlocoVendas] = None
     por_canal: list[CanalVendas] = []
+    por_marca: list[MarcaTendencia] = []
