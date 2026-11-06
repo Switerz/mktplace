@@ -37,13 +37,11 @@ import {
   rotuloDaCoorte,
   rotuloEtapa,
   rotuloSobreposicao,
-  textoDaSobreposicao,
   type CanalJornada,
   type CargaJornada,
   type EstadoJornada,
   type EtapaJornada,
   type RespostaJornada,
-  type SobreposicaoJornada,
 } from "@/lib/expedicao-jornada";
 import { formatarInteiro, partesDoPercentualComBase } from "@/lib/expedicao-formato";
 
@@ -161,43 +159,19 @@ function ListaDeEtapas({
   );
 }
 
-function Sobreposicoes({
-  itens,
-  etapas,
-  base,
-  evento,
-}: {
-  itens: SobreposicaoJornada[];
-  etapas: EtapaJornada[];
-  base: number;
-  evento: "coleta" | "despacho" | null;
-}) {
-  if (!itens.length) return null;
-  return (
-    <div className="mt-3">
-      <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-faint">
-        Dentro dessas etapas — não se somam
-      </h4>
-      <ul className="mt-1.5 flex flex-col gap-1 text-xs text-ink-muted">
-        {itens.map((s) => (
-          <li key={s.key} data-sobreposicao={s.key} title={rotuloSobreposicao(s.key)}>
-            {textoDaSobreposicao(s, etapas, base, evento)}
-          </li>
-        ))}
-      </ul>
-    </div>
+/**
+ * EXPEDICAO-SEM-TEXTAO (05/11/2026): sobreposicoes ("dentro dessas etapas —
+ * não se somam"), dias ainda mudando, "fora da contagem" e limitacoes sairam
+ * da tela — confundiam e ninguem le' paragrafo no painel. Vencidos e atrasos
+ * ja' estao no "Risco atual" e no "Prazo"; as ressalvas da resposta vao para o
+ * "ⓘ" do painel, junto da definicao.
+ */
+function foraDaContagem(c: NonNullable<RespostaJornada["coorte"]>): string[] {
+  if (!c.fora_da_coorte.length) return [];
+  const itens = c.fora_da_coorte.map((f) =>
+    f.count === null ? `${rotuloSobreposicao(f.key)}: indisponível` : `${formatarInteiro(f.count)} ${rotuloSobreposicao(f.key)}`,
   );
-}
-
-function Limitacoes({ itens }: { itens: string[] }) {
-  if (!itens.length) return null;
-  return (
-    <ul className="mt-3 list-disc pl-4 text-xs text-ink-muted" aria-label="Limitações">
-      {itens.map((l) => (
-        <li key={l}>{l}</li>
-      ))}
-    </ul>
-  );
+  return [`Fora da contagem: ${itens.join(" · ")}.`];
 }
 
 /**
@@ -214,16 +188,19 @@ function SecaoNula({ titulo, secao, r }: { titulo: string; secao: "fila_aberta" 
         <div data-testid={`exp-jornada-${secao}-indisponivel`}>
           <EstadoSecao tipo="indisponivel" titulo={`Indisponível agora: ${motivo}.`} />
         </div>
-        <Limitacoes itens={r.limitacoes} />
       </Panel>
     );
   }
   return (
     <Panel titulo={titulo}>
-      <p role="status" className="text-sm text-ink-muted" data-testid={`exp-jornada-${secao}-indisponivel`}>
-        Indisponível neste canal{r.limitacoes.length ? `: ${r.limitacoes[0]}` : "."}
+      <p
+        role="status"
+        className="text-sm text-ink-muted"
+        data-testid={`exp-jornada-${secao}-indisponivel`}
+        title={r.limitacoes.join(" ") || undefined}
+      >
+        Indisponível neste canal.
       </p>
-      <Limitacoes itens={r.limitacoes.slice(1)} />
     </Panel>
   );
 }
@@ -277,7 +254,7 @@ function BlocoFilaAberta({ r, compacta = false }: { r: RespostaJornada; compacta
       // so' o aviso quando a leitura esta' velha.
       acao={
         <span className="flex flex-wrap items-center gap-1.5">
-          <AjudaMetrica chave="jornada.fila_aberta" />
+          <AjudaMetrica chave="jornada.fila_aberta" extras={f.limitacoes} />
           {f.snapshot_at && filaDesatualizada(f) ? (
             <Chip ponto tom="atencao" title="Os números descrevem o instante da publicação, não agora.">
               Desatualizada
@@ -292,14 +269,6 @@ function BlocoFilaAberta({ r, compacta = false }: { r: RespostaJornada; compacta
         </div>
       ) : null}
       <ListaDeEtapas etapas={f.etapas} base={f.base} evento={null} rotulo="Etapas da fila aberta" canal={r.channel} />
-      {/* Compacta (fila da Shopee/ML): vencidos, travados etc. ja' estao no
-          "Risco atual" — repeti-los aqui seria o mesmo numero duas vezes. */}
-      {compacta ? null : (
-        <Sobreposicoes itens={f.sobreposicoes} etapas={f.etapas} base={f.base} evento={null} />
-      )}
-      {/* As limitacoes (ex.: "FBS nao separado na fila aberta") ficam sempre:
-          sao elas que dizem que esta base nao e' a do "Risco atual". */}
-      <Limitacoes itens={f.limitacoes} />
     </Panel>
   );
 }
@@ -322,7 +291,7 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
         // a hora fica so' no topo da tela. O aviso ESCRITO so' quando velha
         // (a publicacao vai no `title`). O "ⓘ" fica fora do h3.
         <span className="flex flex-wrap items-center gap-1.5">
-          <AjudaMetrica chave="jornada.coorte" />
+          <AjudaMetrica chave="jornada.coorte" extras={[...c.limitacoes, ...foraDaContagem(c)]} />
           {velha ? (
             <Chip
               ponto
@@ -346,24 +315,6 @@ function BlocoCoorte({ r }: { r: RespostaJornada }) {
         </div>
       ) : null}
       <ListaDeEtapas etapas={c.etapas} base={c.base} evento={evento} rotulo="Etapas da coorte" canal={r.channel} />
-      <Sobreposicoes itens={c.sobreposicoes} etapas={c.etapas} base={c.base} evento={evento} />
-      {c.fora_da_coorte.length ? (
-        <p className="mt-2 text-xs text-ink-muted">
-          Fora da contagem:{" "}
-          {c.fora_da_coorte
-            .map((f) =>
-              f.count === null ? `${rotuloSobreposicao(f.key)}: indisponível` : `${formatarInteiro(f.count)} ${rotuloSobreposicao(f.key)}`,
-            )
-            .join(" · ")}
-          .
-        </p>
-      ) : null}
-      {c.maturidade ? (
-        <p className="mt-1 text-xs text-ink-muted">
-          {c.maturidade.dias_maduros} dia(s) fechado(s), {c.maturidade.dias_imaturos} ainda mudando.
-        </p>
-      ) : null}
-      <Limitacoes itens={c.limitacoes} />
     </Panel>
   );
 }

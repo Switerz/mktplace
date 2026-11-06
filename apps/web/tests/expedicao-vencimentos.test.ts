@@ -437,7 +437,9 @@ test("balao: nome em negrito, frase em tamanho de leitura e ressalva separada", 
 test("ⓘ da metrica: nome no balao, mas o leitor de tela le' so' definicao + ressalva", () => {
   const FONTE = fonte("src/components/expedicao/AjudaMetrica.tsx");
   assert.match(FONTE, /titulo=\{def\.nome\}/);
-  assert.match(FONTE, /nota=\{def\.limitacoes\}/);
+  // EXPEDICAO-SEM-TEXTAO: a nota e' a ressalva do catalogo + as da resposta.
+  assert.match(FONTE, /const nota = \[def\.limitacoes, \.\.\.extras/);
+  assert.match(FONTE, /nota=\{nota\}/);
   const def = definicaoDe("shopee.over48h");
   const html = renderToStaticMarkup(h(AjudaMetrica, { chave: "shopee.over48h" }));
   assert.match(html, new RegExp(`aria-label="${def.definicao} ${def.limitacoes}"`));

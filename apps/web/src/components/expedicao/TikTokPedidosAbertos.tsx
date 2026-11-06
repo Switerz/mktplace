@@ -235,10 +235,7 @@ function PopupAbertos({
               </DrilldownSecao>
             </>
           )}
-          <p className="text-xs text-ink-faint">
-            Prazo reconstruído pela política do TikTok (envio até 1 dia útil e coleta até 2 dias úteis após o
-            pagamento, com feriados nacionais); não é o SLA por pedido da plataforma.
-          </p>
+          {/* EXPEDICAO-SEM-TEXTAO: a ressalva do prazo ja' esta' no chip da pagina. */}
         </div>
       ) : null}
     </KpiDrilldownDialog>
