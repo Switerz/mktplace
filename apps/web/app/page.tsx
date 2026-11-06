@@ -25,7 +25,7 @@
  * A lacuna diagnosticada no V2-0 morre por construcao: a grade da segunda dobra
  * nao usa `items-start`, cada card E' o item da grade, e nao existe `row-span`.
  */
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useGlobalFilters } from "@/hooks/useGlobalFilters";
 import { useGerencialSources } from "@/hooks/useGerencialSources";
@@ -55,7 +55,7 @@ import {
 import { mergeChannelSeries, reconcileSeriesTotal, type MergedBucket } from "@/lib/gerencial/trend-series";
 import { bucketDeHoje } from "@/lib/gerencial/dia-em-andamento";
 import type { TrendMetric } from "@/lib/gerencial/request-key";
-import { fetchMLFulfillment, fetchShopeeFbs, type TrendGranularityRequest } from "@/lib/api-client";
+import { fetchHojePorHora, fetchMLFulfillment, fetchShopeeFbs, type TrendGranularityRequest } from "@/lib/api-client";
 import { buildQuery as queryMlFull } from "@/lib/ml-fulfillment";
 import { buildQuery as queryShopeeFbs } from "@/lib/shopee-fbs";
 import { isMarketplaceSelected } from "@/lib/marketplace-filter";
@@ -78,7 +78,6 @@ import MovementsPanels from "@/components/gerencial/MovementsPanels";
 import AttentionQueue from "@/components/gerencial/AttentionQueue";
 import MetaHero from "@/components/gerencial/MetaHero";
 import HojeAteAHora from "@/components/gerencial/HojeAteAHora";
-import DecisoesTopo from "@/components/gerencial/DecisoesTopo";
 import MarcasMeta, { type MetaDaMarca } from "@/components/gerencial/MarcasMeta";
 import { useMetasDoMes } from "@/hooks/useMetasDoMes";
 import {
@@ -89,7 +88,6 @@ import {
   metaDoEscopo,
   progressoMeta,
   realizadoDoEscopo,
-  topComerciais,
   ultimoDiaComDado,
 } from "@/lib/gerencial/meta-progress";
 import {
@@ -312,6 +310,24 @@ function GerencialInner() {
     return () => ac.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- filterIdentity cobre os filtros
   }, [filterIdentity, hoje, sources.demoMode, sources.retryKey]);
+  // Tendencia de fechamento do dia por marca (so' com "Hoje"): mesma fonte do
+  // bloco "Hoje ate' HHh". Sem a tabela por hora publicada, nada aparece.
+  const [tendenciaDoDia, setTendenciaDoDia] = useState<Record<string, { projecao: number; ontemDia: number }> | null>(null);
+  useEffect(() => {
+    setTendenciaDoDia(null);
+    if (!diaEmAndamento || sources.demoMode) return;
+    let vivo = true;
+    fetchHojePorHora(filters.channels, filters.brands).then((d) => {
+      if (!vivo || !d?.disponivel) return;
+      const mapa: Record<string, { projecao: number; ontemDia: number }> = {};
+      for (const m of d.por_marca ?? []) if (m.projecao != null) mapa[m.brand] = { projecao: m.projecao, ontemDia: m.ontem_dia };
+      setTendenciaDoDia(mapa);
+    });
+    return () => {
+      vivo = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- filterIdentity cobre os filtros
+  }, [filterIdentity, diaEmAndamento, sources.demoMode, sources.retryKey]);
   const fullNormal =
     shareFull && overview
       ? divisaoFull({ total: overview.gmv, ml: overview.ml_gmv, shopee: overview.shopee_gmv }, shareFull)
@@ -396,18 +412,8 @@ function GerencialInner() {
             ? "error"
             : "loading";
   const mesDasMetas = mesMeta ?? diaMeta?.slice(0, 7) ?? null;
-  // Lista compacta (UI-DENSIDADE-1): cabem ate' 5 sinais no espaco que 3 cartoes ocupavam.
-  const decisoes = useMemo(() => topComerciais(queue.commercial, 5), [queue.commercial]);
   const avisoDeDado = avisoQueAfetaOGmv(queue.dataConfidence);
 
-  // "Mais detalhes" comeca fechado; "Ver todos os sinais" abre e rola ate' la'.
-  const detalhesRef = useRef<HTMLDetailsElement>(null);
-  const abrirDetalhes = useCallback(() => {
-    const el = detalhesRef.current;
-    if (!el) return;
-    el.open = true;
-    el.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, []);
 
   const signalsState: SignalsState = sources.canais.status.loading
     ? "loading"
@@ -546,6 +552,11 @@ function GerencialInner() {
           ml: overview?.ml_gmv ?? null,
           shopee: overview?.shopee_gmv ?? null,
         }}
+        prevGmvByChannel={{
+          tiktok: overview?.prev_tiktok_gmv ?? null,
+          ml: overview?.prev_ml_gmv ?? null,
+          shopee: overview?.prev_shopee_gmv ?? null,
+        }}
         mesMeta={mesMeta}
         diaMeta={diaMeta}
         hoje={hoje}
@@ -575,15 +586,6 @@ function GerencialInner() {
         onRetry={sources.retry}
         semGmv
         tendencias={tendencias}
-      />
-
-      <DecisoesTopo
-        itens={decisoes}
-        total={queue.commercial.length}
-        loading={sources.executiveSummary.status.loading}
-        error={sources.executiveSummary.status.error}
-        onOpen={(item) => setDialog({ kind: "commercial", item })}
-        onVerTodos={abrirDetalhes}
       />
 
       {/* ---- Dobra 2: como evoluiu / onde ----
@@ -616,6 +618,7 @@ function GerencialInner() {
             loading={sources.brands.status.loading}
             error={sources.brands.status.error}
             brandHref={brandHref}
+            tendenciaDoDia={tendenciaDoDia}
           />
         </div>
       </div>
@@ -637,7 +640,7 @@ function GerencialInner() {
           Profundidade sob demanda: tudo o que a V2 mostrava continua aqui,
           cada bloco com a propria fonte e o proprio erro. Fechado por padrao
           para a primeira dobra responder sozinha. */}
-      <details ref={detalhesRef} className="group rounded-xl border border-line bg-surface">
+      <details className="group rounded-xl border border-line bg-surface">
         <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-5 py-3 text-sm font-semibold text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
           <span>
             Mais detalhes

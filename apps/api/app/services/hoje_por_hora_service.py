@@ -45,6 +45,15 @@ def _bloco(gmv, pedidos) -> dict:
             "ticket": round(gmv / pedidos, 2) if pedidos else None}
 
 
+def projetar_fechamento(hoje_ate_corte: float, ontem_ate_corte: float, ontem_dia: float) -> Optional[float]:
+    """Onde o dia tende a fechar pelo RITMO DE ONTEM: o que ontem ja' tinha
+    vendido ate' a mesma hora diz que fracao do dia aquilo era. Sem venda ontem
+    ate' o corte nao ha' ritmo para usar: `None`, nunca um palpite."""
+    if ontem_ate_corte <= 0 or ontem_dia <= 0:
+        return None
+    return round(hoje_ate_corte * ontem_dia / ontem_ate_corte, 2)
+
+
 def hora_fechada_do_canal(fonte_ate: Optional[datetime], hoje: date) -> int:
     """Quantas horas de HOJE o canal ja' fechou (0 a 24)."""
     if fonte_ate is None:
@@ -104,6 +113,33 @@ def get_hoje_por_hora(db: Session, mkt_ids: list[int], brand_keys: Optional[list
 
     somas = {(r["dia"], r["marketplace_id"]): (r["gmv"], r["pedidos"]) for r in linhas}
 
+    # Tendencia de fechamento por marca: hoje e ontem ate' o corte, e ontem inteiro.
+    por_marca_linhas = db.execute(text(f"""
+        -- por_marca
+        SELECT l.brand_key AS brand, h.dia,
+               SUM(h.gmv) FILTER (WHERE h.hora < :corte) AS gmv_corte,
+               SUM(h.gmv) AS gmv_dia
+        FROM {TABELA} h
+        JOIN marts.dim_loja l ON l.loja_id = h.loja_id
+        WHERE h.dia = ANY(:dias)
+          AND h.marketplace_id = ANY(:mkt_ids)
+          AND (CAST(:brands AS text[]) IS NULL OR l.brand_key = ANY(CAST(:brands AS text[])))
+        GROUP BY 1, 2
+    """), {"dias": [dias["hoje"], dias["ontem"]], "corte": corte, "mkt_ids": mkt_ids,
+           "brands": brand_keys}).mappings().all() if corte > 0 else []
+    marcas: dict[str, dict] = {}
+    for r in por_marca_linhas:
+        m = marcas.setdefault(r["brand"], {"hoje": 0.0, "ontem_ate": 0.0, "ontem_dia": 0.0})
+        if r["dia"] == dias["hoje"]:
+            m["hoje"] = float(r["gmv_corte"] or 0)
+        else:
+            m["ontem_ate"], m["ontem_dia"] = float(r["gmv_corte"] or 0), float(r["gmv_dia"] or 0)
+    por_marca = [{
+        "brand": b, "hoje": round(m["hoje"], 2), "ontem_mesma_hora": round(m["ontem_ate"], 2),
+        "ontem_dia": round(m["ontem_dia"], 2),
+        "projecao": projetar_fechamento(m["hoje"], m["ontem_ate"], m["ontem_dia"]),
+    } for b, m in sorted(marcas.items())]
+
     def total(dia: date, ids: list[int]) -> dict:
         gmv = sum(float(somas.get((dia, m), (0, 0))[0] or 0) for m in ids)
         pedidos = sum(int(somas.get((dia, m), (0, 0))[1] or 0) for m in ids)
@@ -118,4 +154,5 @@ def get_hoje_por_hora(db: Session, mkt_ids: list[int], brand_keys: Optional[list
         **{nome: total(d, mkt_ids) for nome, d in dias.items()},
         "por_canal": [{"channel": CANAL_POR_ID[m], **{nome: total(d, [m]) for nome, d in dias.items()}}
                       for m in mkt_ids],
+        "por_marca": por_marca,
     }

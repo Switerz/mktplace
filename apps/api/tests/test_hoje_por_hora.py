@@ -37,8 +37,8 @@ class _Resultado:
 
 
 class SessaoFalsa:
-    def __init__(self, fontes, vendas, existe=True):
-        self.fontes, self.vendas, self.existe = fontes, vendas, existe
+    def __init__(self, fontes, vendas, existe=True, marcas=()):
+        self.fontes, self.vendas, self.existe, self.marcas = fontes, vendas, existe, list(marcas)
         self.params = {}
 
     def execute(self, sql, params=None):
@@ -47,6 +47,8 @@ class SessaoFalsa:
             return _Resultado(escalar=self.existe)
         if S.FONTES in sql:
             return _Resultado([(m, f) for m, f in self.fontes.items() if m in params["m"]])
+        if "-- por_marca" in sql:
+            return _Resultado(self.marcas)
         self.params = params
         return _Resultado([v for v in self.vendas if v["marketplace_id"] in params["mkt_ids"]])
 
@@ -119,3 +121,24 @@ def test_rota_registrada_e_resposta_valida_no_schema():
     db = SessaoFalsa(fontes={1: brt(13, 35)}, vendas=[venda(HOJE, 1, 10, 1)])
     HojePorHoraResponse(**S.get_hoje_por_hora(db, [1], None, agora=AGORA))
     HojePorHoraResponse(**S.get_hoje_por_hora(SessaoFalsa({}, [], existe=False), [1], None, agora=AGORA))
+
+
+def test_projecao_pelo_ritmo_de_ontem():
+    # Ontem, ate' 13h saiu 40% do dia: hoje ate' 13h com 500 tende a fechar em 1250.
+    assert S.projetar_fechamento(500, 400, 1000) == 1250.0
+    assert S.projetar_fechamento(500, 0, 1000) is None   # sem ritmo de ontem, sem palpite
+    assert S.projetar_fechamento(0, 400, 1000) == 0.0
+
+
+def test_tendencia_por_marca_usa_hoje_e_ontem_no_mesmo_corte():
+    ontem = HOJE - timedelta(days=1)
+    db = SessaoFalsa(
+        fontes={2: brt(13, 10)}, vendas=[],
+        marcas=[{"brand": "apice", "dia": HOJE, "gmv_corte": 500, "gmv_dia": 500},
+                {"brand": "apice", "dia": ontem, "gmv_corte": 400, "gmv_dia": 1000},
+                {"brand": "lescent", "dia": HOJE, "gmv_corte": 80, "gmv_dia": 80}],
+    )
+    res = S.get_hoje_por_hora(db, [2], None, agora=AGORA)
+    apice, lescent = res["por_marca"]
+    assert apice == {"brand": "apice", "hoje": 500.0, "ontem_mesma_hora": 400.0, "ontem_dia": 1000.0, "projecao": 1250.0}
+    assert lescent["projecao"] is None  # ontem sem venda: sem projecao

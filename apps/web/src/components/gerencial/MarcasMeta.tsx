@@ -56,6 +56,8 @@ interface Props {
   loading: boolean;
   error: boolean;
   brandHref: (brand: string) => string;
+  /** Com "Hoje": onde cada marca tende a fechar o dia, e o dia inteiro de ontem. */
+  tendenciaDoDia?: Record<string, { projecao: number; ontemDia: number }> | null;
 }
 
 export default function MarcasMeta({
@@ -67,6 +69,7 @@ export default function MarcasMeta({
   loading,
   error,
   brandHref,
+  tendenciaDoDia = null,
 }: Props) {
   // Marca com meta e sem linha em `/brands` (nada vendido no recorte) entra
   // com tudo zerado: mostrar 0% da meta e' o ponto, nao esconder a marca.
@@ -159,6 +162,7 @@ export default function MarcasMeta({
                         {fmtPctBr(b.mom_pct)}
                       </span>
                     ) : null}
+                    <TendenciaDoDia t={tendenciaDoDia?.[b.brand] ?? null} />
                   </span>
                 </Link>
               </li>
@@ -167,6 +171,25 @@ export default function MarcasMeta({
         </ul>
       )}
     </section>
+  );
+}
+
+/** "tende a R$ 1,2 mi · ▲ 8% vs ontem": a projecao contra o dia inteiro de ontem. */
+function TendenciaDoDia({ t }: { t: { projecao: number; ontemDia: number } | null }) {
+  if (!t) return null;
+  const pct = t.ontemDia > 0 ? ((t.projecao - t.ontemDia) / t.ontemDia) * 100 : null;
+  return (
+    <span
+      className="text-xs text-ink-muted"
+      title={`Pelo ritmo de ontem até a mesma hora. Ontem fechou em ${fmtCompacto(t.ontemDia)}.`}
+    >
+      tende a <b className="font-semibold text-ink">{fmtCompacto(t.projecao)}</b>
+      {pct != null && (
+        <span className={`ml-1 font-semibold ${pct >= 0 ? "text-ok-ink" : "text-crit-ink"}`}>
+          {pct >= 0 ? "▲" : "▼"} {fmtPctBr(Math.abs(pct)).replace("+", "")} vs ontem
+        </span>
+      )}
+    </span>
   );
 }
 
