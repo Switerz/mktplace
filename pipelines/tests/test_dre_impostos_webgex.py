@@ -11,6 +11,7 @@ Duas partes:
 """
 from __future__ import annotations
 
+import pathlib
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
@@ -193,44 +194,72 @@ def test_parciais_se_acumulam_e_nenhum_trecho_tem_separador_interno():
 
 
 def test_parcial_nunca_muda_valor_nem_status():
-    base = linhas_imp(lote([("tiktok", "kokeshi", 1_000_000)], [imp("tiktok")], mes=OUT), "tiktok")
-    ritu = linhas_imp(lote([("tiktok", "rituaria", 1_000_000)], [imp("tiktok", "rituaria")], mes=OUT),
+    base = linhas_imp(lote([("tiktok", "kokeshi", 1_000_000)], [imp("tiktok", mes=OUT)], mes=OUT), "tiktok")
+    ritu = linhas_imp(lote([("tiktok", "rituaria", 1_000_000)], [imp("tiktok", "rituaria", mes=OUT)], mes=OUT),
                       "tiktok", "rituaria")
+    assert P.IMPOSTO_PARCIAL_BASE in ritu[P.IMPOSTO_ICMS]["motivo"]
+    assert base[P.IMPOSTO_ICMS]["valor"] == Decimal(127000)  # compara valor medido, nao nulo com nulo
     for c in P.IMPOSTOS:
         assert (base[c]["valor"], base[c]["status_reconciliacao"], base[c]["cobertura"]) == \
             (ritu[c]["valor"], ritu[c]["status_reconciliacao"], ritu[c]["cobertura"])
 
 
 # ---------------------------------------------------------------------------
-# Recusas
+# Validacao dos impostos: reprova SO' os impostos, nunca o lote
 # ---------------------------------------------------------------------------
 
-def test_chave_de_nf_em_mais_de_uma_celula_recusa():
-    lt = lote([("ml", "kokeshi", 1_000_000)], [imp(ambiguas=2)])
-    assert any("cai em mais de uma celula" in m for m in lt.recusas)
+def _sem_impostos_e_lote_intacto(lt, cels, trecho):
+    """Lote publicado sem NENHUMA linha de imposto (fail-closed), resto igual ao inerte."""
+    assert lt.recusas == []
+    assert not any(r["componente"] in P.IMPOSTOS for r in lt.linhas)
+    assert lt.linhas == lote(cels, None).linhas
+    assert lt.impostos_estado.startswith("recusado: ") and trecho in lt.impostos_estado
+    assert any(trecho in m for m in lt.impostos_recusas)
 
 
-def test_receita_fiscal_diferente_da_do_cmv_recusa():
-    lt = lote([("ml", "kokeshi", 1_000_000)], [imp(receita=1_000_002, coberta=1_000_002)])
-    assert any("diverge da do CMV" in m for m in lt.recusas)
-    lt2 = lote([("ml", "kokeshi", 1_000_000)], [imp(marca="apice")])  # celula sem CMV
-    assert any("sem CMV" in m for m in lt2.recusas)
+ML = [("ml", "kokeshi", 1_000_000)]
 
 
-def test_imposto_negativo_recusa():
-    lt = lote([("ml", "kokeshi", 1_000_000)], [imp(difal="-1")])
-    assert any("imposto_difal negativo" in m for m in lt.recusas)
+def test_chave_de_nf_em_mais_de_uma_celula_reprova_so_os_impostos():
+    _sem_impostos_e_lote_intacto(lote(ML, [imp(ambiguas=2)]), ML, "cai em mais de uma celula")
 
 
-def test_cobertura_acima_de_um_recusa():
-    lt = lote([("ml", "kokeshi", 1_000_000)], [imp(coberta=1_000_100)])
-    assert any("cobertura fora de [0,1]" in m for m in lt.recusas)
-    assert linha(lt, "ml", "kokeshi", P.IMPOSTO_ICMS)["cobertura"] is None
+def test_receita_fiscal_diferente_da_do_cmv_reprova_so_os_impostos():
+    """O caso da recarga da gold entre o SQL_CMV e o SQL_IMPOSTOS."""
+    _sem_impostos_e_lote_intacto(lote(ML, [imp(receita=1_000_002, coberta=1_000_002)]), ML, "diverge da do CMV")
+    _sem_impostos_e_lote_intacto(lote(ML, [imp(marca="apice")]), ML, "sem CMV")  # celula sem CMV
 
 
-def test_chave_repetida_na_leitura_recusa():
-    lt = lote([("ml", "kokeshi", 1_000_000)], [imp(), imp()])
-    assert any("impostos: chave repetida" in m for m in lt.recusas)
+def test_reprovacao_numa_celula_derruba_os_impostos_de_todas():
+    """Nada de publicar imposto parcial de uma leitura inconsistente."""
+    cels = ML + [("ml", "apice", 500_000)]
+    lt = lote(cels, [imp(), imp(marca="apice", receita=500_000, difal="-1")])
+    _sem_impostos_e_lote_intacto(lt, cels, "imposto_difal negativo")
+
+
+def test_imposto_negativo_reprova_so_os_impostos():
+    _sem_impostos_e_lote_intacto(lote(ML, [imp(difal="-1")]), ML, "imposto_difal negativo")
+
+
+def test_cobertura_acima_de_um_reprova_so_os_impostos():
+    _sem_impostos_e_lote_intacto(lote(ML, [imp(coberta=1_000_100)]), ML, "cobertura fora de [0,1]")
+
+
+def test_chave_repetida_na_leitura_reprova_so_os_impostos():
+    _sem_impostos_e_lote_intacto(lote(ML, [imp(), imp()]), ML, "impostos: chave repetida")
+
+
+def test_estado_da_reprovacao_lista_no_maximo_cinco_motivos():
+    cels = [("ml", f"m{i}", 1_000_000) for i in range(7)]
+    lt = lote(cels, [imp(marca=f"m{i}", difal="-1") for i in range(7)])
+    assert lt.recusas == [] and len(lt.impostos_recusas) == 7
+    assert lt.impostos_estado.endswith("(e mais 2)")
+
+
+def test_validacao_ok_marca_publicado():
+    lt = lote(ML, [imp()])
+    assert lt.impostos_estado == "publicado" and lt.impostos_recusas == []
+    assert P._resumo_impostos(lt, "lido")["estado"] == "publicado"
 
 
 def test_celula_fora_do_esperado_nao_e_publicada():
@@ -321,13 +350,52 @@ class _EngFonte:
         return _ConnFonte(self.lidas)
 
 
-@pytest.mark.parametrize("com_impostos", [False, True])
-def test_leitura_dos_impostos_so_acontece_com_o_check(com_impostos):
+@pytest.mark.parametrize("aceita", [False, True])
+def test_leitura_dos_impostos_so_acontece_com_o_check(aceita):
     eng = _EngFonte()
-    *_, impostos = P.ler_fonte(eng, [JUL], ["ml"], ["kokeshi"], False, com_impostos)
-    assert any(s is P.SQL_IMPOSTOS for s in eng.lidas) is com_impostos
-    assert (impostos is None) is (not com_impostos)
-    assert str(eng.lidas[0]) == "SET TRANSACTION READ ONLY"
+    impostos, estado = P.ler_impostos(eng, [JUL], ["ml"], ["kokeshi"], aceita)
+    assert any(s is P.SQL_IMPOSTOS for s in eng.lidas) is aceita
+    assert (impostos is None) is (not aceita)
+    assert estado == ("lido" if aceita else P.estado_impostos(None))
+    if aceita:
+        assert [str(x) for x in eng.lidas[:2]] == ["SET TRANSACTION READ ONLY", "SET LOCAL statement_timeout = '600s'"]
+    # a leitura principal nao toca mais nos impostos
+    eng2 = _EngFonte()
+    P.ler_fonte(eng2, [JUL], ["ml"], ["kokeshi"], False)
+    assert not any(s is P.SQL_IMPOSTOS for s in eng2.lidas)
+
+
+class _EngTimeout:
+    """`SQL_IMPOSTOS` estoura o statement_timeout; o resto da fonte responde."""
+
+    def __init__(self):
+        self.lidas = []
+
+    def connect(self):
+        eng = self
+
+        class C(_ConnFonte):
+            def execute(self, sql, params=None):
+                if sql is P.SQL_IMPOSTOS:
+                    from sqlalchemy.exc import OperationalError
+                    raise OperationalError("SELECT", {}, Exception(
+                        "canceling statement due to statement timeout postgresql://u:SEGREDO@10.0.0.1/dm"))
+                return super().execute(sql, params)
+        return C(eng.lidas)
+
+
+def test_erro_na_leitura_dos_impostos_vira_indisponivel_sem_dsn():
+    impostos, estado = P.ler_impostos(_EngTimeout(), [JUL], ["ml"], ["kokeshi"], True)
+    assert impostos is None and estado == "indisponivel: OperationalError"
+    assert "SEGREDO" not in estado and "10.0.0.1" not in estado
+
+
+def test_leitura_dos_impostos_so_engole_erro_de_sql():
+    fonte = (pathlib.Path(P.__file__)).read_text(encoding="utf-8")
+    trecho = fonte[fonte.index("def ler_impostos"):fonte.index("def ler_numeracao_nf")]
+    assert "except SQLAlchemyError" in trecho and "except Exception" not in trecho
+    assert trecho.index("SET TRANSACTION READ ONLY") < trecho.index("statement_timeout = '600s'") \
+        < trecho.index("SQL_IMPOSTOS")
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +442,7 @@ class _EngParams(_EngFonte):
 
 def test_leitura_passa_a_janela_do_webgex_e_a_competencia_segue_da_gold():
     eng = _EngParams()
-    P.ler_fonte(eng, [SET, OUT], ["ml"], ["kokeshi"], False, True)
+    P.ler_impostos(eng, [SET, OUT], ["ml"], ["kokeshi"], True)
     assert (eng.params["inicio_webgex"], eng.params["fim_webgex"]) == (date(2026, 8, 25), date(2026, 11, 8))
     assert eng.params["competencias"] == [SET, OUT]  # a celula continua sendo a `data_mes` da gold
 
@@ -572,19 +640,44 @@ def test_sql_real_nao_multiplica_pelos_itens_e_ignora_ruido(bancos):
     assert sh["notas_com_imposto"] == 0 and sh["icms"] is None and sh["receita_com_imposto"] is None
 
 
+def _cmv_publicado(alvo) -> dict:
+    with alvo.connect() as c:
+        rows = c.execute(text("SELECT canal, marca, valor FROM marts.fact_dre_insumo_mensal "
+                              "WHERE componente = 'cmv'")).mappings().all()
+    return {(r["canal"], r["marca"]): r["valor"] for r in rows}
+
+
 @pg
-def test_chave_em_duas_celulas_e_detectada_e_recusa_sem_escrever(bancos):
+def test_chave_em_duas_celulas_publica_o_lote_sem_impostos(bancos):
     alvo, fonte = bancos
     _upgrade_040(alvo)
-    with fonte.begin() as c:  # um item de uma NF do ML aparece como Shopee: a chave cai em duas celulas
-        c.execute(text("""UPDATE gold.nf_vendas_unificada_v2 SET plataforma = 'shopee'
+    with fonte.begin() as c:  # um item da Shopee carrega a chave de uma NF do ML: a chave cai em duas celulas
+        c.execute(text("""UPDATE gold.nf_vendas_unificada_v2
+                          SET chave_nfe = (SELECT chave_nfe FROM gold.nf_vendas_unificada_v2
+                                           WHERE plataforma = 'mercadolivre' AND marca = 'kokeshi'
+                                             AND canal = 'marketplace' AND intercompany IS NOT TRUE LIMIT 1)
                           WHERE ctid = (SELECT ctid FROM gold.nf_vendas_unificada_v2
-                                        WHERE plataforma = 'mercadolivre' AND marca = 'kokeshi'
-                                          AND intercompany IS NOT TRUE AND canal = 'marketplace' LIMIT 1)"""))
-    with pytest.raises(P.PublicacaoRecusada) as exc:
-        _publicar(alvo, fonte)
-    assert any("cai em mais de uma celula" in m for m in exc.value.motivos)
+                                        WHERE plataforma = 'shopee' AND marca = 'kokeshi' LIMIT 1)"""))
+    res = _publicar(alvo, fonte)
+    assert res["recusas"] == []
+    assert res["impostos"]["estado"].startswith("recusado: ")
+    assert "cai em mais de uma celula" in res["impostos"]["estado"]
+    assert _impostos_publicados(alvo) == {}  # fail-closed: nenhum imposto, nem das celulas boas
+    assert _cmv_publicado(alvo)[("ml", "kokeshi")] == Decimal("300000.00")  # o resto do lote saiu
+
+
+@pg
+def test_erro_na_leitura_dos_impostos_publica_o_lote_com_cmv_e_sem_impostos(bancos):
+    alvo, fonte = bancos
+    _upgrade_040(alvo)
+    with fonte.begin() as c:  # a SQL de impostos passa a falhar (tabela some da fonte)
+        c.execute(text("DROP TABLE raw.webgex_impostos_ap"))
+    res = _publicar(alvo, fonte)
+    assert res["recusas"] == [] and res["impostos"]["estado"] == "indisponivel: ProgrammingError"
     assert _impostos_publicados(alvo) == {}
+    assert _cmv_publicado(alvo)[("ml", "kokeshi")] == Decimal("300000.00")
+    with alvo.connect() as c:
+        assert c.execute(text("SELECT status FROM audit.source_sync_run")).scalars().all() == ["success"]
 
 
 @pg
