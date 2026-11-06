@@ -63,19 +63,32 @@ export function variacao(atual: number, base: number): number | null {
   return ((atual - base) / base) * 100;
 }
 
-const NOME_DO_CANAL: Record<Marketplace, string> = { tiktok: "TikTok", ml: "Mercado Livre", shopee: "Shopee" };
-
-export function nomeDoCanal(canal: Marketplace): string {
-  return NOME_DO_CANAL[canal];
+/** A comparacao de "Hoje" que os cards de sempre mostram, no lugar do "vs anterior". */
+export interface ComparacaoDeHoje {
+  /** "vs ontem até 14h", com o aviso quando um recorte fica de fora. */
+  rotulo: string;
+  gmvPct: number | null;
+  pedidosPct: number | null;
+  ticketPct: number | null;
+  ontem: BlocoVendas;
+  porCanal: Partial<Record<Marketplace, number | null>>;
 }
 
 /**
- * Quem segura o corte: os canais que pararam na hora do corte enquanto outro
- * ja' foi alem. Vazio quando todos estao na mesma hora (nada a explicar).
+ * Hoje x ontem ATE' A MESMA HORA, dos dois lados com o mesmo corte. `null`
+ * sem a tabela por hora ou antes de fechar a primeira hora: sem comparacao,
+ * nunca uma injusta (dia parcial contra dia inteiro).
  */
-export function canaisQueLimitam(r: Pick<HojePorHora, "canais" | "corte_hora">): Marketplace[] {
-  if (r.corte_hora == null || r.canais.length < 2) return [];
-  const max = Math.max(...r.canais.map((c) => c.horas_fechadas_hoje));
-  if (max <= r.corte_hora) return [];
-  return r.canais.filter((c) => c.horas_fechadas_hoje <= r.corte_hora!).map((c) => c.channel);
+export function comparacaoDeHoje(d: HojePorHora | null): ComparacaoDeHoje | null {
+  const rotulo = d ? rotuloDoCorte(d.corte_hora) : null;
+  if (!d?.disponivel || !rotulo || !d.hoje || !d.ontem) return null;
+  const fora = d.limitacoes.some((l) => l.startsWith("Kokeshi na Shopee")) ? " (sem Kokeshi Shopee)" : "";
+  return {
+    rotulo: `vs ontem ${rotulo}${fora}`,
+    gmvPct: variacao(d.hoje.gmv, d.ontem.gmv),
+    pedidosPct: variacao(d.hoje.pedidos, d.ontem.pedidos),
+    ticketPct: d.hoje.ticket != null && d.ontem.ticket != null ? variacao(d.hoje.ticket, d.ontem.ticket) : null,
+    ontem: d.ontem,
+    porCanal: Object.fromEntries(d.por_canal.map((c) => [c.channel, variacao(c.hoje.gmv, c.ontem.gmv)])),
+  };
 }

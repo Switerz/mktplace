@@ -562,6 +562,20 @@ test("18b. celula sem dado e' indisponivel com motivo, nunca zero silencioso", (
   assert.ok(cell.unavailableReason);
 });
 
+test("18c. totais da matriz com variacao; sem base justa (dia em andamento), nenhuma", () => {
+  const linhas = [
+    brandRow({ brand: "a", label: "A", ml_gmv: 120, ml_gmv_prev: 100, shopee_gmv: 50, shopee_gmv_prev: 50, total_gmv: 170 }),
+    brandRow({ brand: "b", label: "B", ml_gmv: 80, ml_gmv_prev: 100, total_gmv: 80 }),
+  ];
+  const m = buildBrandChannelMatrix(linhas, ["ml", "shopee"]);
+  assert.equal(m.channelMomPct.ml, 0); // 200 contra 200
+  assert.equal(m.grandMomPct, 0); // 250 contra 250
+  assert.equal(Math.round(m.rows.find((r) => r.brand === "a")!.brandMomPct! * 10) / 10, 13.3);
+  const hoje = buildBrandChannelMatrix(linhas, ["ml", "shopee"], false);
+  assert.equal(hoje.grandMomPct, null);
+  assert.ok(hoje.rows.every((r) => r.brandMomPct == null && r.cells.every((c) => c.momPct == null)));
+});
+
 // ---------------------------------------------------------------------------
 // 19. Fila comercial separada da confianca
 // ---------------------------------------------------------------------------

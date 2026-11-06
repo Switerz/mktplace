@@ -89,7 +89,10 @@ function variacao(atual: number, anterior: number): number | null {
 export function buildBrandChannelMatrix(
   brands: readonly BrandRow[],
   channels: readonly Marketplace[],
+  /** Falso sem base justa (comparar desligado ou dia em andamento): nenhuma variacao. */
+  comparar = true,
 ): BrandChannelMatrix {
+  const anterior = (row: BrandRow, c: Marketplace) => (comparar ? CHANNEL_FIELDS[c].prev(row) : null);
   const activeChannels = CHANNEL_ORDER.filter((c) => isMarketplaceSelected(channels, c));
 
   // Maximo e total por canal, calculados ANTES das celulas: a intensidade e a
@@ -98,12 +101,12 @@ export function buildBrandChannelMatrix(
   const channelTotals: Record<string, number> = {};
   const channelPrev: Record<string, number> = {};
   for (const channel of activeChannels) {
-    const { gmv: pick, prev: pickPrev } = CHANNEL_FIELDS[channel];
+    const pick = CHANNEL_FIELDS[channel].gmv;
     let max = 0;
     let total = 0;
-    let anterior = 0;
+    let soma = 0;
     for (const row of brands) {
-      anterior += pickPrev(row) ?? 0;
+      soma += anterior(row, channel) ?? 0;
       const v = pick(row);
       if (v == null) continue;
       if (v > max) max = v;
@@ -111,14 +114,13 @@ export function buildBrandChannelMatrix(
     }
     maxByChannel[channel] = max;
     channelTotals[channel] = total;
-    channelPrev[channel] = anterior;
+    channelPrev[channel] = soma;
   }
 
   const rows: MatrixRow[] = brands.map((row) => {
     const cells: MatrixCell[] = activeChannels.map((channel) => {
-      const { gmv: pickGmv, prev: pickPrev } = CHANNEL_FIELDS[channel];
-      const gmv = pickGmv(row);
-      const prev = pickPrev(row);
+      const gmv = CHANNEL_FIELDS[channel].gmv(row);
+      const prev = anterior(row, channel);
       if (gmv == null) {
         return {
           channel,
@@ -143,7 +145,7 @@ export function buildBrandChannelMatrix(
       };
     });
     const brandTotal = cells.reduce((sum, c) => sum + (c.gmv ?? 0), 0);
-    const brandPrev = activeChannels.reduce((sum, c) => sum + (CHANNEL_FIELDS[c].prev(row) ?? 0), 0);
+    const brandPrev = activeChannels.reduce((sum, c) => sum + (anterior(row, c) ?? 0), 0);
     return { brand: row.brand, label: row.label, cells, brandTotal, brandMomPct: variacao(brandTotal, brandPrev) };
   });
 
