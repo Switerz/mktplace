@@ -35,6 +35,8 @@ MARCAS: tuple[str, ...] = metas_service.MARCAS
 #: marketplace_id da fact -> canal das metas.
 CANAL_DO_MKT = {1: "tiktok", 2: "ml", 3: "shopee"}
 ROTULO_CANAL_META = {"tiktok": "TikTok Shop", "ml": "Mercado Livre", "shopee": "Shopee"}
+#: Como o GMV aparece dividido: Shopee e Meli sempre; TikTok so' quando vendeu.
+ROTULO_CURTO = {"shopee": "Shopee", "ml": "Meli", "tiktok": "TikTok"}
 
 # Limiares do report (ver o doc). Fracoes.
 META_DIA_CRITICO = 0.70
@@ -120,6 +122,8 @@ class LinhaMarca:
     gmv_semana_passada: float
     #: Realizado dos canais com meta / meta do dia; None sem meta.
     pct_meta_dia: Optional[float]
+    #: canal -> GMV de ontem
+    por_canal: dict[str, float] = field(default_factory=dict)
 
     @property
     def var_semana(self) -> Optional[float]:
@@ -168,10 +172,12 @@ def compor_report(d: Dados) -> Report:
         real_meta_total += real
         linhas.append(LinhaMarca(
             marca, soma(marca, None, [ontem]), soma(marca, None, [semana]),
-            (real / meta_dia) if meta_dia > 0 else None))
+            (real / meta_dia) if meta_dia > 0 else None,
+            {c: soma(marca, c, [ontem]) for c in canais}))
     linhas.sort(key=lambda x: -x.gmv)
     total = LinhaMarca("total", sum(x.gmv for x in linhas), sum(x.gmv_semana_passada for x in linhas),
-                       (real_meta_total / meta_dia_total) if meta_dia_total > 0 else None)
+                       (real_meta_total / meta_dia_total) if meta_dia_total > 0 else None,
+                       {c: sum(x.por_canal[c] for x in linhas) for c in canais})
 
     mes = None
     if any(v > 0 for v in d.metas.values()):
@@ -249,12 +255,18 @@ def compor_report(d: Dados) -> Report:
     return rep
 
 
+def divisao(x: LinhaMarca) -> str:
+    """'Shopee R$ 200,0 mil + Meli R$ 100,0 mil' (TikTok so' quando vendeu)."""
+    return " + ".join(f"{ROTULO_CURTO[c]} {brl(x.por_canal.get(c, 0.0))}" for c in ROTULO_CURTO
+                      if c != "tiktok" or x.por_canal.get(c, 0.0) > 0)
+
+
 def montar_mensagem(rep: Report) -> str:
     o = rep.ontem
     quando = f"{DIAS_SEMANA[o.weekday()]}, {o:%d/%m}"
     s = rep.total
     linhas = [
-        f":sunrise: *Bom dia! Ontem ({quando}): {brl(s.gmv)} de GMV nas marcas, "
+        f":sunrise: *Bom dia! Ontem ({quando}): {brl(s.gmv)} de GMV nas marcas ({divisao(s)}), "
         f"{len(rep.avancos)} avanço{'s' if len(rep.avancos) != 1 else ''}, "
         f"{len(rep.problemas)} problema{'s' if len(rep.problemas) != 1 else ''}.*"
     ]
@@ -263,7 +275,7 @@ def montar_mensagem(rep: Report) -> str:
         linhas.append(f"_Dia de evento: {evento}._")
 
     def detalhe(x: LinhaMarca) -> str:
-        partes = [brl(x.gmv)]
+        partes = [f"{brl(x.gmv)} ({divisao(x)})"]
         if x.pct_meta_dia is not None:
             partes.append(f"{pct0(x.pct_meta_dia)} da meta do dia")
         if x.var_semana is not None:
@@ -314,10 +326,10 @@ def montar_blocos(rep: Report) -> sb.Mensagem:
     o = rep.ontem
     dia_sem = DIAS_SEMANA[o.weekday()]
     t = rep.total
-    resumo = (f"{brl(t.gmv)} de GMV ontem, {_plural(len(rep.avancos), 'avanço', 'avanços')}, "
+    resumo = (f"{brl(t.gmv)} de GMV ontem ({divisao(t)}), {_plural(len(rep.avancos), 'avanço', 'avanços')}, "
               f"{_plural(len(rep.problemas), 'problema', 'problemas')}")
 
-    numeros = [("GMV de ontem", brl(t.gmv))]
+    numeros = [("GMV de ontem", f"{brl(t.gmv)}\n{divisao(t)}")]
     if t.pct_meta_dia is not None:
         numeros.append(("Meta do dia", f"{_bola_meta(t.pct_meta_dia)} {pct0(t.pct_meta_dia)}"))
     if t.var_semana is not None:
@@ -346,7 +358,7 @@ def montar_blocos(rep: Report) -> sb.Mensagem:
     blocos.append(sb.divisor())
     linhas = ["*GMV por marca*"]
     for x in rep.linhas:
-        partes = [f"*{ta.rotulo_marca(x.marca)}*  {brl(x.gmv)}"]
+        partes = [f"*{ta.rotulo_marca(x.marca)}*  {brl(x.gmv)} ({divisao(x)})"]
         if x.pct_meta_dia is not None:
             partes.append(f"{pct0(x.pct_meta_dia)} da meta")
         if x.var_semana is not None:

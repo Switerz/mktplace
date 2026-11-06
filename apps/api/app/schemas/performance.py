@@ -61,6 +61,7 @@ class BrandPerformance(BaseModel):
     gpm: Optional[float] = None
     ml_roas: Optional[float] = None
     ml_cancel_rate_pct: Optional[float] = None
+    ad_spend: Optional[float] = None  # Ads ML + Shopee da marca
 
 
 class BrandsResponse(BaseModel):

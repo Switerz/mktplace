@@ -139,7 +139,7 @@ export default function KpiDrilldownContent({
       {kind === "gmv" && <GmvBreakdown overview={overview} brands={brands} channels={channels} />}
       {kind === "orders" && <OrdersBreakdown brands={brands} />}
       {kind === "avg_ticket" && <AvgTicketBreakdown brands={brands} />}
-      {kind === "ad_spend" && <AdSpendBreakdown overview={overview} channels={channels} />}
+      {kind === "ad_spend" && <AdSpendBreakdown overview={overview} brands={brands} channels={channels} />}
       {kind === "roas" && <RoasBreakdown overview={overview} brands={brands} channels={channels} />}
 
       <DrilldownCta href={buildHref(meta.nextHref)}>{meta.nextLabel} →</DrilldownCta>
@@ -265,11 +265,14 @@ function AvgTicketBreakdown({ brands }: { brands: BrandRow[] }) {
  * soma cobre os tres canais. O TikTok aparece como indisponivel nesta fonte,
  * nunca como R$ 0.
  */
-function AdSpendBreakdown({ overview, channels }: { overview: OverviewData; channels: Marketplace[] }) {
+function AdSpendBreakdown({ overview, brands, channels }: { overview: OverviewData; brands: BrandRow[]; channels: Marketplace[] }) {
   const mlSelected = isMarketplaceSelected(channels, "ml");
   const shopeeSelected = isMarketplaceSelected(channels, "shopee");
   const tiktokSelected = isMarketplaceSelected(channels, "tiktok");
+  const porMarca = brands.filter((b) => b.ad_spend != null).sort((a, b) => b.ad_spend! - a.ad_spend!);
+  const total = porMarca.reduce((s, b) => s + b.ad_spend!, 0);
   return (
+    <>
     <DrilldownSecao titulo="Por canal">
       <ul className="flex flex-col">
         {(mlSelected || shopeeSelected) && (
@@ -282,6 +285,25 @@ function AdSpendBreakdown({ overview, channels }: { overview: OverviewData; chan
         {tiktokSelected && <EvidenceRow label="TikTok Shop" ponto={CHANNEL_DOT.tiktok} value="Não reporta" tone="muted" />}
       </ul>
     </DrilldownSecao>
+    {porMarca.length > 0 && (
+      <DrilldownSecao titulo="Por marca" acao={<span>{porMarca.length}</span>}>
+        <ul className="flex flex-col">
+          {porMarca.map((b) => {
+            const pct = total > 0 ? (b.ad_spend! / total) * 100 : null;
+            return (
+              <EvidenceRow
+                key={b.brand}
+                label={b.label}
+                pct={pct}
+                barra="bg-kpi-ads"
+                value={`${fmtBrl(b.ad_spend!)} · ${fmtPct1(pct)}`}
+              />
+            );
+          })}
+        </ul>
+      </DrilldownSecao>
+    )}
+    </>
   );
 }
 
