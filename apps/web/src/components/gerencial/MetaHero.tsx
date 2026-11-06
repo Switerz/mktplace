@@ -25,7 +25,6 @@ import { ROTULO_STATUS, type ProgressoMeta, type StatusMeta } from "@/lib/gerenc
 import { diaDaSemana, type ProgressoDia, type StatusDia } from "@/lib/metas-curva";
 import { fmtCompacto, rotuloMes } from "@/lib/metas";
 import { fmtPctBr } from "@/lib/formatters";
-import type { DivisaoFull } from "@/lib/gerencial/divisao-full";
 import InfoDica from "@/components/ui/InfoDica";
 import NumeroAnimado from "@/components/ui/NumeroAnimado";
 
@@ -88,8 +87,8 @@ interface Props {
   metasHref: string;
   /** Abre o detalhe do GMV (o mesmo drill-down que o card de GMV abria). */
   onOpenGmv: () => void;
-  /** Receita entre Full (ML Full + Shopee FBS) e normal; `null` = sem dado. */
-  fullNormal?: DivisaoFull | null;
+  /** Proporcao Full (0..1) de cada canal; ausente = canal sem a medida. */
+  shareFull?: Partial<Record<Marketplace, number | null>> | null;
 }
 
 export default function MetaHero(props: Props) {
@@ -112,9 +111,9 @@ export default function MetaHero(props: Props) {
             channels={props.channels}
             gmvByChannel={props.gmvByChannel}
             varGmvByChannel={props.compareActive ? props.varGmvByChannel ?? null : null}
+            shareFull={props.shareFull ?? null}
             total={gmv}
           />
-          {!error && props.fullNormal && gmv ? <DivisaoFullNormal d={props.fullNormal} total={gmv} /> : null}
         </div>
         {props.diaMeta ? (
           <SeloDoDia progressoDia={props.progressoDia} metasHref={props.metasHref} />
@@ -399,38 +398,72 @@ function SeloDoDia({ progressoDia, metasHref }: { progressoDia: ProgressoDia | n
   );
 }
 
+/**
+ * Uma barra so': um trecho por canal (largura = GMV do canal), e dentro de
+ * cada trecho o tom cheio e' o Full e o claro, o resto. O rotulo fica colado
+ * no pedaco: canal, valor e variacao em cima; "Full 84%" embaixo. Sem a
+ * medida de Full (TikTok, ou fato indisponivel), o trecho fica inteiro.
+ */
 function Divisao({
   channels,
   gmvByChannel,
   varGmvByChannel,
+  shareFull,
   total,
 }: {
   channels: Marketplace[];
   gmvByChannel: Record<Marketplace, number | null>;
   varGmvByChannel: Partial<Record<Marketplace, number | null>> | null;
+  shareFull: Partial<Record<Marketplace, number | null>> | null;
   total: number | null;
 }) {
   const partes = channels
-    .map((c) => ({ c, v: gmvByChannel[c] }))
-    .filter((x): x is { c: Marketplace; v: number } => x.v != null && x.v > 0);
-  if (!total || partes.length < 2) return null;
+    .map((c) => ({ c, v: gmvByChannel[c], s: c === "tiktok" ? null : shareFull?.[c] ?? null }))
+    .filter((x): x is { c: Marketplace; v: number; s: number | null } => x.v != null && x.v > 0);
+  if (!total || partes.length === 0 || (partes.length < 2 && partes[0].s == null)) return null;
   return (
-    <div className="mt-4">
-      <div className="flex h-1.5 gap-0.5 overflow-hidden rounded-full" aria-hidden="true">
-        {partes.map(({ c, v }) => (
-          <div key={c} className={PONTO[c]} style={{ flex: v }} />
-        ))}
-      </div>
-      <ul className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-muted tabular-nums">
-        {partes.map(({ c, v }) => (
-          <li key={c} className="inline-flex items-center gap-1.5">
-            <span aria-hidden="true" className={`h-2 w-2 rounded-full ${PONTO[c]}`} />
-            {CHANNEL_LABEL[c]} {fmtCompacto(v)} · {Math.round((v / total) * 100)}%
-            <Variacao pct={varGmvByChannel?.[c] ?? null} />
-          </li>
-        ))}
-      </ul>
-    </div>
+    <ul className="mt-4 flex gap-3">
+      {partes.map(({ c, v, s }) => (
+        <li
+          key={c}
+          className="flex min-w-[7.5rem] flex-col text-xs text-ink-muted tabular-nums"
+          style={{ flex: `${v} 1 0` }}
+          title={
+            c === "shopee" && s != null
+              ? "Full = FBS. A proporção é medida nas contas da Shopee com API (sem a Kokeshi, que chega por arquivo) e aplicada ao GMV do canal."
+              : undefined
+          }
+        >
+          <p className="leading-snug">
+            <span className="font-semibold text-ink">{CHANNEL_LABEL[c]}</span> {fmtCompacto(v)} ·{" "}
+            {Math.round((v / total) * 100)}% <Variacao pct={varGmvByChannel?.[c] ?? null} />
+          </p>
+          {/* mt-auto: rotulo em 1 ou 2 linhas, as barras dos canais ficam na mesma altura. */}
+          <div className="mt-auto pt-1">
+            <div className="flex h-1.5 gap-0.5 overflow-hidden rounded-full" aria-hidden="true">
+              {s != null ? (
+                <>
+                  <div className={PONTO[c]} style={{ flex: s }} />
+                  <div className={`${PONTO[c]} opacity-30`} style={{ flex: 1 - s }} />
+                </>
+              ) : (
+                <div className={`${PONTO[c]} flex-1`} />
+              )}
+            </div>
+          </div>
+          {s != null && (
+            <p className="mt-1 flex">
+              <span className="whitespace-nowrap" style={{ flex: s }}>
+                Full {Math.round(s * 100)}%
+              </span>
+              <span className="whitespace-nowrap text-right text-ink-faint" style={{ flex: 1 - s }}>
+                {Math.round((1 - s) * 100)}%
+              </span>
+            </p>
+          )}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -441,31 +474,6 @@ function Variacao({ pct }: { pct: number | null }) {
     <span className={`font-semibold ${pct >= 0 ? "text-ok-ink" : "text-crit-ink"}`}>
       {pct >= 0 ? "▲" : "▼"} {fmtPctBr(Math.abs(pct)).replace("+", "")}
     </span>
-  );
-}
-
-/** Mesma leitura da divisao por canal, agora por modalidade de envio. */
-function DivisaoFullNormal({ d, total }: { d: DivisaoFull; total: number }) {
-  const partes = [
-    { rotulo: "Full", v: d.full, cor: "bg-accent" },
-    { rotulo: "Normal", v: d.normal, cor: "bg-ink-faint" },
-  ].filter((p) => p.v > 0);
-  return (
-    <div className="mt-3" title="Full = Mercado Livre Full + Shopee FBS. Proporção medida nos pedidos com modalidade de envio conhecida; TikTok entra em normal.">
-      <div className="flex h-1.5 gap-0.5 overflow-hidden rounded-full" aria-hidden="true">
-        {partes.map((p) => (
-          <div key={p.rotulo} className={p.cor} style={{ flex: p.v }} />
-        ))}
-      </div>
-      <ul className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-muted tabular-nums">
-        {partes.map((p) => (
-          <li key={p.rotulo} className="inline-flex items-center gap-1.5">
-            <span aria-hidden="true" className={`h-2 w-2 rounded-full ${p.cor}`} />
-            {p.rotulo} {fmtCompacto(p.v)} · {Math.round((p.v / total) * 100)}%
-          </li>
-        ))}
-      </ul>
-    </div>
   );
 }
 
