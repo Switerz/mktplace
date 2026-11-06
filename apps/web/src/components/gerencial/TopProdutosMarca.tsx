@@ -14,12 +14,14 @@ import { useEffect, useState } from "react";
 import { ChevronDown, Trophy } from "lucide-react";
 
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
+import MarketplaceFilter from "@/components/MarketplaceFilter";
 import TableScrollHint from "@/components/TableScrollHint";
 import InfoDica from "@/components/ui/InfoDica";
 import Segmented from "@/components/ui/Segmented";
 import { CHANNEL_DOT } from "@/lib/gerencial/channel-colors";
 import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
 import { MARCAS, hojeBrt } from "@/lib/metas";
+import type { Marketplace } from "@/lib/mock-data";
 import { fmtBrlCurto, fmtNumCurto, fmtPctBr, fmtVezes } from "@/lib/formatters";
 import {
   agrupar, buscarDetalhe, buscarTopProdutos, comparacaoValida, rotuloPeriodo, variacao,
@@ -36,7 +38,7 @@ const rotuloMarca = (id: string) => MARCAS.find((m) => m.id === id)?.label ?? id
 const TH = "py-2 px-2 text-xs font-semibold uppercase tracking-wide text-ink-faint";
 
 interface Props {
-  channels: string[];
+  channels: Marketplace[];
   brands: string[];
   dateFrom: string;
   dateTo: string;
@@ -50,11 +52,16 @@ export default function TopProdutosMarca({ channels, brands, dateFrom, dateTo, c
   const [abertas, setAbertas] = useState<Record<string, boolean>>({});
   const [marcaSel, setMarcaSel] = useState<string | null>(null);
   const [aberto, setAberto] = useState<{ marca: string; produto: ProdutoTop } | null>(null);
-  const chave = [channels.join(","), brands.join(","), dateFrom, dateTo, compare].join("|");
+  // Canal do card: nasce igual ao filtro do topo e pode ser trocado so' aqui;
+  // quando o filtro do topo muda, o card volta a segui-lo.
+  const [canais, setCanais] = useState<Marketplace[]>(channels);
+  const canaisTopo = channels.join(",");
+  useEffect(() => setCanais(channels), [canaisTopo]); // `channels` muda de identidade a cada render
+  const chave = [canais.join(","), brands.join(","), dateFrom, dateTo, compare].join("|");
 
   useEffect(() => {
     const ac = new AbortController();
-    const q = new URLSearchParams({ channels: channels.join(","), date_from: dateFrom, date_to: dateTo, compare: String(compare) });
+    const q = new URLSearchParams({ channels: canais.join(","), date_from: dateFrom, date_to: dateTo, compare: String(compare) });
     if (brands.length) q.set("brands", brands.join(","));
     setErro(false);
     setDados(null);
@@ -84,7 +91,7 @@ export default function TopProdutosMarca({ channels, brands, dateFrom, dateTo, c
           </h2>
           <InfoDica texto="Ranking por receita do anúncio como foi vendido em cada canal: kit conta como kit, sem de-para. TikTok e Mercado Livre somam o mesmo GMV da Torre; Shopee usa o preço do item sem cancelados e brindes. Clique num produto para ver o detalhe." />
         </div>
-        <span className="text-xs text-ink-faint">Clique num produto para ver o detalhe</span>
+        <MarketplaceFilter value={canais} onChange={setCanais} />
       </div>
 
       {erro ? (
@@ -116,6 +123,7 @@ export default function TopProdutosMarca({ channels, brands, dateFrom, dateTo, c
               opcoes={dados.marcas.map((m) => ({ valor: m.marca, texto: `${rotuloMarca(m.marca)} · ${fmtBrlCurto(m.receita_marca)}` }))}
               valor={marca.marca}
               aoEscolher={setMarcaSel}
+              className="whitespace-nowrap"
             />
           </div>
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-faint">
@@ -129,6 +137,7 @@ export default function TopProdutosMarca({ channels, brands, dateFrom, dateTo, c
             {soHojeSemComparar && <span>· dia em andamento, sem comparação com ontem</span>}
           </p>
         </div>
+        {marca.canais.length > 0 && <FaixaCanais m={marca} />}
         <TableScrollHint>
           <table className="w-full min-w-[760px] table-fixed border-collapse">
             <caption className="sr-only">
@@ -189,6 +198,69 @@ function CanalSelo({ canal }: { canal: ProdutoTop["canal"] }) {
       <span aria-hidden="true" className={`h-2 w-2 rounded-full ${CHANNEL_DOT[canal]}`} />
       {CHANNEL_LABEL[canal]}
     </span>
+  );
+}
+
+/** Tons da mesma serie (violeta) para as partes de um todo: origem, nao status. */
+const TOM_ORIGEM = ["bg-accent", "bg-accent/60", "bg-accent/30"];
+const COLUNAS_CANAIS: Record<number, string> = { 2: "md:grid-cols-2", 3: "md:grid-cols-3" };
+
+/**
+ * Faixa "por canal" da marca: cada canal mostra o que a fonte dele oferece.
+ * TikTok: de onde veio o GMV (video, live, card). ML: ads e ROAS (D+1).
+ * Shopee: so' a receita — a base nao traz ads nem origem da venda.
+ */
+function FaixaCanais({ m }: { m: MarcaTop }) {
+  return (
+    <div className={`grid grid-cols-1 gap-2 ${COLUNAS_CANAIS[m.canais.length] ?? ""}`}>
+      {m.canais.map((c) => {
+        const share = m.receita_marca > 0 ? Math.round((c.receita / m.receita_marca) * 100) : null;
+        const origem = c.canal === "tiktok" ? c.extras.filter((e) => e.formato === "brl") : [];
+        const totalOrigem = origem.reduce((s, e) => s + e.valor, 0);
+        return (
+          <div key={c.canal} className="flex flex-col gap-2 rounded-lg border border-line p-3">
+            <div className="flex items-baseline justify-between gap-2">
+              <CanalSelo canal={c.canal} />
+              <span className="text-sm font-semibold tabular-nums text-ink">
+                {fmtBrlCurto(c.receita)}
+                {share != null && m.canais.length > 1 && <span className="ml-1.5 text-xs font-medium text-ink-faint">{share}%</span>}
+              </span>
+            </div>
+            {c.canal === "tiktok" && totalOrigem > 0 ? (
+              <>
+                <span className="flex h-1.5 overflow-hidden rounded-full bg-raised" aria-hidden="true">
+                  {origem.map((e, i) => (
+                    <span key={e.rotulo} className={TOM_ORIGEM[i]} style={{ flex: e.valor }} />
+                  ))}
+                </span>
+                <span className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-ink-muted">
+                  {origem.map((e, i) => (
+                    <span key={e.rotulo} className="inline-flex items-center gap-1.5">
+                      <span aria-hidden="true" className={`h-2 w-2 rounded-sm ${TOM_ORIGEM[i]}`} />
+                      {e.rotulo.replace("GMV por ", "").replace("GMV pelo ", "")}
+                      <span className="tabular-nums text-ink">{Math.round((e.valor / totalOrigem) * 100)}%</span>
+                    </span>
+                  ))}
+                </span>
+              </>
+            ) : c.extras.length > 0 ? (
+              <span className="flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-ink-muted">
+                {c.extras.map((e) => (
+                  <span key={e.rotulo}>
+                    {e.rotulo === "Investimento em ads" ? "Ads" : e.rotulo}{" "}
+                    <span className="font-semibold tabular-nums text-ink">
+                      {e.formato === "vezes" ? fmtVezes(e.valor) : fmtBrlCurto(e.valor)}
+                    </span>
+                  </span>
+                ))}
+              </span>
+            ) : null}
+            {c.aviso_extras && <span className="text-xs text-warn-ink">{c.aviso_extras}</span>}
+            {c.canal === "shopee" && <span className="text-xs text-ink-faint">Sem dado de ads nem de origem da venda.</span>}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

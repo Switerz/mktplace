@@ -25,11 +25,28 @@ class ProdutoTop(BaseModel):
     receita_ant: Optional[float] = None
 
 
+class ExtraCanal(BaseModel):
+    """O que so' um canal sabe, somado no periodo pedido."""
+    rotulo: str
+    valor: float
+    formato: Literal["brl", "num", "vezes"]
+
+
+class ResumoCanal(BaseModel):
+    """Faixa "por canal" da marca: receita e o que aquele canal oferece
+    (TikTok: origem do GMV; ML: ads; Shopee: so' a receita)."""
+    canal: Canal
+    receita: float
+    extras: list[ExtraCanal] = []
+    aviso_extras: Optional[str] = None
+
+
 class MarcaTop(BaseModel):
     marca: str
     receita_marca: float
     receita_marca_ant: Optional[float] = None
     produtos: list[ProdutoTop]
+    canais: list[ResumoCanal] = []
 
 
 class TopProdutosResponse(BaseModel):
@@ -45,13 +62,6 @@ class PontoDiario(BaseModel):
     dia: date
     pecas: float
     receita: float
-
-
-class ExtraCanal(BaseModel):
-    """O que so' um canal sabe, somado no periodo pedido."""
-    rotulo: str
-    valor: float
-    formato: Literal["brl", "num", "vezes"]
 
 
 class DetalheProduto(BaseModel):

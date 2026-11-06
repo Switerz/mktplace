@@ -21,11 +21,24 @@ export interface ProdutoTop {
   pecas_ant: number | null;
   receita_ant: number | null;
 }
+export interface ExtraCanal {
+  rotulo: string;
+  valor: number;
+  formato: "brl" | "num" | "vezes";
+}
+/** Faixa "por canal" da marca: TikTok traz a origem do GMV; ML, os ads; Shopee, so' a receita. */
+export interface ResumoCanal {
+  canal: CanalTop;
+  receita: number;
+  extras: ExtraCanal[];
+  aviso_extras: string | null;
+}
 export interface MarcaTop {
   marca: string;
   receita_marca: number;
   receita_marca_ant: number | null;
   produtos: ProdutoTop[];
+  canais: ResumoCanal[];
 }
 export interface TopProdutosResponse {
   inicio: string;
@@ -47,7 +60,7 @@ export interface DetalheProduto {
   produto: string;
   kit: boolean;
   serie: PontoDiario[];
-  extras: { rotulo: string; valor: number; formato: "brl" | "num" | "vezes" }[];
+  extras: ExtraCanal[];
   aviso_extras: string | null;
 }
 
