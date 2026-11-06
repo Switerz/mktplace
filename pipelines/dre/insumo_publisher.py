@@ -180,6 +180,8 @@ IMPOSTO_PARCIAL_SHOPEE = IMPOSTO_PARCIAL + "imposto so' sobre a receita fiscal f
 #: base e' do emissor), ate' decisao do Fiscal -- ai' remover/ajustar aqui.
 IMPOSTO_BASE_PENDENTE_FISCAL = {"rituaria": date(2026, 10, 1)}
 IMPOSTO_PARCIAL_BASE = IMPOSTO_PARCIAL + "base do ICMS mudou em out/26 (desconto na base), pendente do Fiscal"
+#: Folga da janela de `data` do webgex em torno das competencias lidas.
+WEBGEX_FOLGA = timedelta(days=7)
 
 EXIT_OK = 0
 EXIT_RECONCILIACAO = 65
@@ -469,7 +471,12 @@ SQL_TAXA_SHOPEE = text("""
 #:     `valor_imposto`. IPI fica fora (valor zero medido). Sem COALESCE: linha
 #:     ausente nao vira zero;
 #:   * cobertura = receita das NFs casadas / receita fiscal da celula. NF sem
-#:     linha no webgex fica fora da soma; nada e' extrapolado.
+#:     linha no webgex fica fora da soma; nada e' extrapolado;
+#:   * janela em `data` do webgex (`janela_webgex`): so' para reduzir a
+#:     varredura (~28 mi linhas). Folga de `WEBGEX_FOLGA` antes e depois da
+#:     janela, para o lancamento fiscal que cai fora do mes da emissao. A
+#:     competencia continua vindo da gold (`data_mes`) pela chave: a folga nao
+#:     muda a atribuicao, so' deixa de ler linha que nenhuma NF da janela casaria.
 SQL_IMPOSTOS = text("""
     WITH notas AS (
         SELECT chave_nfe, data_mes, marca, plataforma, SUM(receita_produto) AS receita_fiscal,
@@ -485,10 +492,12 @@ SQL_IMPOSTOS = text("""
         SELECT chave_nota, codigo_imposto, valor_imposto, valor_difal, ingested_at
         FROM raw.webgex_impostos_gobeaute
         WHERE circuito = 'VX' AND debito_credito = 'DB'
+          AND data >= :inicio_webgex AND data < :fim_webgex
         UNION ALL
         SELECT chave_nota, codigo_imposto, valor_imposto, valor_difal, ingested_at
         FROM raw.webgex_impostos_ap
         WHERE circuito = 'VX' AND debito_credito = 'DB'
+          AND data >= :inicio_webgex AND data < :fim_webgex
     ), impostos AS (
         SELECT chave_nota,
                SUM(valor_imposto) FILTER (WHERE codigo_imposto = 'ICM')               AS icms,
@@ -999,6 +1008,12 @@ _COLUNA_IMPOSTO = {IMPOSTO_ICMS: ("icms", "ICM"), IMPOSTO_DIFAL: ("difal", "ICM/
                    IMPOSTO_PIS_COFINS: ("pis_cofins", "PIS/COF")}
 
 
+def janela_webgex(comps: list[date]) -> tuple[date, date]:
+    """`[inicio, fim)` em `data` do webgex: primeira competencia - 7 dias ate'
+    o 1o dia do mes seguinte a' ultima + 7 dias. So' filtro de varredura."""
+    return comps[0] - WEBGEX_FOLGA, somar_meses(comps[-1], 1) + WEBGEX_FOLGA
+
+
 def _cobertura_imposto(r: dict) -> Optional[Decimal]:
     return _razao(_dec(r["receita_com_imposto"]), _dec(r["receita_fiscal"]))
 
@@ -1128,7 +1143,12 @@ def ler_fonte(fonte_engine, comps: list[date], canais: list[str], marcas: list[s
             repasse = _rows(conn, SQL_REPASSE, params) if "tiktok" in canais else []
             taxa_shopee = (_rows(conn, SQL_TAXA_SHOPEE, params)
                            if com_taxa_shopee and "shopee" in canais else None)
-            impostos = _rows(conn, SQL_IMPOSTOS, params) if com_impostos else None
+            if com_impostos:
+                inicio_webgex, fim_webgex = janela_webgex(comps)
+                impostos = _rows(conn, SQL_IMPOSTOS, {**params, "inicio_webgex": inicio_webgex,
+                                                      "fim_webgex": fim_webgex})
+            else:
+                impostos = None
             conn.rollback()
     except SQLAlchemyError as exc:
         raise FonteIndisponivel(sanitizar(exc)) from None

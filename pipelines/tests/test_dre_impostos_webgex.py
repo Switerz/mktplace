@@ -342,12 +342,41 @@ def test_sql_le_as_duas_tabelas_so_venda_e_difal_separado():
     sql = _sql(P.SQL_IMPOSTOS)
     assert "FROM raw.webgex_impostos_gobeaute" in sql and "FROM raw.webgex_impostos_ap" in sql
     assert "UNION ALL" in sql
-    assert sql.count("WHERE circuito = 'VX' AND debito_credito = 'DB'") == 2
+    assert sql.count("WHERE circuito = 'VX' AND debito_credito = 'DB' AND data >= :inicio_webgex "
+                     "AND data < :fim_webgex") == 2
     assert "SUM(valor_imposto) FILTER (WHERE codigo_imposto = 'ICM') AS icms" in sql
     assert "SUM(valor_difal) FILTER (WHERE codigo_imposto = 'ICM') AS difal" in sql
     assert "SUM(valor_imposto) FILTER (WHERE codigo_imposto IN ('PIS', 'COF')) AS pis_cofins" in sql
     assert "COALESCE" not in sql.upper()  # ausencia != zero
     assert "{{" not in sql and "[[" not in sql
+
+
+@pytest.mark.parametrize("comps,janela", [
+    ([JUL], (date(2026, 6, 24), date(2026, 8, 8))),
+    ([date(2026, 6, 1), JUL, date(2026, 8, 1), SET, OUT], (date(2026, 5, 25), date(2026, 11, 8))),
+    ([date(2026, 12, 1)], (date(2026, 11, 24), date(2027, 1, 8))),
+])
+def test_janela_do_webgex_tem_sete_dias_de_folga(comps, janela):
+    assert P.janela_webgex(comps) == janela
+
+
+class _EngParams(_EngFonte):
+    def connect(self):
+        eng = self
+
+        class C(_ConnFonte):
+            def execute(self, sql, params=None):
+                if sql is P.SQL_IMPOSTOS:
+                    eng.params = params
+                return super().execute(sql, params)
+        return C(self.lidas)
+
+
+def test_leitura_passa_a_janela_do_webgex_e_a_competencia_segue_da_gold():
+    eng = _EngParams()
+    P.ler_fonte(eng, [SET, OUT], ["ml"], ["kokeshi"], False, True)
+    assert (eng.params["inicio_webgex"], eng.params["fim_webgex"]) == (date(2026, 8, 25), date(2026, 11, 8))
+    assert eng.params["competencias"] == [SET, OUT]  # a celula continua sendo a `data_mes` da gold
 
 
 def test_sql_usa_os_mesmos_filtros_de_celula_do_cmv():
@@ -409,7 +438,8 @@ DDL_FONTE_EXTRA = [
     "CREATE SCHEMA raw",
     """CREATE TABLE raw.webgex_impostos_gobeaute (
         chave_nota TEXT, razao_social TEXT, circuito TEXT, debito_credito TEXT, codigo_imposto TEXT, cst TEXT,
-        aliquota NUMERIC, base_calculo NUMERIC, valor_imposto NUMERIC, valor_difal NUMERIC, ingested_at TIMESTAMP)""",
+        aliquota NUMERIC, base_calculo NUMERIC, valor_imposto NUMERIC, valor_difal NUMERIC, data DATE,
+        ingested_at TIMESTAMPTZ)""",
     "CREATE TABLE raw.webgex_impostos_ap (LIKE raw.webgex_impostos_gobeaute)",
     # A 037 liga a leitura da taxa Shopee: as tabelas existem (vazias).
     """CREATE TABLE silver.stg_shopee_orders (order_sn TEXT, brand TEXT, created_date_brt DATE, order_status TEXT,
@@ -444,10 +474,10 @@ def _semear_impostos(fonte):
                                    FROM gold.nf_vendas_unificada_v2""")).mappings().all()
         ing = datetime(2026, 11, 5, 12, 6)
 
-        def ins(tabela, chave, circ, dc, cod, valor, difal=0):
+        def ins(tabela, chave, circ, dc, cod, valor, difal=0, dia=date(2026, 7, 15)):
             c.execute(text(f"""INSERT INTO {tabela} (chave_nota, circuito, debito_credito, codigo_imposto,
-                valor_imposto, valor_difal, ingested_at) VALUES (:k, :ci, :dc, :cod, :v, :d, :i)"""),
-                      {"k": chave, "ci": circ, "dc": dc, "cod": cod, "v": valor, "d": difal, "i": ing})
+                valor_imposto, valor_difal, data, ingested_at) VALUES (:k, :ci, :dc, :cod, :v, :d, :dia, :i)"""),
+                      {"k": chave, "ci": circ, "dc": dc, "cod": cod, "v": valor, "d": difal, "dia": dia, "i": ing})
 
         for it in itens:
             k, rec, marca, plat = it["chave_nfe"], it["receita_produto"], it["marca"], it["plataforma"]
@@ -464,6 +494,12 @@ def _semear_impostos(fonte):
                 ins(t, k, "VX", "DB", "IPI", 0)
                 ins(t, k, "OX", "DB", "ICM", 55555)          # outra saida
                 ins(t, k, "DV", "CR", "ICM", 44444, 3333)    # devolucao (credito)
+                # VX/DB da MESMA chave, mas com `data` fora da janela de julho
+                # (fim + 7 dias = 08/08; inicio - 7 = 24/06): o filtro ignora.
+                ins(t, k, "VX", "DB", "ICM", 888888, 777, dia=date(2026, 8, 8))
+                ins(t, k, "VX", "DB", "ICM", 666666, 555, dia=date(2026, 6, 23))
+                # Na folga (lancamento fiscal fora do mes da emissao): entra, com valor zero.
+                ins(t, k, "VX", "DB", "ICM", 0, 0, dia=date(2026, 8, 7))
             elif marca == "kokeshi" and plat == "tiktokshop" and it["data_emissao"].day == 15:
                 ins("raw.webgex_impostos_gobeaute", k, "VX", "DB", "ICM", rec * Decimal("0.12"), rec * Decimal("0.07"))
                 ins("raw.webgex_impostos_gobeaute", k, "VX", "DB", "PIS", 0)
@@ -516,12 +552,15 @@ def _publicar(alvo, fonte):
 def test_sql_real_nao_multiplica_pelos_itens_e_ignora_ruido(bancos):
     _, fonte = bancos
     with fonte.connect() as conn:
+        ini, fim = P.janela_webgex([JUL])
         rows = conn.execute(P.SQL_IMPOSTOS, {"competencias": [JUL], "plataformas": list(P.PLATAFORMA_FISCAL.values()),
-                                             "marcas": ["kokeshi", "barbours"]}).mappings().all()
+                                             "marcas": ["kokeshi", "barbours"], "inicio_webgex": ini,
+                                             "fim_webgex": fim}).mappings().all()
         conn.rollback()
     por = {(r["marca"], r["plataforma"]): r for r in rows}
     ml = por[("kokeshi", "mercadolivre")]
     assert ml["notas"] == 2 and ml["notas_com_imposto"] == 2  # 2 NFs (4 itens), nao 4
+    # as linhas VX/DB de 23/06 e 08/08 (fora da janela) nao entraram: senao ICMS teria +1.555.554
     assert (ml["icms"], ml["difal"], ml["pis_cofins"]) == (Decimal("120000.00"), Decimal("70000.00"),
                                                             Decimal("36500.0000"))
     assert ml["receita_fiscal"] == ml["receita_com_imposto"] == 1_000_000
