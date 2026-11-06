@@ -82,8 +82,13 @@ SQL_EXTRAS = {
         SELECT SUM(gmv_video) AS video, SUM(gmv_live) AS live, SUM(gmv_product_card) AS card
           FROM gold.fct_tiktok_product_daily
          WHERE brand = :marca AND product_id = :sku AND date BETWEEN :ini AND :fim""",
+    # O relatorio de ads do ML chega no dia seguinte: o dia de hoje vem com
+    # venda e ad_spend 0 em TODOS os anuncios. `ads_ate` = ultimo dia com algum
+    # ad na tabela, para nunca mostrar "R$ 0" onde o dado so' nao chegou.
     "ml": """
-        SELECT SUM(ad_spend) AS investimento, SUM(ad_revenue) AS receita_ads
+        SELECT SUM(ad_spend) AS investimento, SUM(ad_revenue) AS receita_ads,
+               (SELECT MAX(ref_date)::date FROM gold.vw_ml_produto_daily
+                 WHERE ad_spend > 0 AND ref_date BETWEEN :fim_menos_10 AND :fim) AS ads_ate
           FROM gold.vw_ml_produto_daily
          WHERE brand = :marca AND COALESCE(NULLIF(seller_sku, ''), item_id) = :sku
            AND ref_date BETWEEN :ini AND :fim""",
@@ -182,20 +187,29 @@ def get_detalhe(
     nome = next((l["nome"] for l in reversed(linhas) if l.get("nome")), sku)
 
     extras: list[ExtraCanal] = []
+    aviso = None
     if canal in SQL_EXTRAS:
-        [e] = consultar(SQL_EXTRAS[canal], {"marca": marca, "sku": sku, "ini": inicio, "fim": fim}) or [{}]
+        [e] = consultar(SQL_EXTRAS[canal], {
+            "marca": marca, "sku": sku, "ini": inicio, "fim": fim, "fim_menos_10": fim - timedelta(days=10),
+        }) or [{}]
         if canal == "tiktok":
             extras = [ExtraCanal(rotulo=r, valor=_num(e.get(k)), formato="brl")
                       for r, k in (("GMV por vídeo", "video"), ("GMV por live", "live"), ("GMV pelo card", "card"))]
         else:
-            invest, rec_ads = _num(e.get("investimento")), _num(e.get("receita_ads"))
-            extras = [ExtraCanal(rotulo="Investimento em ads", valor=invest, formato="brl"),
-                      ExtraCanal(rotulo="Receita via ads", valor=rec_ads, formato="brl")]
-            if invest > 0:
-                extras.append(ExtraCanal(rotulo="ROAS", valor=rec_ads / invest, formato="vezes"))
+            ads_ate = _data(e["ads_ate"]) if e.get("ads_ate") else None
+            if ads_ate is None or ads_ate < inicio:
+                aviso = "Os ads do Mercado Livre chegam no dia seguinte: ainda não há ads deste período."
+            else:
+                if ads_ate < fim:
+                    aviso = f"Ads até {ads_ate:%d/%m}: os do dia seguinte ainda não chegaram."
+                invest, rec_ads = _num(e.get("investimento")), _num(e.get("receita_ads"))
+                extras = [ExtraCanal(rotulo="Investimento em ads", valor=invest, formato="brl"),
+                          ExtraCanal(rotulo="Receita via ads", valor=rec_ads, formato="brl")]
+                if invest > 0:
+                    extras.append(ExtraCanal(rotulo="ROAS", valor=rec_ads / invest, formato="vezes"))
 
     return DetalheProduto(
         canal=canal, marca=marca, sku=sku, produto=str(nome).strip(), kit=eh_kit(nome),
         serie=[PontoDiario(dia=_data(l["dia"]), pecas=_num(l["pecas"]), receita=_num(l["receita"])) for l in linhas],
-        extras=extras,
+        extras=extras, aviso_extras=aviso,
     )

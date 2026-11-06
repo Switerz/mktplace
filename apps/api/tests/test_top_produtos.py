@@ -68,7 +68,7 @@ def test_sem_marca_no_escopo_nao_consulta():
 def test_detalhe_serie_e_roas_do_ml():
     def consultar(sql, params):
         if "ad_spend" in sql:
-            return [{"investimento": Decimal("50"), "receita_ads": Decimal("200")}]
+            return [{"investimento": Decimal("50"), "receita_ads": Decimal("200"), "ads_ate": date(2026, 11, 5)}]
         return [{"dia": "2026-11-01", "nome": "Kit Prebiotica", "pecas": 2, "receita": Decimal("100")},
                 {"dia": date(2026, 11, 2), "nome": None, "pecas": 1, "receita": 50}]
 
@@ -76,6 +76,23 @@ def test_detalhe_serie_e_roas_do_ml():
     assert d.kit and d.produto == "Kit Prebiotica"
     assert [p.dia for p in d.serie] == [date(2026, 11, 1), date(2026, 11, 2)]
     assert [(e.rotulo, e.valor) for e in d.extras][-1] == ("ROAS", 4.0)
+    assert d.aviso_extras is None
+
+
+def test_ads_do_ml_que_nao_chegaram_nao_viram_zero():
+    def consultar(ads_ate):
+        def c(sql, params):
+            if "ad_spend" in sql:
+                return [{"investimento": 0, "receita_ads": 0, "ads_ate": ads_ate}]
+            return [{"dia": "2026-11-06", "nome": "Kit110", "pecas": 39, "receita": 4733}]
+        return c
+
+    # Periodo = hoje; ultimo dia com ads = ontem -> sem ads, com aviso.
+    hoje = get_detalhe(consultar("2026-11-05"), "ml", "barbours", "Kit110", date(2026, 11, 6), date(2026, 11, 6))
+    assert hoje.extras == [] and "dia seguinte" in hoje.aviso_extras
+    # Mes ate hoje: ads ate ontem -> mostra, avisando ate quando.
+    mes = get_detalhe(consultar("2026-11-05"), "ml", "barbours", "Kit110", date(2026, 11, 1), date(2026, 11, 6))
+    assert len(mes.extras) == 2 and mes.aviso_extras.startswith("Ads até 05/11")
 
 
 def test_detalhe_sem_venda_e_none():
