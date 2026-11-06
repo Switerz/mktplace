@@ -14,8 +14,9 @@ import {
   type KpiKind,
 } from "@/lib/kpi-drilldown";
 import { CHANNEL_DOT } from "@/lib/gerencial/channel-colors";
+import { acosDoRoas } from "@/lib/gerencial/kpi-band";
 import { suavizar, type TendenciaKpi } from "@/lib/gerencial/kpi-trend";
-import { fmtBrl, fmtNumber, fmtPctBr } from "@/lib/formatters";
+import { fmtBrl, fmtNumber, fmtPctBr, fmtPctSimples } from "@/lib/formatters";
 import DrilldownContextLine from "@/components/drilldown/DrilldownContextLine";
 import DrilldownSecao from "@/components/drilldown/DrilldownSecao";
 import EvidenceRow from "@/components/drilldown/EvidenceRow";
@@ -296,6 +297,11 @@ function AdSpendBreakdown({ overview, brands, channels }: { overview: OverviewDa
                 label={b.label}
                 pct={pct}
                 barra="bg-kpi-ads"
+                // Neutro como o card: investir mais nao e' bom nem ruim por si.
+                delta={(() => {
+                  const d = variacao(b.ad_spend, b.ad_spend_prev);
+                  return d != null ? { pct: d, neutro: true } : null;
+                })()}
                 value={`${fmtBrl(b.ad_spend!)} · ${fmtPct1(pct)}`}
               />
             );
@@ -314,15 +320,20 @@ function AdSpendBreakdown({ overview, brands, channels }: { overview: OverviewDa
  * Mercado Livre por marca — a pergunta seguinte de quem abre o detalhe.
  */
 function RoasBreakdown({ overview, brands, channels }: { overview: OverviewData; brands: BrandRow[]; channels: Marketplace[] }) {
-  const r = roasBreakdown(overview);
+  const roas = roasBreakdown(overview);
+  // ACOS (menor = melhor) substituiu o ROAS na tela; a fonte segue sendo o ROAS.
+  const r = { ml: acosDoRoas(roas.ml), shopee: acosDoRoas(roas.shopee) };
   const mlSel = isMarketplaceSelected(channels, "ml");
   const porMarca = mlSel
-    ? brands.filter((b) => b.ml_roas != null).sort((a, b) => (b.ml_roas ?? 0) - (a.ml_roas ?? 0))
+    ? brands
+        .map((b) => ({ ...b, acos: acosDoRoas(b.ml_roas) }))
+        .filter((b) => b.acos != null)
+        .sort((a, b) => a.acos! - b.acos!)
     : [];
-  const maior = Math.max(0, ...porMarca.map((b) => b.ml_roas ?? 0));
-  const x = (v: number) => `${v.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 1 })}x`;
-  const dMl = variacao(r.ml, overview.prev_ml_roas);
-  const dShopee = variacao(r.shopee, overview.prev_shopee_roas);
+  const maior = Math.max(0, ...porMarca.map((b) => b.acos!));
+  const x = fmtPctSimples;
+  const dMl = variacao(r.ml, acosDoRoas(overview.prev_ml_roas));
+  const dShopee = variacao(r.shopee, acosDoRoas(overview.prev_shopee_roas));
   return (
     <>
       <DrilldownSecao titulo="Por canal">
@@ -331,7 +342,7 @@ function RoasBreakdown({ overview, brands, channels }: { overview: OverviewData;
             <EvidenceRow
               label="Mercado Livre"
               ponto={CHANNEL_DOT.ml}
-              delta={dMl != null ? { pct: dMl } : null}
+              delta={dMl != null ? { pct: dMl, menorMelhor: true } : null}
               value={r.ml != null ? x(r.ml) : "Sem dado"}
               tone={r.ml != null ? "value" : "muted"}
             />
@@ -340,7 +351,7 @@ function RoasBreakdown({ overview, brands, channels }: { overview: OverviewData;
             <EvidenceRow
               label="Shopee"
               ponto={CHANNEL_DOT.shopee}
-              delta={dShopee != null ? { pct: dShopee } : null}
+              delta={dShopee != null ? { pct: dShopee, menorMelhor: true } : null}
               value={r.shopee != null ? x(r.shopee) : "Sem dado"}
               tone={r.shopee != null ? "value" : "muted"}
             />
@@ -357,9 +368,9 @@ function RoasBreakdown({ overview, brands, channels }: { overview: OverviewData;
               <EvidenceRow
                 key={b.brand}
                 label={b.label}
-                pct={maior > 0 ? ((b.ml_roas ?? 0) / maior) * 100 : null}
+                pct={maior > 0 ? (b.acos! / maior) * 100 : null}
                 barra={CHANNEL_DOT.ml}
-                value={x(b.ml_roas!)}
+                value={x(b.acos!)}
               />
             ))}
           </ul>

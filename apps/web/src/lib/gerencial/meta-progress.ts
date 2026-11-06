@@ -276,23 +276,6 @@ export function progressoMeta(args: {
 }
 
 /**
- * Os ate' `limite` sinais comerciais que pedem decisao, por severidade
- * (critico, atencao, informativo) e, no empate, na ordem da fila. O aviso de
- * dado nao entra: ele aparece colado no GMV, no bloco principal.
- */
-export function topComerciais<C extends { severity: "critical" | "warning" | "info" }>(
-  commercial: C[],
-  limite = 3,
-): C[] {
-  const ordem = { critical: 0, warning: 1, info: 2 } as const;
-  return commercial
-    .map((item, i) => ({ item, i }))
-    .sort((a, b) => ordem[a.item.severity] - ordem[b.item.severity] || a.i - b.i)
-    .slice(0, limite)
-    .map(({ item }) => item);
-}
-
-/**
  * O aviso de dado que muda a leitura do GMV: so' os da fonte do fato diario de
  * performance, que e' de onde sai o total. Aviso de regiao, por exemplo, nao
  * distorce o GMV e fica na confianca no dado, em "Mais detalhes".

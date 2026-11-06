@@ -170,6 +170,7 @@ export default function BrandChannelMatrix({
                     <span className="block text-xs font-medium text-ink-faint tabular-nums">
                       {fmtBrlCurto(matrix.channelTotals[channel] ?? 0)}
                     </span>
+                    <Variacao pct={matrix.channelMomPct[channel] ?? null} />
                   </button>
                 </th>
               ))}
@@ -178,6 +179,7 @@ export default function BrandChannelMatrix({
                 <span className="block font-medium normal-case tracking-normal text-ink-faint tabular-nums">
                   {fmtBrlCurto(matrix.grandTotal)}
                 </span>
+                <Variacao pct={matrix.grandMomPct} />
               </th>
             </tr>
           </thead>
@@ -231,14 +233,7 @@ export default function BrandChannelMatrix({
                                 {fmtBrlCurto(cell.gmv as number)}
                               </span>
                             </span>
-                            {cell.momPct != null && (
-                              <span
-                                className={`block text-xs font-medium tabular-nums ${cell.momPct >= 0 ? "text-ok-ink" : "text-crit-ink"}`}
-                              >
-                                {/* A seta ja' diz o sentido: o numero vai sem sinal. */}
-                                {cell.momPct >= 0 ? "▲" : "▼"} {fmtPctBr(Math.abs(cell.momPct)).replace("+", "")}
-                              </span>
-                            )}
+                            <Variacao pct={cell.momPct} />
                           </>
                         ) : (
                           <>
@@ -255,6 +250,7 @@ export default function BrandChannelMatrix({
                   <span className="text-sm font-semibold text-ink tabular-nums">
                     {fmtBrlCurto(row.brandTotal)}
                   </span>
+                  <Variacao pct={row.brandMomPct} />
                 </td>
               </tr>
             ))}
@@ -271,5 +267,16 @@ export default function BrandChannelMatrix({
         <p className="text-xs text-ink-faint">Verificando sinais de eficiência e referências do canal…</p>
       )}
     </section>
+  );
+}
+
+/** Variacao contra o periodo anterior, com a mesma leitura em toda a matriz. */
+function Variacao({ pct }: { pct: number | null }) {
+  if (pct == null) return null;
+  return (
+    <span className={`block text-xs font-medium tabular-nums ${pct >= 0 ? "text-ok-ink" : "text-crit-ink"}`}>
+      {/* A seta ja' diz o sentido: o numero vai sem sinal. */}
+      {pct >= 0 ? "▲" : "▼"} {fmtPctBr(Math.abs(pct)).replace("+", "")}
+    </span>
   );
 }

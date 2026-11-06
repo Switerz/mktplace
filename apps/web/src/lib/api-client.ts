@@ -51,6 +51,9 @@ export interface OverviewData {
   prev_ad_spend?: number | null;
   prev_ml_roas?: number | null;
   prev_shopee_roas?: number | null;
+  prev_tiktok_gmv?: number | null;
+  prev_ml_gmv?: number | null;
+  prev_shopee_gmv?: number | null;
 }
 
 export interface BrandRow {
@@ -75,6 +78,7 @@ export interface BrandRow {
   ml_cancel_rate_pct: number | null;
   /** Ads ML + Shopee da marca (mesma soma do `ad_spend` do overview). */
   ad_spend?: number | null;
+  ad_spend_prev?: number | null;
 }
 
 export interface MonthPoint {
@@ -348,6 +352,9 @@ export function fetchOverview(
       ad_spend?: number | null;
       ml_roas?: number | null;
       shopee_roas?: number | null;
+      tiktok_gmv?: number | null;
+      ml_gmv?: number | null;
+      shopee_gmv?: number | null;
     };
     gmv_mom_pct: number | null;
     date_from?: string | null;
@@ -385,6 +392,9 @@ export function fetchOverview(
           prev_ad_spend: raw.previous.ad_spend ?? null,
           prev_ml_roas: raw.previous.ml_roas ?? null,
           prev_shopee_roas: raw.previous.shopee_roas ?? null,
+          prev_tiktok_gmv: raw.previous.tiktok_gmv ?? null,
+          prev_ml_gmv: raw.previous.ml_gmv ?? null,
+          prev_shopee_gmv: raw.previous.shopee_gmv ?? null,
         },
       };
     }

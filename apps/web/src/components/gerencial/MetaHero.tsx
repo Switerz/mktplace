@@ -62,6 +62,8 @@ interface Props {
   compareActive: boolean;
   channels: Marketplace[];
   gmvByChannel: Record<Marketplace, number | null>;
+  /** GMV do periodo anterior por canal; so' com a comparacao ligada. */
+  prevGmvByChannel?: Record<Marketplace, number | null> | null;
   /** Mes comparavel com a meta; `null` = periodo nao e' um mes. */
   mesMeta: string | null;
   /** Dia comparavel com a meta do dia; `null` = periodo nao e' um dia so'. */
@@ -104,7 +106,12 @@ export default function MetaHero(props: Props) {
           ) : (
             <SemMeta {...props} />
           )}
-          <Divisao channels={props.channels} gmvByChannel={props.gmvByChannel} total={gmv} />
+          <Divisao
+            channels={props.channels}
+            gmvByChannel={props.gmvByChannel}
+            prevGmvByChannel={props.compareActive ? props.prevGmvByChannel ?? null : null}
+            total={gmv}
+          />
           {!error && props.fullNormal && gmv ? <DivisaoFullNormal d={props.fullNormal} total={gmv} /> : null}
         </div>
         {props.diaMeta ? (
@@ -393,10 +400,12 @@ function SeloDoDia({ progressoDia, metasHref }: { progressoDia: ProgressoDia | n
 function Divisao({
   channels,
   gmvByChannel,
+  prevGmvByChannel,
   total,
 }: {
   channels: Marketplace[];
   gmvByChannel: Record<Marketplace, number | null>;
+  prevGmvByChannel: Record<Marketplace, number | null> | null;
   total: number | null;
 }) {
   const partes = channels
@@ -415,10 +424,22 @@ function Divisao({
           <li key={c} className="inline-flex items-center gap-1.5">
             <span aria-hidden="true" className={`h-2 w-2 rounded-full ${PONTO[c]}`} />
             {CHANNEL_LABEL[c]} {fmtCompacto(v)} · {Math.round((v / total) * 100)}%
+            <VsAnterior atual={v} anterior={prevGmvByChannel?.[c] ?? null} />
           </li>
         ))}
       </ul>
     </div>
+  );
+}
+
+/** "▲ 12%" contra o periodo anterior; sem base, nada. */
+function VsAnterior({ atual, anterior }: { atual: number; anterior: number | null }) {
+  if (anterior == null || anterior <= 0) return null;
+  const pct = ((atual - anterior) / anterior) * 100;
+  return (
+    <span className={`font-semibold ${pct >= 0 ? "text-ok-ink" : "text-crit-ink"}`} title={`antes ${fmtCompacto(anterior)}`}>
+      {pct >= 0 ? "▲" : "▼"} {fmtPctBr(Math.abs(pct)).replace("+", "")}
+    </span>
   );
 }
 

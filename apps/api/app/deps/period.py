@@ -152,7 +152,10 @@ def resolve_compare_period(period: EffectivePeriod, *, compare: bool) -> Optiona
     2. periodo que representa um mes calendario completo (`ref_month`
        preenchido, seja via `ref_month=YYYY-MM` ou via `date_from`/`date_to`
        cobrindo o mes inteiro) -> **mes calendario anterior completo**;
-    3. periodo customizado -> janela imediatamente anterior de mesma duracao.
+    3. mes corrente ate' um dia (comeca no dia 1 e fica dentro do mes, ex.:
+       "Mes atual" 01/11..05/11) -> **os mesmos dias do mes anterior**
+       (01/10..05/10), com o fim limitado ao ultimo dia daquele mes;
+    4. periodo customizado -> janela imediatamente anterior de mesma duracao.
 
     O caso 2 existe porque meses vizinhos tem contagens de dias diferentes: a
     janela deslizante daria 02/05..31/05 para junho, enquanto o MoM auditado
@@ -169,4 +172,11 @@ def resolve_compare_period(period: EffectivePeriod, *, compare: bool) -> Optiona
         py, pm = (year - 1, 12) if month == 1 else (year, month - 1)
         start, end = _month_bounds(py, pm)
         return EffectivePeriod(start=start, end=end, ref_month=f"{py:04d}-{pm:02d}")
+    if period.start.day == 1 and (period.start.year, period.start.month) == (period.end.year, period.end.month):
+        # Janela deslizante aqui compararia 01..05/11 com 27..31/10: fim de mes
+        # contra comeco de mes. O pedido da Gerencial e' mes contra mes.
+        y, m = period.start.year, period.start.month
+        py, pm = (y - 1, 12) if m == 1 else (y, m - 1)
+        start, fim_do_mes = _month_bounds(py, pm)
+        return EffectivePeriod(start=start, end=min(fim_do_mes, date(py, pm, min(period.end.day, fim_do_mes.day))))
     return resolve_previous_period(period)

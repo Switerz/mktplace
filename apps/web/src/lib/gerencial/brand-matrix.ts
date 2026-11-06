@@ -67,6 +67,8 @@ export interface MatrixRow {
   label: string;
   cells: MatrixCell[];
   brandTotal: number;
+  /** Variacao do total da marca (canais selecionados) contra o periodo anterior. */
+  brandMomPct: number | null;
 }
 
 export interface BrandChannelMatrix {
@@ -74,6 +76,14 @@ export interface BrandChannelMatrix {
   rows: MatrixRow[];
   channelTotals: Record<string, number>;
   grandTotal: number;
+  /** Variacao do total de cada canal e do total geral; null sem base anterior. */
+  channelMomPct: Record<string, number | null>;
+  grandMomPct: number | null;
+}
+
+/** % contra o anterior; sem base (anterior zerado ou ausente) e' null, nunca 0. */
+function variacao(atual: number, anterior: number): number | null {
+  return anterior > 0 ? ((atual - anterior) / anterior) * 100 : null;
 }
 
 export function buildBrandChannelMatrix(
@@ -86,11 +96,14 @@ export function buildBrandChannelMatrix(
   // participacao de cada celula sao relativas ao proprio canal.
   const maxByChannel: Record<string, number> = {};
   const channelTotals: Record<string, number> = {};
+  const channelPrev: Record<string, number> = {};
   for (const channel of activeChannels) {
-    const pick = CHANNEL_FIELDS[channel].gmv;
+    const { gmv: pick, prev: pickPrev } = CHANNEL_FIELDS[channel];
     let max = 0;
     let total = 0;
+    let anterior = 0;
     for (const row of brands) {
+      anterior += pickPrev(row) ?? 0;
       const v = pick(row);
       if (v == null) continue;
       if (v > max) max = v;
@@ -98,6 +111,7 @@ export function buildBrandChannelMatrix(
     }
     maxByChannel[channel] = max;
     channelTotals[channel] = total;
+    channelPrev[channel] = anterior;
   }
 
   const rows: MatrixRow[] = brands.map((row) => {
@@ -129,13 +143,16 @@ export function buildBrandChannelMatrix(
       };
     });
     const brandTotal = cells.reduce((sum, c) => sum + (c.gmv ?? 0), 0);
-    return { brand: row.brand, label: row.label, cells, brandTotal };
+    const brandPrev = activeChannels.reduce((sum, c) => sum + (CHANNEL_FIELDS[c].prev(row) ?? 0), 0);
+    return { brand: row.brand, label: row.label, cells, brandTotal, brandMomPct: variacao(brandTotal, brandPrev) };
   });
 
   rows.sort((a, b) => b.brandTotal - a.brandTotal || a.brand.localeCompare(b.brand));
 
   const grandTotal = activeChannels.reduce((sum, c) => sum + (channelTotals[c] ?? 0), 0);
-  return { channels: activeChannels, rows, channelTotals, grandTotal };
+  const grandPrev = activeChannels.reduce((sum, c) => sum + (channelPrev[c] ?? 0), 0);
+  const channelMomPct = Object.fromEntries(activeChannels.map((c) => [c, variacao(channelTotals[c], channelPrev[c])]));
+  return { channels: activeChannels, rows, channelTotals, grandTotal, channelMomPct, grandMomPct: variacao(grandTotal, grandPrev) };
 }
 
 // ---------------------------------------------------------------------------
