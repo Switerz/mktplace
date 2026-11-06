@@ -63,3 +63,5 @@ class DetalheProduto(BaseModel):
     #: Serie diaria dos ultimos 12 meses ate o fim do periodo.
     serie: list[PontoDiario]
     extras: list[ExtraCanal]
+    #: Quando os extras ainda nao cobrem o periodo (ads do ML chegam D+1).
+    aviso_extras: Optional[str] = None

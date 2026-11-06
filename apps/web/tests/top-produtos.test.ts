@@ -2,7 +2,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { agrupar, variacao } from "../src/lib/gerencial/top-produtos.ts";
+import { agrupar, comparacaoValida, rotuloPeriodo, variacao } from "../src/lib/gerencial/top-produtos.ts";
+
+test("comparacao: so' hoje contra ontem inteiro nao vale; rotulo diz o periodo", () => {
+  const hoje = "2026-11-06";
+  assert.equal(comparacaoValida({ inicio: hoje, fim: hoje, comparacao_inicio: "2026-11-05" }, hoje), false);
+  assert.equal(comparacaoValida({ inicio: "2026-11-01", fim: hoje, comparacao_inicio: "2026-10-26" }, hoje), true);
+  assert.equal(comparacaoValida({ inicio: "2026-11-05", fim: "2026-11-05", comparacao_inicio: "2026-11-04" }, hoje), true);
+  assert.equal(comparacaoValida({ inicio: hoje, fim: hoje, comparacao_inicio: null }, hoje), false);
+  assert.equal(rotuloPeriodo("2026-11-05", "2026-11-05"), "05/11");
+  assert.equal(rotuloPeriodo("2026-10-26", "2026-10-31"), "26/10–31/10");
+});
 
 const serie = [
   { dia: "2026-10-31", pecas: 2, receita: 20 },

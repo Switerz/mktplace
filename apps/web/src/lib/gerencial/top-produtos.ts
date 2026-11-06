@@ -48,6 +48,20 @@ export interface DetalheProduto {
   kit: boolean;
   serie: PontoDiario[];
   extras: { rotulo: string; valor: number; formato: "brl" | "num" | "vezes" }[];
+  aviso_extras: string | null;
+}
+
+/** "05/11" ou "26/10–31/10": diz contra o que a variacao compara. */
+export function rotuloPeriodo(inicio: string, fim: string): string {
+  return inicio === fim ? ddmm(fim) : `${ddmm(inicio)}–${ddmm(fim)}`;
+}
+
+/**
+ * Variacao so' quando os dois lados sao comparaveis: so' "hoje" (dia em
+ * andamento) contra o dia anterior INTEIRO daria quedas falsas de 40-70%.
+ */
+export function comparacaoValida(r: Pick<TopProdutosResponse, "inicio" | "fim" | "comparacao_inicio">, hoje: string): boolean {
+  return Boolean(r.comparacao_inicio) && !(r.inicio === hoje && r.fim === hoje);
 }
 
 async function pedir<T>(caminho: string, signal: AbortSignal): Promise<T> {

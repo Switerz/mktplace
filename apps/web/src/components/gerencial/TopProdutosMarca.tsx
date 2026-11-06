@@ -19,10 +19,10 @@ import InfoDica from "@/components/ui/InfoDica";
 import Segmented from "@/components/ui/Segmented";
 import { CHANNEL_DOT } from "@/lib/gerencial/channel-colors";
 import { CHANNEL_LABEL } from "@/lib/gerencial/kpi-band";
-import { MARCAS } from "@/lib/metas";
+import { MARCAS, hojeBrt } from "@/lib/metas";
 import { fmtBrlCurto, fmtNumCurto, fmtPctBr, fmtVezes } from "@/lib/formatters";
 import {
-  agrupar, buscarDetalhe, buscarTopProdutos, variacao,
+  agrupar, buscarDetalhe, buscarTopProdutos, comparacaoValida, rotuloPeriodo, variacao,
   type DetalheProduto, type Grao, type MarcaTop, type ProdutoTop, type TopProdutosResponse,
 } from "@/lib/gerencial/top-produtos";
 
@@ -48,6 +48,7 @@ export default function TopProdutosMarca({ channels, brands, dateFrom, dateTo, c
   const [erro, setErro] = useState(false);
   const [tentativa, setTentativa] = useState(0);
   const [abertas, setAbertas] = useState<Record<string, boolean>>({});
+  const [marcaSel, setMarcaSel] = useState<string | null>(null);
   const [aberto, setAberto] = useState<{ marca: string; produto: ProdutoTop } | null>(null);
   const chave = [channels.join(","), brands.join(","), dateFrom, dateTo, compare].join("|");
 
@@ -65,7 +66,13 @@ export default function TopProdutosMarca({ channels, brands, dateFrom, dateTo, c
     // `chave` resume os filtros; `tentativa` refaz a busca.
   }, [chave, tentativa]);
 
-  const comparando = Boolean(dados?.comparacao_inicio);
+  const comparando = dados ? comparacaoValida(dados, hojeBrt()) : false;
+  const soHojeSemComparar = Boolean(dados?.comparacao_inicio) && !comparando;
+  const vsRotulo = dados?.comparacao_inicio && dados.comparacao_fim
+    ? `vs ${rotuloPeriodo(dados.comparacao_inicio, dados.comparacao_fim)}`
+    : "vs anterior";
+  // Aba: a escolhida, se ainda existe no recorte; senao a marca que mais vendeu.
+  const marca = dados?.marcas.find((m) => m.marca === marcaSel) ?? dados?.marcas[0] ?? null;
 
   return (
     <section aria-labelledby="top-produtos-titulo" className="flex flex-col gap-3 rounded-xl border border-line bg-surface p-4">
@@ -98,9 +105,30 @@ export default function TopProdutosMarca({ channels, brands, dateFrom, dateTo, c
             <div key={i} className="h-10 animate-pulse rounded bg-accent-soft motion-reduce:animate-none" />
           ))}
         </div>
-      ) : dados.marcas.length === 0 ? (
+      ) : !marca ? (
         <p className="text-sm text-ink-faint">Sem venda de produto no período e filtros selecionados.</p>
       ) : (
+        <>
+        <div className="flex flex-col gap-2">
+          <div className="-mx-1 overflow-x-auto px-1 pb-1">
+            <Segmented
+              rotulo="Marca"
+              opcoes={dados.marcas.map((m) => ({ valor: m.marca, texto: `${rotuloMarca(m.marca)} · ${fmtBrlCurto(m.receita_marca)}` }))}
+              valor={marca.marca}
+              aoEscolher={setMarcaSel}
+            />
+          </div>
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-faint">
+            <span className="tabular-nums">{fmtBrlCurto(marca.receita_marca)} no período</span>
+            {comparando && (
+              <>
+                <Delta valor={variacao(marca.receita_marca, marca.receita_marca_ant)} />
+                <span>{vsRotulo}</span>
+              </>
+            )}
+            {soHojeSemComparar && <span>· dia em andamento, sem comparação com ontem</span>}
+          </p>
+        </div>
         <TableScrollHint>
           <table className="w-full min-w-[760px] table-fixed border-collapse">
             <caption className="sr-only">
@@ -111,24 +139,23 @@ export default function TopProdutosMarca({ channels, brands, dateFrom, dateTo, c
                 <th scope="col" className={`${TH} w-9 text-left`}>#</th>
                 <th scope="col" className={`${TH} text-left`}>Produto</th>
                 <th scope="col" className={`${TH} w-28 text-right`}>Receita</th>
-                {comparando && <th scope="col" className={`${TH} w-28 text-right`}>vs anterior</th>}
+                {comparando && <th scope="col" className={`${TH} w-32 text-right`}>{vsRotulo}</th>}
                 <th scope="col" className={`${TH} w-20 text-right`}>Peças</th>
                 <th scope="col" className={`${TH} w-28 text-right`}>Preço médio</th>
                 <th scope="col" className={`${TH} w-36 text-right`}>% da marca</th>
               </tr>
             </thead>
-            {dados.marcas.map((m) => (
-              <BlocoMarca
-                key={m.marca}
-                m={m}
-                comparando={comparando}
-                aberta={Boolean(abertas[m.marca])}
-                alternar={() => setAbertas((a) => ({ ...a, [m.marca]: !a[m.marca] }))}
-                abrir={(produto) => setAberto({ marca: m.marca, produto })}
-              />
-            ))}
+            <BlocoMarca
+              key={marca.marca}
+              m={marca}
+              comparando={comparando}
+              aberta={Boolean(abertas[marca.marca])}
+              alternar={() => setAbertas((a) => ({ ...a, [marca.marca]: !a[marca.marca] }))}
+              abrir={(produto) => setAberto({ marca: marca.marca, produto })}
+            />
           </table>
         </TableScrollHint>
+        </>
       )}
 
       <KpiDrilldownDialog
@@ -175,18 +202,7 @@ function BlocoMarca({
   const visiveis = aberta ? m.produtos : m.produtos.slice(0, VISIVEIS);
   const colunas = comparando ? 7 : 6;
   return (
-    <tbody className="border-b border-line last:border-0">
-      <tr>
-        <th scope="rowgroup" colSpan={colunas} className="px-2 pb-1 pt-3 text-left">
-          <span className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-            <span className="text-sm font-semibold text-ink">{rotuloMarca(m.marca)}</span>
-            <span className="text-xs font-medium tabular-nums text-ink-faint">
-              {fmtBrlCurto(m.receita_marca)} no período
-            </span>
-            {comparando && <Delta valor={variacao(m.receita_marca, m.receita_marca_ant)} />}
-          </span>
-        </th>
-      </tr>
+    <tbody>
       {visiveis.map((p) => (
         <tr
           key={`${p.canal}:${p.sku}`}
@@ -329,11 +345,14 @@ function DetalheTop({
         </div>
       </div>
 
-      {det && det.extras.length > 0 && (
+      {det && (det.extras.length > 0 || det.aviso_extras) && (
         <div className="flex flex-col gap-2">
           <h3 className="text-sm font-semibold text-ink">
             {p.canal === "tiktok" ? "De onde veio o GMV no período" : "Ads no período"}
           </h3>
+          {det.aviso_extras && (
+            <p className="rounded-lg bg-warn-soft px-3 py-2 text-xs text-warn-ink">{det.aviso_extras}</p>
+          )}
           <dl className="grid grid-cols-2 gap-2 md:grid-cols-3">
             {det.extras.map((e) => (
               <div key={e.rotulo} className="flex flex-col gap-0.5 rounded-lg bg-raised px-3 py-2">
