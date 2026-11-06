@@ -18,8 +18,9 @@ O QUE ESTE MODULO GARANTE, E POR QUE
   custo positivo, o repasse TikTok grava negativo. Sinal inesperado nao e'
   corrigido com `abs()` — o componente sai como `sinal_inesperado`.
 - **Nada aqui se chama margem liquida.** O melhor nivel possivel hoje e'
-  "margem de contribuicao conhecida", porque impostos nao estao ratificados e
-  devolucoes em valor nao tem fonte (contrato §1, §8).
+  "margem de contribuicao conhecida": devolucoes em valor nao tem fonte
+  (contrato §1, §8). Impostos entram como REALIZADO (webgex, T-0069) so' onde
+  foram publicados; sem publicacao, seguem indisponiveis.
 
 FONTES — SO' O NEON (Gate DRE-DATA-BRIDGE-1)
 -------------------------------------------
@@ -29,7 +30,8 @@ FONTES — SO' O NEON (Gate DRE-DATA-BRIDGE-1)
 - `marts.fact_dre_insumo_mensal`: CMV fiscal e repasse TikTok por coorte,
   e (T-0059) a taxa da Shopee do escrow (`shopee_taxa_escrow`), que substitui
   o `total_fees` do mart quando ele nao cobre a celula (ver `_taxa_shopee_escrow`),
-  AGREGADOS e publicados pelo `pipelines.dre.insumo_publisher`, que e' o unico
+  e (T-0069) os impostos realizados do webgex (`imposto_icms`, `imposto_difal`,
+  `imposto_pis_cofins`, ver `_impostos`), AGREGADOS e publicados pelo `pipelines.dre.insumo_publisher`, que e' o unico
   que le o Data Mart. A requisicao nunca toca o Data Mart: o Render nao o
   alcanca (Gate G4).
 
@@ -106,6 +108,17 @@ COBERTURA_CMV_MINIMA = 0.98
 #: da 025 nao tem `parcial`, entao o estado viaja no texto. Mesma constante de
 #: `pipelines.dre.insumo_publisher.BURACO_NF_MARCA` (um teste compara).
 BURACO_NF_MARCA = "buraco de numeracao de NF em "
+#: T-0069: rotulo dos trechos do `motivo` com que o publisher marca o imposto
+#: como parcial (cobertura < 98%, Shopee, Rituaria out/26+). Mesma constante de
+#: `pipelines.dre.insumo_publisher.IMPOSTO_PARCIAL` (um teste compara).
+IMPOSTO_PARCIAL = "imposto parcial: "
+#: Componente publicado -> nome da parte na resposta (`partes` da linha impostos).
+PARTES_IMPOSTO = {"imposto_icms": "icms", "imposto_difal": "difal", "imposto_pis_cofins": "pis_cofins"}
+#: Mesmo minimo do publisher (`IMPOSTO_COBERTURA_MINIMA`) e do CMV. Defesa em
+#: profundidade: o publisher ja' rotula a celula abaixo dele.
+COBERTURA_IMPOSTO_MINIMA = 0.98
+#: Celula SEM imposto realizado publicado: o comportamento de antes da T-0069.
+MOTIVO_IMPOSTOS_SEM_REALIZADO = "imposto realizado (webgex) ainda nao publicado para a celula: migration 040 pendente, sem NF casada ou impostos recusados no lote"
 #: Residuo tolerado na identidade settlement = revenue + fee_and_tax + shipping.
 #: Medido: 0,00 em 758.324 transacoes (contrato §6.1, P1).
 RESIDUO_REPASSE_MAX = 1.0
@@ -248,6 +261,8 @@ class InsumosCelula:
     repasse: dict | None = None
     #: Taxa da Shopee do escrow (T-0059), so' para celula Shopee. `None` = nada publicado.
     taxa_shopee: dict | None = None
+    #: Impostos realizados do webgex (T-0069). `None` = nada publicado para a chave.
+    impostos: dict | None = None
     motivo_sem_insumo: str = "competencia nao publicada em marts.fact_dre_insumo_mensal"
 
 
@@ -358,9 +373,10 @@ def montar_celula_base(ins: InsumosCelula, hoje: date) -> dict:
     if canal == "tiktok":
         avisos.append("Receita do TikTok inclui o frete pago pelo comprador (Gate DQ-TK1); ML e Shopee nao incluem.")
 
-    # --- devolucoes e impostos: sem fonte servivel em nenhum canal ---------
+    # --- devolucoes: sem fonte servivel em nenhum canal ----------------------
     comps["devolucoes"] = _comp(motivo="sem fonte de devolucao/reembolso em valor (perguntas C6, F5)")
-    comps["impostos"] = _comp(motivo="fonte candidata nao ratificada (pergunta F8); 11,6%-14,6% da receita fiscal")
+    # --- impostos: realizado do webgex quando publicado (T-0069) -------------
+    comps["impostos"] = _impostos(ins)
 
     # --- taxas ---------------------------------------------------------------
     if canal in ("ml", "shopee"):
@@ -502,6 +518,98 @@ def _taxa_shopee_escrow(esc: dict | None, do_mart: dict) -> dict:
                             "a parte sem escrow nao e' estimada", **meta)
     return _comp(valor=magnitude, status=NAO_CONFIRMADO,
                  motivo="escrow da Shopee; sem contraprova independente do repasse (pergunta C4)", **meta)
+
+
+#: T-0069: imposto sobre venda realizado, publicado em `marts.fact_dre_insumo_mensal`.
+FONTE_IMPOSTOS_WEBGEX = (f"{TABELA_INSUMOS}.imposto_icms + imposto_difal + imposto_pis_cofins "
+                         "(webgex VX/DB: ICMS, DIFAL e PIS+COFINS das NFs de venda casadas pela chave)")
+
+
+def _impostos(ins: InsumosCelula) -> dict:
+    """Linha `impostos` da celula (T-0069). Funcao PURA.
+
+    PRECEDENCIA (uma fonte por celula; a premissa nunca entra no realizado):
+      1. nada publicado para a chave, ou os tres componentes `ausente_na_origem`
+         -> o comportamento de antes (`indisponivel`, sem valor). Nulo nao vira 0;
+      2. publicado mas inutilizavel (lote nao concluido/vencido) -> esse estado,
+         com o motivo: falha fechada, como os demais insumos;
+      3. realizado -> valor = ICMS + DIFAL + PIS/COFINS (magnitude, custo >= 0),
+         `partes` com os tres e `cobertura` da celula. `disponivel` (entra na
+         margem) so' com os tres presentes, cobertura >= 98% e nenhum trecho
+         `imposto parcial: ` no motivo. Senao `parcial`: o valor e' o medido,
+         nada e' extrapolado, e fica FORA da margem conhecida (como o CMV).
+         SUPOSICAO: faltando um ou dois componentes, soma-se o que existe e o
+         motivo nomeia o que falta.
+    """
+    imp = ins.impostos
+    if imp is None:
+        return _comp(motivo=MOTIVO_IMPOSTOS_SEM_REALIZADO)
+    fonte = FONTE_IMPOSTOS_WEBGEX
+    meta = {"fonte": fonte, "data_as_of": imp.get("data_as_of"), "publicado_em": imp.get("publicado_em")}
+    linhas = imp["linhas"]
+    com_valor = {parte: r for parte, r in linhas.items() if r is not None and r.get("valor") is not None}
+    if imp["_estado"] != "ok":
+        return _comp(status=imp["_estado"], motivo=imp["_motivo"], **meta)
+    if not com_valor:
+        return _comp(motivo=MOTIVO_IMPOSTOS_SEM_REALIZADO)
+    for parte, r in com_valor.items():
+        if r.get("sinal_origem") != 1:
+            return _comp(status=SINAL_INESPERADO, motivo=f"{parte}: convencao de sinal publicada diferente da esperada",
+                         **meta)
+        if _num(r["valor"]) < 0:
+            return _comp(status=SINAL_INESPERADO, motivo=f"{parte} negativo", **meta)
+    partes = {parte: (_num(com_valor[parte]["valor"]) if parte in com_valor else None)
+              for parte in PARTES_IMPOSTO.values()}
+    valor = sum(v for v in partes.values() if v is not None)
+    coberturas = [_num(r.get("cobertura")) for r in com_valor.values()]
+    cobertura = None if any(c is None for c in coberturas) else min(coberturas)
+
+    motivos: list[str] = []
+    faltam = [parte for parte, v in partes.items() if v is None]
+    if faltam:
+        motivos.append(f"sem {', '.join(faltam)} na origem (ausencia nao e' zero); soma so' do que existe")
+    trechos: list[str] = []
+    for r in com_valor.values():
+        for t in (r.get("motivo") or "").split("; "):
+            if t.startswith(IMPOSTO_PARCIAL) and t[len(IMPOSTO_PARCIAL):] not in trechos:
+                trechos.append(t[len(IMPOSTO_PARCIAL):])
+    motivos.extend(trechos)
+    cob_txt = "desconhecida" if cobertura is None else f"{cobertura * 100:.2f}%"
+    if cobertura is None or (cobertura < COBERTURA_IMPOSTO_MINIMA and not any("cobertura" in t for t in trechos)):
+        motivos.append(f"imposto cobre {cob_txt} da receita fiscal (minimo {COBERTURA_IMPOSTO_MINIMA * 100:.0f}%)")
+    if motivos:
+        comp = _comp(valor=valor, status=COBERTURA_PARCIAL,
+                     motivo="; ".join(motivos) + "; nada e' extrapolado", **meta)
+    else:
+        comp = _comp(valor=valor, status=DISPONIVEL,
+                     motivo=f"imposto realizado (webgex): NFs casadas cobrem {cob_txt} da receita fiscal", **meta)
+    comp["partes"] = partes
+    comp["cobertura"] = None if cobertura is None else round(cobertura, 6)
+    # Internas, para a cobertura do agregado (razao das somas). O contrato as descarta.
+    rf = _num((ins.cmv or {}).get("receita_fiscal"))
+    comp["_imp_receita_fiscal"] = rf
+    comp["_imp_receita_casada"] = cobertura * rf if (cobertura is not None and rf is not None) else None
+    return comp
+
+
+def _impostos_agregados(destino: dict, partes: list[dict]) -> None:
+    """`partes` e `cobertura` dos impostos num agregado. Funcao PURA.
+
+    Partes: soma por imposto entre as celulas COM valor; nula se alguma delas
+    nao tem a parte (nunca vira zero). Cobertura: razao das SOMAS (receita
+    casada / receita fiscal), so' quando TODA celula aplicavel tem os dois.
+    """
+    com_valor = [p for p in partes if p["valor"] is not None]
+    if com_valor and all(p.get("partes") for p in com_valor):
+        destino["partes"] = {
+            nome: (None if any(p["partes"].get(nome) is None for p in com_valor)
+                   else round(sum(p["partes"][nome] for p in com_valor), 2))
+            for nome in PARTES_IMPOSTO.values()
+        }
+    if partes and all(p["valor"] is not None and p.get("_imp_receita_fiscal") and
+                      p.get("_imp_receita_casada") is not None for p in partes):
+        rf = sum(p["_imp_receita_fiscal"] for p in partes)
+        destino["cobertura"] = round(sum(p["_imp_receita_casada"] for p in partes) / rf, 6)
 
 
 def _taxa_tiktok(ins: InsumosCelula, avisos: list[str]) -> dict:
@@ -754,6 +862,8 @@ def agregar(celulas: list[dict], **chave) -> dict | None:
             comps[nome][chave_data] = min(datas) if datas else None
         if nome == "cmv":
             _cobertura_agregada(comps[nome], [p for p, _ in aplic])
+        if nome == "impostos":
+            _impostos_agregados(comps[nome], [p for p, _ in aplic])
     rec_status = {c["componentes"]["receita"]["status"] for c in celulas}
     comps["receita"] = _comp(valor=receita_total, status=DISPONIVEL if rec_status == {DISPONIVEL} else COBERTURA_PARCIAL,
                              somavel=False)
@@ -953,6 +1063,31 @@ def indexar_taxa_shopee(linhas: list[dict], agora: datetime) -> dict:
     return out
 
 
+def indexar_impostos(linhas: list[dict], agora: datetime) -> dict:
+    """Impostos realizados (T-0069) por chave: `{"linhas": {parte: linha|None}, ...}`.
+
+    Funcao propria, como `indexar_taxa_shopee`. O estado do lote e' o das
+    linhas de imposto da chave (mesma regra de `_estado_do_lote`).
+    """
+    por_chave: dict[tuple, dict[str, dict]] = {}
+    for r in linhas:
+        parte = PARTES_IMPOSTO.get(r["componente"])
+        if parte is not None:
+            por_chave.setdefault((_chave_mes(r["competencia"]), r["canal"], r["marca"]), {})[parte] = r
+    out = {}
+    for k, partes in por_chave.items():
+        rows = list(partes.values())
+        estado, motivo = _estado_do_lote(rows, agora)
+        datas = [r["data_max_origem"] for r in rows if r.get("data_max_origem") is not None]
+        out[k] = {
+            "_estado": estado, "_motivo": motivo,
+            "linhas": {parte: partes.get(parte) for parte in PARTES_IMPOSTO.values()},
+            "data_as_of": max(datas) if datas else None,
+            "publicado_em": min(r["publicado_em"] for r in rows),
+        }
+    return out
+
+
 def resumo_insumos(leitura: LeituraInsumos, agora: datetime) -> dict:
     if not leitura.tabela_existe:
         return {"estado": "tabela_ausente", "publicado_em": None,
@@ -1043,6 +1178,7 @@ def montar_dre(
     af_idx = {(_chave_mes(r["mes"]), r["marca"]): r for r in afiliado_rows}
     cmv_idx, rep_idx = indexar_insumos(insumos.linhas, agora)
     txs_idx = indexar_taxa_shopee(insumos.linhas, agora)
+    imp_idx = indexar_impostos(insumos.linhas, agora)
     motivo_sem = ("marts.fact_dre_insumo_mensal nao existe (migration 025 nao aplicada)"
                   if not insumos.tabela_existe else
                   "competencia nao publicada em marts.fact_dre_insumo_mensal")
@@ -1059,6 +1195,7 @@ def montar_dre(
             cmv=cmv_idx.get((mes, canal, r["marca"])),
             repasse=rep_idx.get((mes, canal, r["marca"])) if canal == "tiktok" else None,
             taxa_shopee=txs_idx.get((mes, canal, r["marca"])) if canal == "shopee" else None,
+            impostos=imp_idx.get((mes, canal, r["marca"])),
             motivo_sem_insumo=motivo_sem,
         )
         base.append(montar_celula_base(ins, hoje))
@@ -1098,6 +1235,8 @@ def montar_dre(
             "insumo_idade_maxima_horas": int(INSUMO_IDADE_MAXIMA.total_seconds() // 3600),
             "cmv_razao_aceita": [CMV_RAZAO_MIN, CMV_RAZAO_MAX],
             "cmv_cobertura_minima": COBERTURA_CMV_MINIMA,
+            "impostos": "realizado do webgex (ICMS + DIFAL + PIS/COFINS) onde publicado; parcial fica fora da "
+                        "margem; sem publicacao, indisponivel. Premissa so' no cenario estimado",
             "cmv_pct_receita_coberta": "CMV / receita com custo; cobertura = receita com custo / receita fiscal "
                                        "(NF fiscal, base de item). pct_receita do CMV segue CMV / receita (GMV)",
             "afiliado_tiktok": "decomposicao de taxas; nunca somado",

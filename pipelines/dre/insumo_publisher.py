@@ -12,7 +12,10 @@ Le, no Data Mart e em transacao READ ONLY, somente AGREGADOS MENSAIS por
     por coorte de pedido (`silver.stg_tiktok_payments_by_order`);
   * taxa da Shopee do escrow (comissao + servico + transacao) por coorte de
     criacao do pedido, com a cobertura em pedidos (T-0059). So' entra quando o
-    CHECK da tabela no Neon ja aceita o componente — ver `TAXA_SHOPEE`.
+    CHECK da tabela no Neon ja aceita o componente — ver `TAXA_SHOPEE`;
+  * imposto sobre venda realizado (ICMS, DIFAL, PIS+COFINS) do webgex, casado
+    com a NF de marketplace pela chave, com a cobertura em receita fiscal
+    (T-0069). So' entra depois da migration 040 — ver `IMPOSTOS`.
 
 e grava em `marts.fact_dre_insumo_mensal` (Neon). Nenhum pedido, nota,
 settlement ou dado pessoal sai do Data Mart.
@@ -140,6 +143,45 @@ BURACO_NF_MARCA = "buraco de numeracao de NF em "
 BURACO_NF_MINIMO = 500
 #: Quantos dias o `motivo` nomeia; o resto vira "e mais N dia(s)".
 BURACO_NF_DIAS_NO_MOTIVO = 10
+
+#: T-0069 — imposto sobre venda REALIZADO, do webgex (`raw.webgex_impostos_gobeaute`
+#: + `raw.webgex_impostos_ap`, circuito `VX`, debito `DB`), casado com a NF de
+#: marketplace pela chave. Valor ABSOLUTO (custo positivo, `sinal_origem = 1`),
+#: nunca % aplicado sobre o GMV. Validacao: `webgex_impostos_validacao.md`
+#: (05/11/2026).
+#:
+#: INERTE ATE' A MIGRATION 040: o CHECK `ck_fdim_componente` e' lista fechada. O
+#: publisher so' le' e grava os tres componentes quando o CHECK do Neon ja
+#: aceita OS TRES (`check_aceita_impostos`); antes disso o lote sai identico ao
+#: de hoje e o resumo diz `inerte`. Mesmo mecanismo da `TAXA_SHOPEE`.
+IMPOSTO_ICMS = "imposto_icms"
+IMPOSTO_DIFAL = "imposto_difal"
+IMPOSTO_PIS_COFINS = "imposto_pis_cofins"
+IMPOSTOS = (IMPOSTO_ICMS, IMPOSTO_DIFAL, IMPOSTO_PIS_COFINS)
+PROC_IMPOSTOS = ("raw.webgex_impostos_gobeaute + raw.webgex_impostos_ap (circuito VX, debito DB) x "
+                 "gold.nf_vendas_unificada_v2 (chave_nota = chave_nfe; canal=marketplace, sem intercompany) @T-0069")
+#: Cobertura minima: receita fiscal das NFs casadas no webgex / receita fiscal
+#: da celula. Abaixo dela o imposto e' `parcial` (Lescent set/26: 13 dias sem
+#: carga, ~62-67%). Mesmo limiar do CMV no serving (`COBERTURA_CMV_MINIMA`).
+IMPOSTO_COBERTURA_MINIMA = Decimal("0.98")
+#: Rotulo estavel dos trechos do `motivo` que tornam o imposto `parcial`. O
+#: CHECK `ck_fdim_status` nao tem `parcial`; como no `BURACO_NF_MARCA` (T-0064),
+#: o estado viaja no texto, sem migration. Cada trecho comeca com o rotulo e
+#: nao tem `; ` dentro, para o serving separa'-lo do resto do motivo.
+IMPOSTO_PARCIAL = "imposto parcial: "
+#: Shopee: o imposto so' cobre a receita FATURADA (21-36% do GMV em set/26).
+#: Ate' a pergunta F1 ser respondida, todo imposto Shopee e' `parcial`.
+IMPOSTO_PARCIAL_SHOPEE = IMPOSTO_PARCIAL + "imposto so' sobre a receita fiscal faturada (F1 em aberto)"
+#: Marca -> primeira competencia em que a BASE do ICMS mudou e ainda nao foi
+#: confirmada pelo Fiscal. Rituaria out/26: a base passou a ser o valor ANTES
+#: do desconto (05/10: base 49,4 mil x receita 27,7 mil; em 05/08 base =
+#: receita), e a aliquota efetiva saltou para 32,6% (Shopee) e 38,3% (TikTok).
+#: Vale para a competencia e as POSTERIORES, em todos os canais da marca (a
+#: base e' do emissor), ate' decisao do Fiscal -- ai' remover/ajustar aqui.
+IMPOSTO_BASE_PENDENTE_FISCAL = {"rituaria": date(2026, 10, 1)}
+IMPOSTO_PARCIAL_BASE = IMPOSTO_PARCIAL + "base do ICMS mudou em out/26 (desconto na base), pendente do Fiscal"
+#: Folga da janela de `data` do webgex em torno das competencias lidas.
+WEBGEX_FOLGA = timedelta(days=7)
 
 EXIT_OK = 0
 EXIT_RECONCILIACAO = 65
@@ -414,6 +456,75 @@ SQL_TAXA_SHOPEE = text("""
     GROUP BY 1, 2
 """)
 
+#: Imposto realizado por `competencia x marca x plataforma` (T-0069).
+#:   * `notas`: as MESMAS linhas do `SQL_CMV` (mesmos filtros de celula),
+#:     colapsadas para UMA linha por chave x celula ANTES do JOIN. A gold tem
+#:     uma linha por ITEM; juntar item com imposto multiplicaria o imposto pelo
+#:     numero de itens. `receita_fiscal` da celula = a do CMV (conferida no lote);
+#:   * `celulas_da_chave`: uma chave que cai em mais de uma celula duplicaria o
+#:     imposto; o lote recusa (`chaves_ambiguas`). Chave NULL nao conta como
+#:     ambigua: ela so' nao casa e reduz a cobertura;
+#:   * `impostos`: o webgex e' uma linha por imposto x item de NF; agrega por
+#:     chave (as duas tabelas, UNION ALL: emissoras distintas). Venda =
+#:     `circuito = 'VX'` e `debito_credito = 'DB'` (fora: OX, CX, TF, DX/DV).
+#:     DIFAL e' a coluna `valor_difal` das linhas de ICMS, FORA de
+#:     `valor_imposto`. IPI fica fora (valor zero medido). Sem COALESCE: linha
+#:     ausente nao vira zero;
+#:   * cobertura = receita das NFs casadas / receita fiscal da celula. NF sem
+#:     linha no webgex fica fora da soma; nada e' extrapolado;
+#:   * janela em `data` do webgex (`janela_webgex`): so' para reduzir a
+#:     varredura (~28 mi linhas). Folga de `WEBGEX_FOLGA` antes e depois da
+#:     janela, para o lancamento fiscal que cai fora do mes da emissao. A
+#:     competencia continua vindo da gold (`data_mes`) pela chave: a folga nao
+#:     muda a atribuicao, so' deixa de ler linha que nenhuma NF da janela casaria.
+SQL_IMPOSTOS = text("""
+    WITH notas AS (
+        SELECT chave_nfe, data_mes, marca, plataforma, SUM(receita_produto) AS receita_fiscal,
+               COUNT(*) OVER (PARTITION BY chave_nfe) AS celulas_da_chave
+        FROM gold.nf_vendas_unificada_v2
+        WHERE data_mes = ANY(:competencias)
+          AND canal = 'marketplace'
+          AND plataforma = ANY(:plataformas)
+          AND marca = ANY(:marcas)
+          AND intercompany IS NOT TRUE
+        GROUP BY chave_nfe, data_mes, marca, plataforma
+    ), webgex AS (
+        SELECT chave_nota, codigo_imposto, valor_imposto, valor_difal, ingested_at
+        FROM raw.webgex_impostos_gobeaute
+        WHERE circuito = 'VX' AND debito_credito = 'DB'
+          AND data >= :inicio_webgex AND data < :fim_webgex
+        UNION ALL
+        SELECT chave_nota, codigo_imposto, valor_imposto, valor_difal, ingested_at
+        FROM raw.webgex_impostos_ap
+        WHERE circuito = 'VX' AND debito_credito = 'DB'
+          AND data >= :inicio_webgex AND data < :fim_webgex
+    ), impostos AS (
+        SELECT chave_nota,
+               SUM(valor_imposto) FILTER (WHERE codigo_imposto = 'ICM')               AS icms,
+               SUM(valor_difal)   FILTER (WHERE codigo_imposto = 'ICM')               AS difal,
+               SUM(valor_imposto) FILTER (WHERE codigo_imposto IN ('PIS', 'COF'))     AS pis_cofins,
+               MAX(ingested_at)                                                       AS ingerido_em
+        FROM webgex
+        WHERE chave_nota IN (SELECT chave_nfe FROM notas)
+        GROUP BY chave_nota
+    )
+    SELECT n.data_mes                                                        AS competencia,
+           n.marca                                                           AS marca,
+           n.plataforma                                                      AS plataforma,
+           SUM(n.receita_fiscal)                                             AS receita_fiscal,
+           SUM(n.receita_fiscal) FILTER (WHERE i.chave_nota IS NOT NULL)     AS receita_com_imposto,
+           COUNT(*)                                                          AS notas,
+           COUNT(i.chave_nota)                                               AS notas_com_imposto,
+           SUM(i.icms)                                                       AS icms,
+           SUM(i.difal)                                                      AS difal,
+           SUM(i.pis_cofins)                                                 AS pis_cofins,
+           COUNT(*) FILTER (WHERE n.chave_nfe IS NOT NULL AND n.celulas_da_chave > 1) AS chaves_ambiguas,
+           MAX(i.ingerido_em)                                                AS atualizado_em
+    FROM notas n
+    LEFT JOIN impostos i ON i.chave_nota = n.chave_nfe
+    GROUP BY n.data_mes, n.marca, n.plataforma
+""")
+
 SQL_TABELA_EXISTE = text("SELECT to_regclass('marts.fact_dre_insumo_mensal') IS NOT NULL")
 #: Definicao do CHECK de componentes no Neon. `TAXA_SHOPEE` so' e' publicada
 #: quando aparece nela (migration que estende a 025 aplicada).
@@ -506,6 +617,13 @@ class Lote:
     extraidas: int = 0
     #: Resultado do gate de numeracao de NF (T-0064), para o resumo JSON.
     numeracao_nf: dict = field(default_factory=dict)
+    #: Celulas com imposto `parcial` (T-0069), para o resumo JSON.
+    impostos_parciais: list = field(default_factory=list)
+    #: Estado dos impostos decidido na montagem (`publicado` ou `recusado: ...`);
+    #: None = nao houve leitura (o estado vem de `ler_impostos`).
+    impostos_estado: Optional[str] = None
+    #: Motivos da validacao dos impostos que reprovou. NAO entram em `recusas`.
+    impostos_recusas: list = field(default_factory=list)
 
 
 def _linha(competencia, canal, marca, componente, valor, *, status, procedencia, sinal=None,
@@ -706,7 +824,7 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
                 repasse: list[dict], canais: list[str], comps: list[date],
                 sem_vendas: frozenset = frozenset(), publicadas: frozenset = frozenset(),
                 remover: frozenset = frozenset(), taxa_shopee: Optional[list[dict]] = None,
-                numeracao_nf: Optional[list[dict]] = None) -> Lote:
+                numeracao_nf: Optional[list[dict]] = None, impostos: Optional[list[dict]] = None) -> Lote:
     """Transforma a leitura em linhas da fato e lista as recusas.
 
     Recusa (a publicacao inteira aborta) quando:
@@ -734,8 +852,20 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
     `motivo` do `cmv` e do `cmv_receita_fiscal` de TODOS os canais dela (a
     numeracao e' do emissor). Valor, status e cobertura NAO mudam -- nada e'
     extrapolado -- e nunca recusa. `None` = gate nao avaliado (lote como antes).
+
+    `impostos` (T-0069): linhas de `SQL_IMPOSTOS`. `None` = o Neon ainda nao
+    aceita os componentes (antes da 040): nenhuma linha de imposto e' montada e
+    o lote fica como antes. Lista (mesmo vazia) = publicar os tres componentes
+    para toda celula esperada (`_linhas_impostos`). A validacao dos impostos
+    (chave repetida, chave de NF em mais de uma celula, receita fiscal diferente
+    da do CMV, imposto negativo, cobertura fora de [0, 1]) NUNCA recusa o lote:
+    se reprovar, NENHUMA linha de imposto e' montada (fail-closed dos impostos,
+    como no modo inerte), o resto do lote sai igual e o motivo vai para
+    `impostos_estado = "recusado: ..."`. Motivo: CMV e impostos sao lidos em
+    statements separados (READ COMMITTED numa replica); uma recarga da gold
+    entre os dois nao pode derrubar a DRE do dia.
     """
-    lote = Lote(extraidas=len(cmv) + len(repasse) + len(taxa_shopee or []))
+    lote = Lote(extraidas=len(cmv) + len(repasse) + len(taxa_shopee or []) + len(impostos or []))
     plat_para_canal = {v: k for k, v in PLATAFORMA_FISCAL.items()}
 
     def indexar(rows, chave_fn, nome):
@@ -752,6 +882,14 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
                      "contraprova")
     rep_idx = indexar(repasse, lambda r: (_mes_de(r["competencia"]), r["marca"]), "repasse")
     txs_idx = indexar(taxa_shopee or [], lambda r: (_mes_de(r["competencia"]), r["marca"]), "taxa_shopee")
+    # Impostos indexados a' parte: chave repetida aqui reprova SO' os impostos.
+    imp_idx: dict = {}
+    imp_recusas: list[str] = []
+    for r in impostos or []:
+        k = (_mes_de(r["competencia"]), plat_para_canal.get(r["plataforma"]), r["marca"])
+        if k in imp_idx:
+            imp_recusas.append(f"impostos: chave repetida {k}")
+        imp_idx[k] = r
     esp = {}
     for r in esperado:
         canal = {v: k for k, v in MKT_ID.items()}.get(r["marketplace_id"])
@@ -769,6 +907,18 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
 
     for k in set(cmv_idx) - set(esp):
         lote.fora_do_escopo.append(("cmv",) + k)
+    for k in set(imp_idx) - set(esp):
+        lote.fora_do_escopo.append(("impostos",) + k)
+    usar_impostos = impostos is not None
+    if usar_impostos:
+        imp_recusas.extend(recusas_impostos(imp_idx, cmv_idx))
+        if imp_recusas:
+            usar_impostos = False
+            lote.impostos_recusas = imp_recusas
+            lote.impostos_estado = "recusado: " + "; ".join(imp_recusas[:5]) + (
+                f" (e mais {len(imp_recusas) - 5})" if len(imp_recusas) > 5 else "")
+        else:
+            lote.impostos_estado = "publicado"
     for (m, marca) in set(rep_idx):
         if "tiktok" in canais and (m, "tiktok", marca) not in esp:
             lote.fora_do_escopo.append(("repasse", m, "tiktok", marca))
@@ -810,6 +960,8 @@ def montar_lote(*, esperado: list[dict], cmv: list[dict], contraprova: list[dict
 
         if canal == "shopee" and taxa_shopee is not None:
             lote.linhas.append(_linha_taxa_shopee(m, marca, txs_idx.get((m, marca)), lote))
+        if usar_impostos:
+            lote.linhas.extend(_linhas_impostos(m, canal, marca, imp_idx.get((m, canal, marca)), lote))
         if canal != "tiktok":
             continue
         r = rep_idx.get((m, marca))
@@ -874,6 +1026,114 @@ def _linha_taxa_shopee(m: date, marca: str, r: Optional[dict], lote: Lote) -> di
                   data_max=_ts(r["atualizado_em"]))
 
 
+#: Componente -> (coluna de `SQL_IMPOSTOS`, codigo do webgex, para o motivo).
+_COLUNA_IMPOSTO = {IMPOSTO_ICMS: ("icms", "ICM"), IMPOSTO_DIFAL: ("difal", "ICM/valor_difal"),
+                   IMPOSTO_PIS_COFINS: ("pis_cofins", "PIS/COF")}
+
+
+def janela_webgex(comps: list[date]) -> tuple[date, date]:
+    """`[inicio, fim)` em `data` do webgex: primeira competencia - 7 dias ate'
+    o 1o dia do mes seguinte a' ultima + 7 dias. So' filtro de varredura."""
+    return comps[0] - WEBGEX_FOLGA, somar_meses(comps[-1], 1) + WEBGEX_FOLGA
+
+
+def _cobertura_imposto(r: dict) -> Optional[Decimal]:
+    return _razao(_dec(r["receita_com_imposto"]), _dec(r["receita_fiscal"]))
+
+
+def recusas_impostos(imp_idx: dict, cmv_idx: dict) -> list[str]:
+    """Recusas da leitura de impostos (T-0069), em TODA celula lida.
+
+      * chave de NF em mais de uma celula: o imposto dela seria somado duas
+        vezes;
+      * receita fiscal diferente da do CMV (mesmos filtros): as duas leituras
+        viram instantes diferentes da gold, e a cobertura nao seria a do CMV;
+      * imposto negativo numa celula: debito de venda e' custo; sinal
+        inesperado nao e' corrigido aqui;
+      * cobertura fora de [0, 1].
+    """
+    recusas: list[str] = []
+    for k in sorted(imp_idx, key=lambda x: (x[0], str(x[1]), x[2])):
+        r = imp_idx[k]
+        if int(r["chaves_ambiguas"] or 0):
+            recusas.append(f"impostos: {r['chaves_ambiguas']} item(ns) de NF cuja chave cai em mais de uma celula "
+                           f"em {k}; o imposto seria duplicado")
+        c = cmv_idx.get(k)
+        rf_imp = _dec(r["receita_fiscal"]) or Decimal(0)
+        rf_cmv = (_dec(c["receita_fiscal"]) or Decimal(0)) if c is not None else None
+        if rf_cmv is None or abs(rf_imp - rf_cmv) > CONTRAPROVA_MAX:
+            recusas.append(f"impostos: receita fiscal {k} diverge da do CMV "
+                           f"({rf_imp} x {'sem CMV' if rf_cmv is None else rf_cmv}); leituras em instantes diferentes")
+        for comp, (col, _cod) in _COLUNA_IMPOSTO.items():
+            v = _dec(r[col])
+            if v is not None and v < 0:
+                recusas.append(f"impostos: {comp} negativo em {k}: {v}")
+        cob = _cobertura_imposto(r)
+        if cob is not None and not (Decimal(0) <= cob <= Decimal(1)):
+            recusas.append(f"impostos: cobertura fora de [0,1] em {k}: {cob}")
+    return recusas
+
+
+def motivos_parcial_imposto(m: date, canal: str, marca: str, cobertura: Optional[Decimal]) -> list[str]:
+    """Trechos `imposto parcial: ...` de uma celula COM imposto casado. PURA.
+
+    Nunca muda o valor: o imposto publicado e' sempre o medido nas NFs casadas.
+    """
+    trechos = []
+    if cobertura is None or cobertura < IMPOSTO_COBERTURA_MINIMA:
+        pct = "desconhecida" if cobertura is None else f"{cobertura:.4f}"
+        trechos.append(f"{IMPOSTO_PARCIAL}cobertura {pct} da receita fiscal, minimo {IMPOSTO_COBERTURA_MINIMA}")
+    if canal == "shopee":
+        trechos.append(IMPOSTO_PARCIAL_SHOPEE)
+    desde = IMPOSTO_BASE_PENDENTE_FISCAL.get(marca)
+    if desde is not None and m >= desde:
+        trechos.append(IMPOSTO_PARCIAL_BASE)
+    return trechos
+
+
+def _linhas_impostos(m: date, canal: str, marca: str, r: Optional[dict], lote: Lote) -> list[dict]:
+    """As tres linhas de imposto de uma celula esperada (T-0069).
+
+    * sem NF de venda, ou nenhuma NF casada no webgex -> `valor NULL`,
+      `ausente_na_origem` nos tres (nulo != zero; nada inventado);
+    * com NF casada -> o valor medido (custo POSITIVO, `sinal_origem = 1`).
+      Zero medido (PIS/COFINS CST 04) e' zero. Componente sem nenhuma linha do
+      seu codigo nas NFs casadas -> NULL, nao zero;
+    * `cobertura` = receita das NFs casadas / receita fiscal da celula;
+      `status = nao_avaliado` (como a `TAXA_SHOPEE`), com os trechos
+      `imposto parcial: ...` no motivo quando cabe.
+    """
+    if r is None or not int(r["notas_com_imposto"] or 0):
+        motivo = ("sem NF de venda para a chave na origem" if r is None
+                  else f"nenhuma das {int(r['notas'] or 0)} NFs da chave casada no webgex (VX/DB)")
+        return [_linha(m, canal, marca, comp, None, status="ausente_na_origem", procedencia=PROC_IMPOSTOS,
+                       motivo=motivo) for comp in IMPOSTOS]
+    notas, com = int(r["notas"] or 0), int(r["notas_com_imposto"])
+    cobertura = _cobertura_imposto(r)
+    if cobertura is not None and not (Decimal(0) <= cobertura <= Decimal(1)):
+        cobertura = None  # inalcancavel: `recusas_impostos` ja' teria descartado os impostos
+    base = (f"imposto de {com} de {notas} NFs casadas no webgex (VX/DB); "
+            f"receita fiscal coberta = {'desconhecida' if cobertura is None else f'{cobertura:.4f}'}")
+    parciais = motivos_parcial_imposto(m, canal, marca, cobertura)
+    if parciais:
+        lote.impostos_parciais.append({"competencia": m.isoformat()[:7], "canal": canal, "marca": marca,
+                                       "motivos": [p[len(IMPOSTO_PARCIAL):] for p in parciais]})
+    motivo = "; ".join([base] + parciais)
+    data_max = _ts(r["atualizado_em"])
+    cob = None if cobertura is None else cobertura.quantize(Decimal("0.000001"))
+    linhas = []
+    for comp in IMPOSTOS:
+        col, cod = _COLUNA_IMPOSTO[comp]
+        v = _dec(r[col])
+        if v is None:
+            linhas.append(_linha(m, canal, marca, comp, None, status="ausente_na_origem", procedencia=PROC_IMPOSTOS,
+                                 cobertura=cob, motivo=f"NFs casadas sem linha {cod} no webgex", data_max=data_max))
+            continue
+        linhas.append(_linha(m, canal, marca, comp, v, status="nao_avaliado", procedencia=PROC_IMPOSTOS, sinal=1,
+                             cobertura=cob, motivo=motivo, data_max=data_max))
+    return linhas
+
+
 # ---------------------------------------------------------------------------
 # Leitura
 # ---------------------------------------------------------------------------
@@ -888,6 +1148,8 @@ def ler_fonte(fonte_engine, comps: list[date], canais: list[str], marcas: list[s
 
     A taxa da Shopee so' e' lida com `com_taxa_shopee` (CHECK do Neon aceita o
     componente) e a Shopee no escopo; senao volta `None` e o lote nao a monta.
+    Os impostos (T-0069) tem leitura propria, que nunca derruba o lote:
+    `ler_impostos`.
     """
     if fonte_engine is None:
         raise FonteIndisponivel("Data Mart nao configurado")
@@ -908,6 +1170,38 @@ def ler_fonte(fonte_engine, comps: list[date], canais: list[str], marcas: list[s
     except SQLAlchemyError as exc:
         raise FonteIndisponivel(sanitizar(exc)) from None
     return cmv, contraprova, repasse, taxa_shopee
+
+
+def ler_impostos(fonte_engine, comps: list[date], canais: list[str], marcas: list[str],
+                 aceita: bool) -> tuple[Optional[list], str]:
+    """Impostos (T-0069): leitura PROPRIA, READ ONLY, com timeout.
+
+    Como o gate de numeracao (T-0064), nunca derruba a publicacao:
+      * `aceita` falso (CHECK do Neon sem os tres componentes) -> nao le';
+        `(None, "inerte: ...")`;
+      * erro de SQL (timeout, tabela ausente...) -> `(None, "indisponivel:
+        <classe>")`, so' a classe do erro, sem o texto (nada de DSN);
+      * ok -> `(linhas, "lido")`; a montagem decide `publicado`/`recusado`.
+    So' `SQLAlchemyError` e' engolido; qualquer outra excecao sobe.
+    """
+    if not aceita:
+        return None, estado_impostos(None)
+    if fonte_engine is None or not marcas:
+        return None, "nao avaliado: sem Data Mart ou sem marca no escopo"
+    inicio_webgex, fim_webgex = janela_webgex(comps)
+    params = {
+        "competencias": comps, "plataformas": [PLATAFORMA_FISCAL[c] for c in canais], "marcas": marcas,
+        "inicio_webgex": inicio_webgex, "fim_webgex": fim_webgex,
+    }
+    try:
+        with fonte_engine.connect() as conn:
+            conn.execute(text("SET TRANSACTION READ ONLY"))
+            conn.execute(text("SET LOCAL statement_timeout = '600s'"))
+            linhas = _rows(conn, SQL_IMPOSTOS, params)
+            conn.rollback()
+    except SQLAlchemyError as exc:
+        return None, f"indisponivel: {type(exc).__name__}"
+    return linhas, "lido"
 
 
 def ler_numeracao_nf(fonte_engine, comps: list[date], marcas: list[str]) -> tuple[Optional[list], str]:
@@ -949,10 +1243,31 @@ def estado_taxa_shopee(taxa_shopee: Optional[list], canais: list[str]) -> str:
     return "publicado"
 
 
+def estado_impostos(impostos: Optional[list]) -> str:
+    """Rotulo do resumo para os impostos (T-0069): publicados ou inertes, e por que."""
+    if impostos is None:
+        return ("inerte: o CHECK ck_fdim_componente do Neon ainda nao aceita " + ", ".join(IMPOSTOS)
+                + " (migration 040 pendente)")
+    return "publicado"
+
+
+def _resumo_impostos(lote: Lote, estado_leitura: str) -> dict:
+    """Estado final: o da montagem (`publicado`/`recusado: ...`) ou, sem
+    leitura, o de `ler_impostos` (`inerte: ...`/`indisponivel: ...`)."""
+    return {"estado": lote.impostos_estado or estado_leitura, "parciais": lote.impostos_parciais,
+            "recusas": lote.impostos_recusas}
+
+
 def check_aceita_taxa_shopee(conn) -> bool:
     """True quando o CHECK de componentes do Neon ja lista `TAXA_SHOPEE`."""
     definicao = conn.execute(SQL_CHECK_COMPONENTE).scalar()
     return bool(definicao) and f"'{TAXA_SHOPEE}'" in definicao
+
+
+def check_aceita_impostos(conn) -> bool:
+    """True quando o CHECK de componentes do Neon ja lista OS TRES impostos (040)."""
+    definicao = conn.execute(SQL_CHECK_COMPONENTE).scalar()
+    return bool(definicao) and all(f"'{c}'" in definicao for c in IMPOSTOS)
 
 
 def _esperado(conn, comps: list[date], canais: list[str]) -> list[dict]:
@@ -1022,15 +1337,18 @@ def diagnosticar(alvo_engine, fonte_engine, comps: list[date], canais: list[str]
         existe = conn.execute(SQL_TABELA_EXISTE).scalar_one()
         atual = _rows(conn, SQL_ATUAL, {"competencias": comps, "canais": canais}) if existe else []
         aceita_tx = bool(existe) and check_aceita_taxa_shopee(conn)
+        aceita_imp = bool(existe) and check_aceita_impostos(conn)
         conn.rollback()
     cmv, contraprova, repasse, taxa_shopee = ler_fonte(fonte_engine, comps, canais, _marcas(esperado), aceita_tx)
+    impostos, estado_imp = ler_impostos(fonte_engine, comps, canais, _marcas(esperado), aceita_imp)
     numeracao, estado_nf = ler_numeracao_nf(fonte_engine, comps, _marcas(esperado))
     publicadas = frozenset((_mes_de(r["competencia"]), r["canal"], r["marca"]) for r in atual)
     lote = montar_lote(esperado=esperado, cmv=cmv, contraprova=contraprova, repasse=repasse, canais=canais,
                        comps=comps, sem_vendas=sem_vendas, publicadas=publicadas, remover=remover,
-                       taxa_shopee=taxa_shopee, numeracao_nf=numeracao)
+                       taxa_shopee=taxa_shopee, numeracao_nf=numeracao, impostos=impostos)
     return _resumo(lote, comps, canais, modo="dry-run", aplicado=False, tabela_existe=bool(existe),
                    taxa_shopee=estado_taxa_shopee(taxa_shopee, canais),
+                   impostos=_resumo_impostos(lote, estado_imp),
                    numeracao_nf=_resumo_numeracao(lote, estado_nf),
                    sem_vendas=sorted(f"{m.isoformat()[:7]}:{c}" for m, c in sem_vendas),
                    remover_marca=sorted(rotulo_chave(k) for k in remover),
@@ -1064,10 +1382,12 @@ def publicar(alvo_engine, fonte_engine, comps: list[date], canais: list[str], *,
                 for r in _rows(conn, SQL_PUBLICADAS, {"competencias": comps, "canais": canais}))
             cmv, contraprova, repasse, taxa_shopee = ler_fonte(fonte_engine, comps, canais, _marcas(esperado),
                                                                check_aceita_taxa_shopee(conn))
+            impostos, estado_imp = ler_impostos(fonte_engine, comps, canais, _marcas(esperado),
+                                                check_aceita_impostos(conn))
             numeracao, estado_nf = ler_numeracao_nf(fonte_engine, comps, _marcas(esperado))
             lote = montar_lote(esperado=esperado, cmv=cmv, contraprova=contraprova, repasse=repasse, canais=canais,
                                comps=comps, sem_vendas=sem_vendas, publicadas=publicadas, remover=remover,
-                               taxa_shopee=taxa_shopee, numeracao_nf=numeracao)
+                               taxa_shopee=taxa_shopee, numeracao_nf=numeracao, impostos=impostos)
             if lote.recusas:  # ANTES do DELETE: recusa nunca apaga a fotografia
                 raise PublicacaoRecusada(lote.recusas)
             apagadas = conn.execute(SQL_APAGA_ESCOPO, {"competencias": comps, "canais": canais}).rowcount
@@ -1085,6 +1405,7 @@ def publicar(alvo_engine, fonte_engine, comps: list[date], canais: list[str], *,
         raise
     return _resumo(lote, comps, canais, modo="apply", aplicado=True, lote_id=lote_id, apagadas=apagadas,
                    taxa_shopee=estado_taxa_shopee(taxa_shopee, canais),
+                   impostos=_resumo_impostos(lote, estado_imp),
                    numeracao_nf=_resumo_numeracao(lote, estado_nf),
                    sem_vendas=sorted(f"{m.isoformat()[:7]}:{c}" for m, c in sem_vendas),
                    remover_marca=sorted(rotulo_chave(k) for k in remover))
