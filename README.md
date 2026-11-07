@@ -108,8 +108,8 @@ Observacao: o backend FastAPI e os pipelines Python nao ficam hospedados automat
 
 ### Publicacao atual (producao)
 
-- URL canonica (endereco operacional da Torre): `https://mktplace-ten.vercel.app`. O endereco anterior era `https://mktplace-gobeaute.vercel.app`.
-- `https://mktplace-blond.vercel.app` e apenas um alias que redireciona (HTTP 307) para o dominio canonico.
+- URL canonica (endereco operacional da Torre): `https://mktplace-ten.vercel.app`.
+- `https://mktplace-gobeaute.vercel.app` (endereco anterior) e `https://mktplace-blond.vercel.app` (seu antigo alias) hoje respondem HTTP 402 (`DEPLOYMENT_DISABLED`) e nao devem ser usados.
 - As URLs efemeras de deployment da Vercel (padrao `mktplace-<hash>-...vercel.app`) NAO sao o endereco da Torre: alem de serem descartaveis, ficam atras do SSO da Vercel e nao constam na allowlist de CORS do backend, o que faz a Torre cair em modo demonstracao/offline nelas. Use sempre o dominio canonico.
 - Com o login Google, o front chama a API pela mesma origem: `NEXT_PUBLIC_API_URL=/torre-api` e um rewrite `/torre-api/:path*` leva a chamada ao backend (`TORRE_API_ORIGIN=https://mktplace-api.onrender.com`). O cookie de sessao (`torre_session`) so chega ao backend assim; por isso o CORS deixa de ser o caminho principal. Se `NEXT_PUBLIC_API_URL` for relativo, `TORRE_API_ORIGIN` e obrigatorio e o `next build` falha sem ele. Em desenvolvimento local, `NEXT_PUBLIC_API_URL` segue apontando para `http://localhost:8080`. Passo a passo da virada: `docs/AUTH_GOOGLE_RUNBOOK.md`.
 - O CORS do backend so importa para quem chama a API direto de outra origem (ex.: `NEXT_PUBLIC_API_URL` absoluto); nesse caso ele precisa autorizar o dominio canonico (`Access-Control-Allow-Origin: https://mktplace-ten.vercel.app`); sem isso o frontend publicado nao consegue consumir a API e exibe o fallback offline.
