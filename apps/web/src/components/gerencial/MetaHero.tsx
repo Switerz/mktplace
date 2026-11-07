@@ -448,24 +448,24 @@ function Divisao({
   });
   return (
     <div className="mt-4 flex items-center gap-4 text-xs text-ink-muted tabular-nums">
-      <div className="relative h-[72px] w-[72px] shrink-0">
+      <div className="relative h-[84px] w-[84px] shrink-0">
       <svg
         viewBox="0 0 42 42"
         className="h-full w-full -rotate-90"
         role="img"
         aria-label={partes.map(({ c, v }) => `${CHANNEL_LABEL[c]} ${pct(v / total)}% do GMV`).join("; ")}
       >
-        <circle cx="21" cy="21" r="15.9" fill="none" className="stroke-raised" strokeWidth="6" />
+        <circle cx="21" cy="21" r="17" fill="none" className="stroke-raised" strokeWidth="4.5" />
         {arcos.map(({ c, tam, inicio: ini }) => (
           <circle
             key={c}
             cx="21"
             cy="21"
-            r="15.9"
+            r="17"
             fill="none"
             pathLength={100}
             className={`${TRACO[c]} cursor-pointer transition-opacity duration-150 ${ativo && ativo !== c ? "opacity-25" : ""}`}
-            strokeWidth={ativo === c ? 7.5 : 6}
+            strokeWidth={ativo === c ? 6 : 4.5}
             strokeDasharray={`${tam} ${100 - tam}`}
             strokeDashoffset={-ini}
             {...realce(c)}
