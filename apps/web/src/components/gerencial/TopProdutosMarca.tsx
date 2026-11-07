@@ -14,7 +14,6 @@ import { useEffect, useState } from "react";
 import { ChevronDown, Trophy } from "lucide-react";
 
 import KpiDrilldownDialog from "@/components/KpiDrilldownDialog";
-import MarketplaceFilter from "@/components/MarketplaceFilter";
 import TableScrollHint from "@/components/TableScrollHint";
 import InfoDica from "@/components/ui/InfoDica";
 import Segmented from "@/components/ui/Segmented";
@@ -34,6 +33,15 @@ const Grafico = dynamic(() => import("./TopProdutoGrafico"), {
 });
 
 const VISIVEIS = 5;
+type CanalCard = "todos" | Marketplace;
+const TODOS_CANAIS: Marketplace[] = ["tiktok", "ml", "shopee"];
+const ponto = (c: Marketplace) => <span aria-hidden="true" className={`h-2 w-2 rounded-full ${CHANNEL_DOT[c]}`} />;
+const OPCOES_CANAL: { valor: CanalCard; texto: string; icone?: React.ReactNode }[] = [
+  { valor: "todos", texto: "Todos" },
+  { valor: "tiktok", texto: "TikTok", icone: ponto("tiktok") },
+  { valor: "ml", texto: "Mercado Livre", icone: ponto("ml") },
+  { valor: "shopee", texto: "Shopee", icone: ponto("shopee") },
+];
 const rotuloMarca = (id: string) => MARCAS.find((m) => m.id === id)?.label ?? id.toUpperCase();
 const TH = "py-2 px-2 text-xs font-semibold uppercase tracking-wide text-ink-faint";
 
@@ -52,11 +60,13 @@ export default function TopProdutosMarca({ channels, brands, dateFrom, dateTo, c
   const [abertas, setAbertas] = useState<Record<string, boolean>>({});
   const [marcaSel, setMarcaSel] = useState<string | null>(null);
   const [aberto, setAberto] = useState<{ marca: string; produto: ProdutoTop } | null>(null);
-  // Canal do card: nasce igual ao filtro do topo e pode ser trocado so' aqui;
-  // quando o filtro do topo muda, o card volta a segui-lo.
-  const [canais, setCanais] = useState<Marketplace[]>(channels);
+  // Canal do card, escolha unica: nasce do filtro do topo (um canal so' = ele;
+  // mais de um = Todos) e volta a segui-lo quando o topo muda.
+  const doTopo = (): CanalCard => (channels.length === 1 ? channels[0] : "todos");
+  const [canal, setCanal] = useState<CanalCard>(doTopo);
   const canaisTopo = channels.join(",");
-  useEffect(() => setCanais(channels), [canaisTopo]); // `channels` muda de identidade a cada render
+  useEffect(() => setCanal(doTopo()), [canaisTopo]); // `channels` muda de identidade a cada render
+  const canais = canal === "todos" ? TODOS_CANAIS : [canal];
   const chave = [canais.join(","), brands.join(","), dateFrom, dateTo, compare].join("|");
 
   useEffect(() => {
@@ -91,7 +101,7 @@ export default function TopProdutosMarca({ channels, brands, dateFrom, dateTo, c
           </h2>
           <InfoDica texto="Ranking por receita do anúncio como foi vendido em cada canal: kit conta como kit, sem de-para. TikTok e Mercado Livre somam o mesmo GMV da Torre; Shopee usa o preço do item sem cancelados e brindes. Clique num produto para ver o detalhe." />
         </div>
-        <MarketplaceFilter value={canais} onChange={setCanais} />
+        <Segmented rotulo="Canal" opcoes={OPCOES_CANAL} valor={canal} aoEscolher={setCanal} className="whitespace-nowrap" />
       </div>
 
       {erro ? (
@@ -120,7 +130,7 @@ export default function TopProdutosMarca({ channels, brands, dateFrom, dateTo, c
           <div className="-mx-1 overflow-x-auto px-1 pb-1">
             <Segmented
               rotulo="Marca"
-              opcoes={dados.marcas.map((m) => ({ valor: m.marca, texto: `${rotuloMarca(m.marca)} · ${fmtBrlCurto(m.receita_marca)}` }))}
+              opcoes={dados.marcas.map((m) => ({ valor: m.marca, texto: rotuloMarca(m.marca) }))}
               valor={marca.marca}
               aoEscolher={setMarcaSel}
               className="whitespace-nowrap"
