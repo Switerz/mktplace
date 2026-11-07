@@ -181,16 +181,13 @@ function Resultado({ periodLabel, gmv, prevGmv, momPct, compareActive, loading, 
   );
 }
 
-/** "TikTok Shop fora da meta": o GMV desses canais nao entra no atingimento. */
+/** Canal sem meta (ex.: TikTok Shop): o GMV dele nao entra no atingimento. Regra fixa: vai no (i). */
 function ForaDaMeta({ canais }: { canais: Marketplace[] }) {
   if (!canais.length) return null;
   const nomes = canais.map((c) => CHANNEL_LABEL[c]).join(" e ");
   return (
-    <span
-      className="ml-1.5 inline-flex rounded-full border border-line px-2 py-0.5 text-xs font-medium normal-case tracking-normal text-ink-muted"
-      title={`${nomes} não tem meta: o GMV fica fora do atingimento.`}
-    >
-      {nomes} fora da meta
+    <span className="ml-1 inline-flex align-middle normal-case tracking-normal">
+      <InfoDica texto={`${nomes} não tem meta: o GMV fica fora do atingimento.`} />
     </span>
   );
 }
@@ -203,7 +200,8 @@ function BarraDaMeta({ progresso: p, mesMeta, comCurva, canaisForaDaMeta }: Prop
   const projecaoAlem = p.projecaoSobreMeta != null && p.projecaoSobreMeta > p.atingimento;
   // Com curva, "onde o plano esperava estar" nao e' dias/n: vale marcar.
   const mostraPlano = comCurva && !p.encerrado && p.diasComDado > 0 && mesMeta != null;
-  const diaDoPlano = mesMeta ? `${mesMeta}-${String(p.diasComDado).padStart(2, "0")}` : "";
+  const doPlano = Math.round(p.atingimentoDoPlano * 100);
+  const fimDoMes = mesMeta ? `${mesMeta}-${String(p.diasNoMes).padStart(2, "0")}` : "";
 
   return (
     <div>
@@ -247,25 +245,25 @@ function BarraDaMeta({ progresso: p, mesMeta, comCurva, canaisForaDaMeta }: Prop
       </div>
       <div className="mt-2 flex flex-wrap justify-between gap-x-4 gap-y-1 text-xs text-ink-muted tabular-nums">
         <span>
-          <b className="font-semibold text-ink">{fmtCompacto(p.realizado)}</b> ·{" "}
-          {p.encerrado ? "mês encerrado" : `${p.diasComDado}/${p.diasNoMes} dias`}
+          <b className="font-semibold text-ink">{fmtCompacto(p.realizado)}</b>
+          {p.encerrado ? (
+            " · mês encerrado"
+          ) : mostraPlano ? (
+            <span
+              className={doPlano > 100 ? "text-ok-ink" : doPlano < 100 ? "text-crit-ink" : ""}
+              title={`Plano até ${ddmm(`${mesMeta}-${String(p.diasComDado).padStart(2, "0")}`)}: ${fmtCompacto(p.planoAteData)}. Plano = meta acumulada pela curva de dias (dia da semana, 11/11, semana Black).`}
+            >
+              {" · "}
+              {doPlano > 100 ? "acima do plano" : doPlano < 100 ? "abaixo do plano" : "no plano"} ({doPlano}%)
+            </span>
+          ) : null}
         </span>
         {!p.encerrado && p.projecao != null && (
-          <span title="Projeção pelo ritmo dos dias com dado">
-            projeção <b className="font-semibold text-ink">{fmtCompacto(p.projecao)}</b> · {pct0(p.projecaoSobreMeta!)}
+          <span title={`Projeção pelo ritmo dos dias com dado: ${pct0(p.projecaoSobreMeta!)} da meta`}>
+            projeção <b className="font-semibold text-ink">{fmtCompacto(p.projecao)}</b>
           </span>
         )}
       </div>
-      {mostraPlano && (
-        <p
-          className="mt-1.5 flex items-center gap-1.5 text-xs text-ink-muted tabular-nums"
-          title="Plano = meta acumulada pela curva de dias (dia da semana, 11/11, semana Black)."
-        >
-          <span aria-hidden="true" className="h-2.5 w-1 rounded-full bg-ink-muted" />
-          plano até {ddmm(diaDoPlano)} <b className="font-semibold text-ink">{fmtCompacto(p.planoAteData)}</b> ·{" "}
-          {pct0(p.atingimentoDoPlano)} do plano
-        </p>
-      )}
       {p.porDiaNecessario != null && (
         <p
           className="mt-1.5 text-xs text-ink-muted tabular-nums"
@@ -275,8 +273,9 @@ function BarraDaMeta({ progresso: p, mesMeta, comCurva, canaisForaDaMeta }: Prop
               : `Faltam ${fmtCompacto(p.falta)} em ${p.diasRestantes} ${p.diasRestantes === 1 ? "dia" : "dias"}`
           }
         >
-          faltam <b className="font-semibold text-ink">{fmtCompacto(p.falta)}</b> · {fmtCompacto(p.porDiaNecessario)}/dia
+          faltam <b className="font-semibold text-ink">{fmtCompacto(p.porDiaNecessario)}</b> por dia
           {comCurva ? " normal" : ""}
+          {fimDoMes ? ` até ${ddmm(fimDoMes)}` : ""}
         </p>
       )}
     </div>
@@ -475,7 +474,7 @@ function Divisao({
         {doAtivo && (
           <span className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center leading-none">
             <span className="text-sm font-bold text-ink">{pct(doAtivo.v / total)}%</span>
-            <span className="mt-0.5 text-[10px] text-ink-muted">{fmtCompacto(doAtivo.v).replace(/^R\$\s*/, "")}</span>
+            <span className="mt-0.5 text-xs text-ink-muted">{fmtCompacto(doAtivo.v).replace(/^R\$\s*/, "")}</span>
           </span>
         )}
       </div>
