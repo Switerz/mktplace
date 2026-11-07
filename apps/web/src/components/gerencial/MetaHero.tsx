@@ -452,12 +452,16 @@ function Divisao({
             </div>
           </div>
           {s != null && (
-            <p className="mt-1 flex">
-              <span className="whitespace-nowrap" style={{ flex: s }}>
-                Full {Math.round(s * 100)}%
+            // Rotulos nas pontas (nao proporcionais): o pedaco claro pode ser estreito demais para o texto.
+            <p className="mt-1 flex flex-wrap justify-between gap-x-3">
+              <span className="whitespace-nowrap">
+                Full {fmtCompacto(v * s)} · {Math.round(s * 100)}%
               </span>
-              <span className="whitespace-nowrap text-right text-ink-faint" style={{ flex: 1 - s }}>
-                {Math.round((1 - s) * 100)}%
+              <span
+                className="whitespace-nowrap text-ink-faint"
+                title="Venda que não passou pelo Full: envio feito pela própria marca (ML: coleta/Flex; Shopee: envio do vendedor)."
+              >
+                Sem Full {fmtCompacto(v * (1 - s))} · {Math.round((1 - s) * 100)}%
               </span>
             </p>
           )}
