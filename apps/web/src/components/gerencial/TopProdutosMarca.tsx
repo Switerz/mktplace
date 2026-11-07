@@ -101,7 +101,27 @@ export default function TopProdutosMarca({ channels, brands, dateFrom, dateTo, c
           </h2>
           <InfoDica texto="Ranking por receita do anúncio como foi vendido em cada canal: kit conta como kit, sem de-para. TikTok e Mercado Livre somam o mesmo GMV da Torre; Shopee usa o preço do item sem cancelados e brindes. Clique num produto para ver o detalhe." />
         </div>
-        <Segmented rotulo="Canal" opcoes={OPCOES_CANAL} valor={canal} aoEscolher={setCanal} className="whitespace-nowrap" />
+      </div>
+
+      {/* Uma barra so', alinhada a' esquerda: marca | canal (como a barra do topo). */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        {marca && dados && (
+          <>
+            <div className="-mx-1 max-w-full overflow-x-auto px-1">
+              <Segmented
+                rotulo="Marca"
+                opcoes={dados.marcas.map((m) => ({ valor: m.marca, texto: rotuloMarca(m.marca) }))}
+                valor={marca.marca}
+                aoEscolher={setMarcaSel}
+                className="whitespace-nowrap"
+              />
+            </div>
+            <span aria-hidden="true" className="hidden h-6 w-px bg-line sm:block" />
+          </>
+        )}
+        <div className="-mx-1 max-w-full overflow-x-auto px-1">
+          <Segmented rotulo="Canal" opcoes={OPCOES_CANAL} valor={canal} aoEscolher={setCanal} className="whitespace-nowrap" />
+        </div>
       </div>
 
       {erro ? (
@@ -127,15 +147,6 @@ export default function TopProdutosMarca({ channels, brands, dateFrom, dateTo, c
       ) : (
         <>
         <div className="flex flex-col gap-2">
-          <div className="-mx-1 overflow-x-auto px-1 pb-1">
-            <Segmented
-              rotulo="Marca"
-              opcoes={dados.marcas.map((m) => ({ valor: m.marca, texto: rotuloMarca(m.marca) }))}
-              valor={marca.marca}
-              aoEscolher={setMarcaSel}
-              className="whitespace-nowrap"
-            />
-          </div>
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-faint">
             <span className="tabular-nums">{fmtBrlCurto(marca.receita_marca)} no período</span>
             {comparando && (
