@@ -26,7 +26,7 @@ def test_ranqueia_entre_canais_e_soma_total_uma_vez_por_canal():
             _linha("kokeshi", "1735", "Kit Facial Kokeshi", Decimal("10"), Decimal("500"), Decimal("1000"), 400, 900),
             _linha("kokeshi", "1736", "Gota de Colágeno", 20, 300, 1000, None, 900),
         ],
-        "gold.vw_ml_produto_daily": [
+        "silver.stg_ml_orders": [
             _linha("kokeshi", "KS03016", "Olhos de Gueixa", 5, 400, 600, 100, 100),
         ],
     }
@@ -76,7 +76,7 @@ def test_sem_marca_no_escopo_nao_consulta():
 
 def test_detalhe_serie_e_roas_do_ml():
     def consultar(sql, params):
-        if "ad_spend" in sql:
+        if "stg_ml_ads_items" in sql:
             return [{"investimento": Decimal("50"), "receita_ads": Decimal("200"), "ads_ate": date(2026, 11, 5)}]
         return [{"dia": "2026-11-01", "nome": "Kit Prebiotica", "pecas": 2, "receita": Decimal("100")},
                 {"dia": date(2026, 11, 2), "nome": None, "pecas": 1, "receita": 50}]
@@ -91,7 +91,7 @@ def test_detalhe_serie_e_roas_do_ml():
 def test_ads_do_ml_que_nao_chegaram_nao_viram_zero():
     def consultar(ads_ate):
         def c(sql, params):
-            if "ad_spend" in sql:
+            if "stg_ml_ads_items" in sql:
                 return [{"investimento": 0, "receita_ads": 0, "ads_ate": ads_ate}]
             return [{"dia": "2026-11-06", "nome": "Kit110", "pecas": 39, "receita": 4733}]
         return c

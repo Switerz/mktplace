@@ -6,13 +6,18 @@ sem de-para e sem explodir kit: se o kit vende mais, aparece o kit.
 
 Fontes (Data Mart), uma consulta por canal selecionado:
   TikTok  gold.fct_tiktok_product_daily  (product_id; soma = GMV da Torre)
-  ML      gold.vw_ml_produto_daily       (seller_sku; soma = GMV da Torre)
+  ML      silver.stg_ml_order_items x stg_ml_orders (pedidos pagos; soma = GMV
+          da Torre) e silver.stg_ml_ads_items para ads. NAO usar a
+          gold.vw_ml_produto_daily: e' view sem materializacao que agrega o
+          historico inteiro a cada consulta (FULL JOIN impede o filtro de data
+          descer) — 7 s por detalhe contra ~1 s direto nas silver.
   Shopee  silver.stg_shopee_order_items x stg_shopee_orders
           (sem cancelado/nao pago/brinde; preco do item, antes do cupom)
 """
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from typing import Callable, Optional
 
@@ -35,10 +40,12 @@ _BASE = {
           FROM gold.fct_tiktok_product_daily
          WHERE brand = ANY(:marcas) AND date BETWEEN :de AND :ate""",
     "ml": """
-        SELECT brand AS marca, COALESCE(NULLIF(seller_sku, ''), item_id) AS sku, title AS nome,
-               ref_date::date AS dia, units_sold AS pecas, revenue AS receita
-          FROM gold.vw_ml_produto_daily
-         WHERE brand = ANY(:marcas) AND ref_date BETWEEN :de AND :ate""",
+        SELECT o.brand AS marca, COALESCE(NULLIF(i.seller_sku, ''), i.item_id) AS sku, i.title AS nome,
+               o.date_created::date AS dia, i.quantity AS pecas, i.quantity * i.unit_price AS receita
+          FROM silver.stg_ml_order_items i
+          JOIN silver.stg_ml_orders o ON o.order_id = i.order_id AND o.brand = i.brand
+         WHERE o.status = 'paid' AND o.brand = ANY(:marcas)
+           AND o.date_created >= :de AND o.date_created < :ate_excl""",
     "shopee": """
         SELECT o.brand AS marca, COALESCE(NULLIF(i.sku, ''), i.item_id) AS sku, i.item_name AS nome,
                o.created_date_brt AS dia, i.quantity AS pecas, i.quantity * i.discounted_price AS receita
@@ -86,12 +93,14 @@ SQL_EXTRAS = {
     # venda e ad_spend 0 em TODOS os anuncios. `ads_ate` = ultimo dia com algum
     # ad na tabela, para nunca mostrar "R$ 0" onde o dado so' nao chegou.
     "ml": """
-        SELECT SUM(ad_spend) AS investimento, SUM(ad_revenue) AS receita_ads,
-               (SELECT MAX(ref_date)::date FROM gold.vw_ml_produto_daily
-                 WHERE ad_spend > 0 AND ref_date BETWEEN :fim_menos_10 AND :fim) AS ads_ate
-          FROM gold.vw_ml_produto_daily
-         WHERE brand = :marca AND COALESCE(NULLIF(seller_sku, ''), item_id) = :sku
-           AND ref_date BETWEEN :ini AND :fim""",
+        SELECT SUM(a.cost) AS investimento,
+               SUM(COALESCE(a.direct_amount, 0) + COALESCE(a.indirect_amount, 0)) AS receita_ads,
+               (SELECT MAX(ref_date) FROM silver.stg_ml_ads_items
+                 WHERE cost > 0 AND ref_date BETWEEN :fim_menos_10 AND :fim) AS ads_ate
+          FROM silver.stg_ml_ads_items a
+         WHERE a.brand = :marca AND a.ref_date BETWEEN :ini AND :fim
+           AND a.item_id IN (SELECT i.item_id FROM silver.stg_ml_order_items i
+                              WHERE i.brand = :marca AND COALESCE(NULLIF(i.seller_sku, ''), i.item_id) = :sku)""",
 }
 
 # Mesmos extras somados por MARCA, para a faixa "por canal" do card.
@@ -102,10 +111,11 @@ SQL_RESUMO = {
          WHERE brand = ANY(:marcas) AND date BETWEEN :ini AND :fim
          GROUP BY brand""",
     "ml": """
-        SELECT brand AS marca, SUM(ad_spend) AS investimento, SUM(ad_revenue) AS receita_ads,
-               (SELECT MAX(ref_date)::date FROM gold.vw_ml_produto_daily
-                 WHERE ad_spend > 0 AND ref_date BETWEEN :fim_menos_10 AND :fim) AS ads_ate
-          FROM gold.vw_ml_produto_daily
+        SELECT brand AS marca, SUM(cost) AS investimento,
+               SUM(COALESCE(direct_amount, 0) + COALESCE(indirect_amount, 0)) AS receita_ads,
+               (SELECT MAX(ref_date) FROM silver.stg_ml_ads_items
+                 WHERE cost > 0 AND ref_date BETWEEN :fim_menos_10 AND :fim) AS ads_ate
+          FROM silver.stg_ml_ads_items
          WHERE brand = ANY(:marcas) AND ref_date BETWEEN :ini AND :fim
          GROUP BY brand""",
 }
@@ -165,15 +175,22 @@ def get_top_produtos(
     # Sem comparacao, a janela anterior fica vazia (ini_ant > fim_ant).
     ini_ant, fim_ant = comparacao or (fim + timedelta(days=1), inicio)
     params = {
-        "marcas": escopo, "de": min(inicio, ini_ant), "ate": fim,
+        "marcas": escopo, "de": min(inicio, ini_ant), "ate": fim, "ate_excl": fim + timedelta(days=1),
         "ini": inicio, "fim": fim, "ini_ant": ini_ant, "fim_ant": fim_ant, "top_n": TOP_N,
+        "fim_menos_10": fim - timedelta(days=10),
     }
+    # Uma consulta por canal (+ resumos), em paralelo: a resposta espera a mais
+    # lenta, nao a soma delas.
+    tarefas = [("top", c, SQL_TOP.format(base=_BASE[c])) for c in canais] +               [("resumo", c, SQL_RESUMO[c]) for c in canais if c in SQL_RESUMO]
+    with ThreadPoolExecutor(max_workers=max(1, len(tarefas))) as pool:
+        respostas = list(pool.map(lambda t: consultar(t[2], params), tarefas)) if escopo else []
+    linhas_top = {c: r for (tipo, c, _), r in zip(tarefas, respostas) if tipo == "top"}
 
     produtos: dict[str, list[ProdutoTop]] = {}
     totais: dict[str, list[Optional[float]]] = {}
     por_canal: dict[str, dict[str, float]] = {}
-    for canal in canais if escopo else []:
-        for l in consultar(SQL_TOP.format(base=_BASE[canal]), params):
+    for canal in linhas_top:
+        for l in linhas_top[canal]:
             marca = l["marca"]
             t = totais.setdefault(marca, [0.0, None])
             # Totais da marca vem repetidos em cada linha do canal: soma uma vez por canal.
@@ -192,9 +209,10 @@ def get_top_produtos(
             ))
 
     resumo: dict[tuple[str, str], dict] = {}
-    for canal in [c for c in canais if c in SQL_RESUMO] if produtos else []:
-        for e in consultar(SQL_RESUMO[canal], {**params, "fim_menos_10": fim - timedelta(days=10)}):
-            resumo[(e["marca"], canal)] = e
+    for (tipo, canal, _), r in zip(tarefas, respostas):
+        if tipo == "resumo":
+            for e in r:
+                resumo[(e["marca"], canal)] = e
 
     blocos = []
     for marca, lista in produtos.items():
@@ -229,7 +247,7 @@ def get_detalhe(
     extras do canal somados em `inicio..fim`. None = anuncio sem venda."""
     de = fim - timedelta(days=364)
     linhas = consultar(SQL_SERIE.format(base=_BASE[canal]), {
-        "marcas": [marca], "de": de, "ate": fim, "marca": marca, "sku": sku,
+        "marcas": [marca], "de": de, "ate": fim, "ate_excl": fim + timedelta(days=1), "marca": marca, "sku": sku,
     })
     if not linhas:
         return None
