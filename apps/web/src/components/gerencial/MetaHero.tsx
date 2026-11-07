@@ -398,14 +398,17 @@ function SeloDoDia({ progressoDia, metasHref }: { progressoDia: ProgressoDia | n
   );
 }
 
-/** Listra branca sobre a cor do canal: a parte da fatia que NAO foi Full. */
-const LISTRA = "repeating-linear-gradient(135deg, rgb(255 255 255 / 0.55) 0 3px, transparent 3px 6px)";
+/** Classe literal por canal (o Tailwind so' gera classes escritas por extenso). */
+const TRACO: Record<Marketplace, string> = {
+  tiktok: "stroke-canal-tiktok",
+  ml: "stroke-canal-ml",
+  shopee: "stroke-canal-shopee",
+};
 
 /**
- * Uma barra = 100% do GMV. Em cima de cada fatia: a fatia do canal no GMV
- * (numero grande), o canal, o valor e a variacao. Dentro da fatia: a parte
- * cheia e' o Full ("Full 86%"), a listrada e' o que nao foi Full. Sem a medida
- * de Full (TikTok, ou fato indisponivel), a fatia fica lisa e inteira.
+ * Rosca da fatia de cada canal no GMV; ao lado, por canal: a fatia (numero
+ * grande), o valor, a variacao e quanto dele foi Full. Sem a medida de Full
+ * (TikTok, ou fato indisponivel), o canal aparece sem a linha de Full.
  */
 function Divisao({
   channels,
@@ -423,60 +426,69 @@ function Divisao({
   const partes = channels
     .map((c) => ({ c, v: gmvByChannel[c], s: c === "tiktok" ? null : shareFull?.[c] ?? null }))
     .filter((x): x is { c: Marketplace; v: number; s: number | null } => x.v != null && x.v > 0);
-  const algumFull = partes.some((p) => p.s != null);
-  if (!total || partes.length === 0 || (partes.length < 2 && !algumFull)) return null;
+  if (!total || partes.length === 0 || (partes.length < 2 && partes[0].s == null)) return null;
   const pct = (x: number) => Math.round(x * 100);
+  // Circunferencia 100 (pathLength): cada fatia e' o proprio %, com uma folga entre elas.
+  const folga = partes.length > 1 ? 1 : 0;
+  let inicio = 0;
+  const arcos = partes.map(({ c, v }) => {
+    const tam = (v / total) * 100;
+    const arco = { c, tam: Math.max(tam - folga, 0), inicio };
+    inicio += tam;
+    return arco;
+  });
   return (
-    <div className="mt-4 text-xs text-ink-muted tabular-nums">
-      <div className="flex gap-0.5">
-        {partes.map(({ c, v }) => (
-          <p key={c} className="min-w-0 leading-snug" style={{ flex: v }}>
-            <span className="text-sm font-bold text-ink">{pct(v / total)}%</span>{" "}
-            <span className="font-semibold text-ink">{CHANNEL_LABEL[c]}</span>{" "}
-            <span className="text-ink-faint">{fmtCompacto(v)}</span> <Variacao pct={varGmvByChannel?.[c] ?? null} />
-          </p>
-        ))}
-      </div>
-      <div
-        className="mt-1 flex h-5 gap-0.5 overflow-hidden rounded-md"
+    <div className="mt-4 flex items-center gap-4 text-xs text-ink-muted tabular-nums">
+      <svg
+        viewBox="0 0 42 42"
+        className="h-[72px] w-[72px] shrink-0 -rotate-90"
         role="img"
-        aria-label={partes
-          .map(({ c, s }) => `${CHANNEL_LABEL[c]}: ${s != null ? `${pct(s)}% Full` : "sem medida de Full"}`)
-          .join("; ")}
+        aria-label={partes.map(({ c, v }) => `${CHANNEL_LABEL[c]} ${pct(v / total)}% do GMV`).join("; ")}
       >
-        {partes.map(({ c, v, s }) => (
-          <div
+        <circle cx="21" cy="21" r="15.9" fill="none" className="stroke-raised" strokeWidth="6" />
+        {arcos.map(({ c, tam, inicio: ini }) => (
+          <circle
             key={c}
-            className="flex min-w-0"
-            style={{ flex: v }}
+            cx="21"
+            cy="21"
+            r="15.9"
+            fill="none"
+            pathLength={100}
+            className={TRACO[c]}
+            strokeWidth="6"
+            strokeDasharray={`${tam} ${100 - tam}`}
+            strokeDashoffset={-ini}
+          />
+        ))}
+      </svg>
+      <ul className="flex min-w-0 flex-wrap gap-x-6 gap-y-2">
+        {partes.map(({ c, v, s }) => (
+          <li
+            key={c}
+            className="min-w-0 leading-snug"
             title={
               c === "shopee" && s != null
                 ? "Full = FBS. A proporção é medida nas contas da Shopee com API (sem a Kokeshi, que chega por arquivo) e aplicada ao GMV do canal."
                 : undefined
             }
           >
-            {s != null ? (
-              <>
-                <div
-                  className={`${PONTO[c]} flex min-w-0 items-center overflow-hidden whitespace-nowrap px-1.5 text-[11px] font-semibold text-white`}
-                  style={{ flex: s }}
-                  title={`Full ${fmtCompacto(v * s)} · ${pct(s)}%`}
-                >
-                  Full {pct(s)}%
-                </div>
-                <div
-                  className={PONTO[c]}
-                  style={{ flex: 1 - s, backgroundImage: LISTRA }}
-                  title={`Sem Full ${fmtCompacto(v * (1 - s))} · ${pct(1 - s)}% (envio da própria marca)`}
-                />
-              </>
-            ) : (
-              <div className={`${PONTO[c]} flex-1`} />
-            )}
-          </div>
+            <p>
+              <span aria-hidden="true" className={`mr-1.5 inline-block h-2 w-2 rounded-full ${PONTO[c]}`} />
+              <span className="text-sm font-bold text-ink">{pct(v / total)}%</span>{" "}
+              <span className="font-semibold text-ink">{CHANNEL_LABEL[c]}</span>
+            </p>
+            <p className="pl-3.5">
+              {fmtCompacto(v)} <Variacao pct={varGmvByChannel?.[c] ?? null} />
+              {s != null && (
+                <>
+                  {" "}
+                  · <span className="font-semibold text-ink">{pct(s)}% Full</span>
+                </>
+              )}
+            </p>
+          </li>
         ))}
-      </div>
-      {algumFull && <p className="mt-1 text-ink-faint">listrado = sem Full (envio da própria marca)</p>}
+      </ul>
     </div>
   );
 }
