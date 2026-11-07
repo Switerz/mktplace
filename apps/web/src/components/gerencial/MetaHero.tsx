@@ -398,11 +398,17 @@ function SeloDoDia({ progressoDia, metasHref }: { progressoDia: ProgressoDia | n
   );
 }
 
+/** Classe literal por canal (o Tailwind so' gera classes escritas por extenso). */
+const TRACO: Record<Marketplace, string> = {
+  tiktok: "stroke-canal-tiktok",
+  ml: "stroke-canal-ml",
+  shopee: "stroke-canal-shopee",
+};
+
 /**
- * Uma barra so': um trecho por canal (largura = GMV do canal), e dentro de
- * cada trecho o tom cheio e' o Full e o claro, o resto. O rotulo fica colado
- * no pedaco: canal, valor e variacao em cima; "Full 84%" embaixo. Sem a
- * medida de Full (TikTok, ou fato indisponivel), o trecho fica inteiro.
+ * Rosca da fatia de cada canal no GMV; ao lado, por canal: a fatia (numero
+ * grande), o valor, a variacao e quanto dele foi Full. Sem a medida de Full
+ * (TikTok, ou fato indisponivel), o canal aparece sem a linha de Full.
  */
 function Divisao({
   channels,
@@ -421,53 +427,69 @@ function Divisao({
     .map((c) => ({ c, v: gmvByChannel[c], s: c === "tiktok" ? null : shareFull?.[c] ?? null }))
     .filter((x): x is { c: Marketplace; v: number; s: number | null } => x.v != null && x.v > 0);
   if (!total || partes.length === 0 || (partes.length < 2 && partes[0].s == null)) return null;
+  const pct = (x: number) => Math.round(x * 100);
+  // Circunferencia 100 (pathLength): cada fatia e' o proprio %, com uma folga entre elas.
+  const folga = partes.length > 1 ? 1 : 0;
+  let inicio = 0;
+  const arcos = partes.map(({ c, v }) => {
+    const tam = (v / total) * 100;
+    const arco = { c, tam: Math.max(tam - folga, 0), inicio };
+    inicio += tam;
+    return arco;
+  });
   return (
-    <ul className="mt-4 flex gap-3">
-      {partes.map(({ c, v, s }) => (
-        <li
-          key={c}
-          className="flex min-w-[7.5rem] flex-col text-xs text-ink-muted tabular-nums"
-          style={{ flex: `${v} 1 0` }}
-          title={
-            c === "shopee" && s != null
-              ? "Full = FBS. A proporção é medida nas contas da Shopee com API (sem a Kokeshi, que chega por arquivo) e aplicada ao GMV do canal."
-              : undefined
-          }
-        >
-          <p className="leading-snug">
-            <span className="font-semibold text-ink">{CHANNEL_LABEL[c]}</span> {fmtCompacto(v)} ·{" "}
-            {Math.round((v / total) * 100)}% <Variacao pct={varGmvByChannel?.[c] ?? null} />
-          </p>
-          {/* mt-auto: rotulo em 1 ou 2 linhas, as barras dos canais ficam na mesma altura. */}
-          <div className="mt-auto pt-1">
-            <div className="flex h-1.5 gap-0.5 overflow-hidden rounded-full" aria-hidden="true">
-              {s != null ? (
-                <>
-                  <div className={PONTO[c]} style={{ flex: s }} />
-                  <div className={`${PONTO[c]} opacity-30`} style={{ flex: 1 - s }} />
-                </>
-              ) : (
-                <div className={`${PONTO[c]} flex-1`} />
-              )}
-            </div>
-          </div>
-          {s != null && (
-            // Rotulos nas pontas (nao proporcionais): o pedaco claro pode ser estreito demais para o texto.
-            <p className="mt-1 flex flex-wrap justify-between gap-x-3">
-              <span className="whitespace-nowrap">
-                Full {fmtCompacto(v * s)} · {Math.round(s * 100)}%
-              </span>
-              <span
-                className="whitespace-nowrap text-ink-faint"
-                title="Venda que não passou pelo Full: envio feito pela própria marca (ML: coleta/Flex; Shopee: envio do vendedor)."
-              >
-                Sem Full {fmtCompacto(v * (1 - s))} · {Math.round((1 - s) * 100)}%
-              </span>
+    <div className="mt-4 flex items-center gap-4 text-xs text-ink-muted tabular-nums">
+      <svg
+        viewBox="0 0 42 42"
+        className="h-[72px] w-[72px] shrink-0 -rotate-90"
+        role="img"
+        aria-label={partes.map(({ c, v }) => `${CHANNEL_LABEL[c]} ${pct(v / total)}% do GMV`).join("; ")}
+      >
+        <circle cx="21" cy="21" r="15.9" fill="none" className="stroke-raised" strokeWidth="6" />
+        {arcos.map(({ c, tam, inicio: ini }) => (
+          <circle
+            key={c}
+            cx="21"
+            cy="21"
+            r="15.9"
+            fill="none"
+            pathLength={100}
+            className={TRACO[c]}
+            strokeWidth="6"
+            strokeDasharray={`${tam} ${100 - tam}`}
+            strokeDashoffset={-ini}
+          />
+        ))}
+      </svg>
+      <ul className="flex min-w-0 flex-wrap gap-x-6 gap-y-2">
+        {partes.map(({ c, v, s }) => (
+          <li
+            key={c}
+            className="min-w-0 leading-snug"
+            title={
+              c === "shopee" && s != null
+                ? "Full = FBS. A proporção é medida nas contas da Shopee com API (sem a Kokeshi, que chega por arquivo) e aplicada ao GMV do canal."
+                : undefined
+            }
+          >
+            <p>
+              <span aria-hidden="true" className={`mr-1.5 inline-block h-2 w-2 rounded-full ${PONTO[c]}`} />
+              <span className="text-sm font-bold text-ink">{pct(v / total)}%</span>{" "}
+              <span className="font-semibold text-ink">{CHANNEL_LABEL[c]}</span>
             </p>
-          )}
-        </li>
-      ))}
-    </ul>
+            <p className="pl-3.5">
+              {fmtCompacto(v)} <Variacao pct={varGmvByChannel?.[c] ?? null} />
+              {s != null && (
+                <>
+                  {" "}
+                  · <span className="font-semibold text-ink">{pct(s)}% Full</span>
+                </>
+              )}
+            </p>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
