@@ -16,6 +16,7 @@
  * mensal ganha a marca de onde o plano esperava estar ate' o ultimo dia com dado.
  */
 import Link from "next/link";
+import { useState } from "react";
 import { ArrowDownRight, ArrowUpRight, Target, TriangleAlert } from "lucide-react";
 
 import type { Marketplace } from "@/lib/mock-data";
@@ -423,11 +424,19 @@ function Divisao({
   shareFull: Partial<Record<Marketplace, number | null>> | null;
   total: number | null;
 }) {
+  // Canal sob o mouse (ou foco do teclado): destaca a fatia e mostra o valor no centro.
+  // Antes de qualquer return: hook nunca fica atras de condicao.
+  const [ativo, setAtivo] = useState<Marketplace | null>(null);
   const partes = channels
     .map((c) => ({ c, v: gmvByChannel[c], s: c === "tiktok" ? null : shareFull?.[c] ?? null }))
     .filter((x): x is { c: Marketplace; v: number; s: number | null } => x.v != null && x.v > 0);
   if (!total || partes.length === 0 || (partes.length < 2 && partes[0].s == null)) return null;
   const pct = (x: number) => Math.round(x * 100);
+  const realce = (c: Marketplace) => ({
+    onMouseEnter: () => setAtivo(c),
+    onMouseLeave: () => setAtivo(null),
+  });
+  const doAtivo = partes.find((p) => p.c === ativo) ?? null;
   // Circunferencia 100 (pathLength): cada fatia e' o proprio %, com uma folga entre elas.
   const folga = partes.length > 1 ? 1 : 0;
   let inicio = 0;
@@ -439,33 +448,48 @@ function Divisao({
   });
   return (
     <div className="mt-4 flex items-center gap-4 text-xs text-ink-muted tabular-nums">
+      <div className="relative h-[84px] w-[84px] shrink-0">
       <svg
         viewBox="0 0 42 42"
-        className="h-[72px] w-[72px] shrink-0 -rotate-90"
+        className="h-full w-full -rotate-90"
         role="img"
         aria-label={partes.map(({ c, v }) => `${CHANNEL_LABEL[c]} ${pct(v / total)}% do GMV`).join("; ")}
       >
-        <circle cx="21" cy="21" r="15.9" fill="none" className="stroke-raised" strokeWidth="6" />
+        <circle cx="21" cy="21" r="17" fill="none" className="stroke-raised" strokeWidth="4.5" />
         {arcos.map(({ c, tam, inicio: ini }) => (
           <circle
             key={c}
             cx="21"
             cy="21"
-            r="15.9"
+            r="17"
             fill="none"
             pathLength={100}
-            className={TRACO[c]}
-            strokeWidth="6"
+            className={`${TRACO[c]} cursor-pointer transition-opacity duration-150 ${ativo && ativo !== c ? "opacity-25" : ""}`}
+            strokeWidth={ativo === c ? 6 : 4.5}
             strokeDasharray={`${tam} ${100 - tam}`}
             strokeDashoffset={-ini}
+            {...realce(c)}
           />
         ))}
       </svg>
+        {doAtivo && (
+          <span className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center leading-none">
+            <span className="text-sm font-bold text-ink">{pct(doAtivo.v / total)}%</span>
+            <span className="mt-0.5 text-[10px] text-ink-muted">{fmtCompacto(doAtivo.v).replace(/^R\$\s*/, "")}</span>
+          </span>
+        )}
+      </div>
       <ul className="flex min-w-0 flex-wrap gap-x-6 gap-y-2">
         {partes.map(({ c, v, s }) => (
           <li
             key={c}
-            className="min-w-0 leading-snug"
+            tabIndex={0}
+            onFocus={() => setAtivo(c)}
+            onBlur={() => setAtivo(null)}
+            {...realce(c)}
+            className={`min-w-0 cursor-default rounded leading-snug transition-opacity duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+              ativo && ativo !== c ? "opacity-40" : ""
+            }`}
             title={
               c === "shopee" && s != null
                 ? "Full = FBS. A proporção é medida nas contas da Shopee com API (sem a Kokeshi, que chega por arquivo) e aplicada ao GMV do canal."
